@@ -46,13 +46,20 @@ class RecordingAgent:
 
 
 class FailingAgent:
-    def __init__(self, agent_id: str, message: str = "unavailable") -> None:
+    def __init__(self, agent_id: str, error: Exception | str = "unavailable") -> None:
         self.agent_id = agent_id
-        self._message = message
+        self._error = error
 
     def analyze(self, snapshot: SceneSnapshot) -> tuple[RiskClaim, ...]:
         del snapshot
-        raise RuntimeError(self._message)
+        if isinstance(self._error, str):
+            raise RuntimeError(self._error)
+        raise self._error
+
+
+class UnprintableError(Exception):
+    def __str__(self) -> str:
+        raise RuntimeError("string conversion failed")
 
 
 class RecordingCritic:
@@ -181,3 +188,85 @@ def test_make_analysis_derives_a_finite_neutral_review_when_omitted() -> None:
         challenged_claim_ids=(),
         reasons=(),
     )
+
+
+def test_analysis_result_deeply_freezes_caller_owned_claim_and_review_sequences() -> None:
+    evidence = ["observed"]
+    assumptions = ["constant_velocity"]
+    supported_agent_ids = ["hazard"]
+    challenged_claim_ids = ["hazard:1:none:test"]
+    reasons = ["reviewed"]
+    claim = make_claim(evidence=evidence, assumptions=assumptions)  # type: ignore[arg-type]
+    review = CriticReview(
+        conflict_score=0.0,
+        unresolved_conflict=False,
+        max_severity=0.0,
+        supported_agent_ids=supported_agent_ids,  # type: ignore[arg-type]
+        challenged_claim_ids=challenged_claim_ids,  # type: ignore[arg-type]
+        reasons=reasons,  # type: ignore[arg-type]
+    )
+
+    result = AgentAnalysisResult((claim,), (), (), review)
+    evidence.append("mutated")
+    assumptions.append("mutated")
+    supported_agent_ids.append("nominal")
+    challenged_claim_ids.append("extra")
+    reasons.append("mutated")
+
+    assert result.claims[0].evidence == ("observed",)
+    assert result.claims[0].assumptions == ("constant_velocity",)
+    assert result.review.supported_agent_ids == ("hazard",)
+    assert result.review.challenged_claim_ids == ("hazard:1:none:test",)
+    assert result.review.reasons == ("reviewed",)
+
+
+@pytest.mark.parametrize(
+    ("failed_agent_ids", "errors"),
+    [
+        (("nominal",), ()),
+        (("nominal",), ("nominal:RuntimeError:first", "nominal:RuntimeError:second")),
+        (("nominal",), ("hazard:RuntimeError:unrelated",)),
+        (("nominal", "hazard"), ("hazard:RuntimeError:first", "nominal:RuntimeError:second")),
+        (("nominal", "hazard"), ("nominal:RuntimeError:same", "nominal:RuntimeError:same")),
+    ],
+)
+def test_analysis_result_rejects_invalid_failed_agent_error_mapping(
+    failed_agent_ids: tuple[str, ...], errors: tuple[str, ...]
+) -> None:
+    with pytest.raises(ValueError, match="errors"):
+        AgentAnalysisResult(
+            (),
+            failed_agent_ids,
+            errors,
+            CriticReview(0.0, False, 0.0, (), (), ()),
+        )
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (
+            RuntimeError("first\nsecond\rthird\tfourth\x00fifth\u2028sixth"),
+            "nominal:RuntimeError:first second third fourth fifth sixth",
+        ),
+        (UnprintableError(), "nominal:UnprintableError:<unprintable>"),
+        (RuntimeError("x" * 300), "nominal:RuntimeError:" + "x" * 256),
+    ],
+)
+def test_specialist_failure_errors_are_sanitized_bounded_and_isolated(
+    error: Exception, expected: str
+) -> None:
+    calls: list[str] = []
+    suite = AgentSuite(
+        nominal=FailingAgent("nominal", error),
+        hazard=RecordingAgent("hazard", calls),
+        rule=RecordingAgent("rule", calls),
+        critic=RecordingCritic(calls),
+    )
+
+    result = analyze_safely(suite, make_snapshot())
+
+    assert result.errors == (expected,)
+    assert result.failed_agent_ids == ("nominal",)
+    assert tuple(claim.agent_id for claim in result.claims) == ("hazard", "rule")
+    assert result.review.reasons == ("agent_analysis_failed:nominal",)
