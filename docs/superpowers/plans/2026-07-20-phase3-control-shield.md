@@ -846,7 +846,7 @@ Run: `.venv\Scripts\python.exe -m pytest tests\unit\safety\test_shield.py -v`
 
 Expected: the complete matrix passes without randomized inputs.
 
-- [ ] **Step 7: Commit Shield independently**
+- [x] **Step 7: Commit Shield independently**
 
 ```powershell
 git add src\mad_driving\interfaces src\mad_driving\safety tests\unit\safety
@@ -867,7 +867,7 @@ git commit -m "feat: add monotone safety shield"
 - Produces: `update(error, dt_s, lower, upper) -> float`, `reset() -> None`.
 - Exposes read-only `integral` and `previous_error` properties for deterministic tests and diagnostics.
 
-- [ ] **Step 1: Write failing P/I/D, saturation, and reset tests**
+- [x] **Step 1: Write failing P/I/D, saturation, and reset tests**
 
 ```python
 import math
@@ -910,13 +910,13 @@ def test_pid_rejects_non_finite_values(value: float) -> None:
 
 Also test lower saturation, integral clipping, non-positive `dt_s`, and `lower > upper`.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run: `.venv\Scripts\python.exe -m pytest tests\unit\control\test_pid.py -v`
 
 Expected: import failure for `BoundedPID`.
 
-- [ ] **Step 3: Implement conditional integration exactly**
+- [x] **Step 3: Implement conditional integration exactly**
 
 ```python
 class BoundedPID:
@@ -950,7 +950,7 @@ class BoundedPID:
 
 Constructor validation rejects negative gains, non-positive integral limit, and non-finite inputs.
 
-- [ ] **Step 4: Verify GREEN and format**
+- [x] **Step 4: Verify GREEN and format**
 
 Run: `.venv\Scripts\python.exe -m pytest tests\unit\control\test_pid.py -v`
 
