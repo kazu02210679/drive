@@ -322,3 +322,26 @@ No `evaluation/` directory or `evaluations.npz` exists. A fresh
 prediction steps with finite observations and rewards, without termination or
 truncation. Together the final verification exercised `7,244` simulator steps: `6,144`
 training + `1,000` callback evaluation + `100` checkpoint reload.
+
+### Broad-review lifecycle follow-up
+
+The first whole-branch re-review found no Critical issue and three further Important
+lifecycle gaps: staging-directory deletion could mask a training exception, an
+intermediate process-operation exception could skip the later kill stage, and failed
+partial-vector cleanup could replace the original constructor exception. It also found
+one minor config mismatch: `standstill_speed_mps` allowed zero although speed thresholds
+are positive in the approved design.
+
+Additional TDD evidence:
+
+- RED: `6 failed, 39 passed` for staging cleanup, operation escalation, constructor
+  exception preservation, and the zero threshold;
+- GREEN: the focused config/training unit set passed, `45 passed, 14 warnings`;
+- real/focused regression passed, `59 passed, 19 warnings`, including real PPO
+  save/load/resume and real MetaDrive subprocess isolation.
+
+Each process operation is now independently guarded, so join or terminate failure does
+not prevent the final kill attempt. Final liveness remains the success criterion.
+Staging and vector cleanup failures are aggregated: they replace an otherwise successful
+return, but are attached as notes when a primary training or construction exception
+already exists. `standstill_speed_mps` now validates with `gt=0.0`.

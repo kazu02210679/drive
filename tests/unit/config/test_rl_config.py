@@ -76,3 +76,8 @@ def test_phase4_models_reject_invalid_or_coerced_values(
 def test_ppo_rollout_size_must_be_divisible_by_batch() -> None:
     with pytest.raises(ValidationError, match="batch_size"):
         PPOConfig(n_steps=10, num_envs=1, batch_size=6)
+
+
+def test_standstill_speed_threshold_must_be_positive() -> None:
+    with pytest.raises(ValidationError, match="standstill_speed_mps"):
+        RewardConfig(standstill_speed_mps=0.0)

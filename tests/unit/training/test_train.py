@@ -554,6 +554,38 @@ def test_failed_run_preserves_all_existing_checkpoint_artifacts(
     assert_no_invocation_staging(run_dir)
 
 
+def test_staging_cleanup_failure_does_not_mask_training_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    FakePPO.fail_learn = True
+
+    def fail_staging_cleanup(path: Path) -> None:
+        del path
+        raise OSError("staging cleanup failed")
+
+    monkeypatch.setattr(train_module.shutil, "rmtree", fail_staging_cleanup)
+
+    with pytest.raises(RuntimeError, match="learn failed") as raised:
+        run_with_fakes(make_config(), tmp_path / "learn-and-staging-cleanup")
+
+    assert any("staging cleanup failed" in note for note in raised.value.__notes__)
+
+
+def test_staging_cleanup_failure_replaces_success_with_explicit_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_staging_cleanup(path: Path) -> None:
+        del path
+        raise OSError("staging cleanup failed")
+
+    monkeypatch.setattr(train_module.shutil, "rmtree", fail_staging_cleanup)
+
+    with pytest.raises(RuntimeError, match="Training resource cleanup failed"):
+        run_with_fakes(make_config(), tmp_path / "successful-staging-cleanup-failure")
+
+
 def test_success_stages_then_promotes_best_final_and_periodic_checkpoints(
     tmp_path: Path,
 ) -> None:
@@ -758,6 +790,22 @@ class FakeProcess:
         self.join_calls.append(timeout)
 
 
+class OperationFailingProcess(FakeProcess):
+    def __init__(self) -> None:
+        super().__init__(exits_on_terminate=False, exits_on_kill=True)
+        self.join_failures_remaining = 1
+
+    def join(self, timeout: float | None = None) -> None:
+        self.join_calls.append(timeout)
+        if self.join_failures_remaining:
+            self.join_failures_remaining -= 1
+            raise OSError("join failed")
+
+    def terminate(self) -> None:
+        self.terminate_calls += 1
+        raise OSError("terminate failed")
+
+
 class ProcessFailingSubprocVecEnv:
     latest: ClassVar["ProcessFailingSubprocVecEnv | None"] = None
 
@@ -790,6 +838,18 @@ class UnsafeProcessFailingSubprocVecEnv:
         raise OSError("subprocess handshake failed")
 
 
+class OperationFailingSubprocVecEnv:
+    latest: ClassVar["OperationFailingSubprocVecEnv | None"] = None
+
+    def __init__(self, env_fns: list[Callable[[], FakeEnv]]) -> None:
+        del env_fns
+        self.remotes = (FakeRemote(),)
+        self.work_remotes = (FakeRemote(),)
+        self.processes = [OperationFailingProcess()]
+        type(self).latest = self
+        raise OSError("subprocess operation failed")
+
+
 def test_subprocess_cleanup_confirms_workers_dead_before_reporting_construction_failure(
     tmp_path: Path,
 ) -> None:
@@ -815,7 +875,7 @@ def test_subprocess_cleanup_confirms_workers_dead_before_reporting_construction_
     assert killed.join_calls == [1.0, 1.0]
     assert already_dead.terminate_calls == 0
     assert already_dead.kill_calls == 0
-    assert already_dead.join_calls == [1.0]
+    assert already_dead.join_calls == []
     assert all(process.is_alive() is False for process in partial.processes)
     assert all(process.is_alive_calls >= 2 for process in partial.processes)
     assert dummy.created == []
@@ -824,7 +884,7 @@ def test_subprocess_cleanup_confirms_workers_dead_before_reporting_construction_
 def test_subprocess_cleanup_refuses_fallback_when_worker_survives(tmp_path: Path) -> None:
     dummy = VecFactory()
 
-    with pytest.raises(RuntimeError, match="worker cleanup could not be confirmed"):
+    with pytest.raises(OSError, match="subprocess handshake failed") as raised:
         run_with_fakes(
             make_config(num_envs=3),
             tmp_path / "unsafe-process",
@@ -841,6 +901,25 @@ def test_subprocess_cleanup_refuses_fallback_when_worker_survives(tmp_path: Path
     assert process.join_calls == [1.0, 1.0]
     assert process.is_alive() is True
     assert dummy.created == []
+    assert any("worker cleanup could not be confirmed" in note for note in raised.value.__notes__)
+
+
+def test_partial_cleanup_continues_to_kill_after_join_and_terminate_fail(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(OSError, match="subprocess operation failed"):
+        run_with_fakes(
+            make_config(num_envs=3),
+            tmp_path / "operation-failure",
+            subproc_factory=OperationFailingSubprocVecEnv,
+        )
+
+    partial = OperationFailingSubprocVecEnv.latest
+    assert partial is not None
+    process = partial.processes[0]
+    assert process.terminate_calls == 1
+    assert process.kill_calls == 1
+    assert process.is_alive() is False
 
 
 class GracefulRemote(FakeRemote):
@@ -923,6 +1002,19 @@ def test_successful_training_confirms_subprocess_evaluation_worker_exited(
     assert process.kill_calls == 0
     assert process.is_alive() is False
     assert evaluation.closed is True
+
+
+def test_runtime_cleanup_continues_to_kill_after_join_and_terminate_fail() -> None:
+    vector_env = RuntimeProcessVecEnv([lambda: FakeEnv(0)])
+    process = OperationFailingProcess()
+    vector_env.processes = [process]
+    vector_env.remotes = (FakeRemote(),)
+
+    train_module._close_vector_env(vector_env)
+
+    assert process.terminate_calls == 1
+    assert process.kill_calls == 1
+    assert process.is_alive() is False
 
 
 def test_worker_cleanup_failure_replaces_success_with_explicit_error(tmp_path: Path) -> None:

@@ -95,6 +95,42 @@ def _safe_close(resource: object | None) -> None:
             pass
 
 
+def _process_is_alive(process: object) -> bool:
+    try:
+        return bool(process.is_alive())  # type: ignore[attr-defined]
+    except Exception:
+        return True
+
+
+def _attempt_process_operation(operation: Callable[..., object], *args: object) -> None:
+    try:
+        operation(*args)
+    except Exception:
+        pass
+
+
+def _stop_processes(processes: list[object], *, graceful_join: bool) -> bool:
+    """Escalate through join, terminate, and kill despite intermediate failures."""
+
+    for process in processes:
+        join = getattr(process, "join", None)
+        if graceful_join and callable(join):
+            _attempt_process_operation(join, 1.0)
+        if _process_is_alive(process):
+            terminate = getattr(process, "terminate", None)
+            if callable(terminate):
+                _attempt_process_operation(terminate)
+            if callable(join):
+                _attempt_process_operation(join, 1.0)
+        if _process_is_alive(process):
+            kill = getattr(process, "kill", None)
+            if callable(kill):
+                _attempt_process_operation(kill)
+            if callable(join):
+                _attempt_process_operation(join, 1.0)
+    return any(_process_is_alive(process) for process in processes)
+
+
 def _close_vector_env(resource: object | None) -> None:
     """Close a vector env and prove subprocess workers have stopped."""
 
@@ -117,19 +153,7 @@ def _close_vector_env(resource: object | None) -> None:
                 except Exception:
                     pass
 
-    for process in processes:
-        try:
-            process.join(timeout=1.0)
-            if process.is_alive():
-                process.terminate()
-                process.join(timeout=1.0)
-            if process.is_alive():
-                kill = getattr(process, "kill", None)
-                if callable(kill):
-                    kill()
-                    process.join(timeout=1.0)
-        except Exception:
-            pass
+    workers_alive = _stop_processes(processes, graceful_join=True)
 
     for remote in remotes:
         try:
@@ -141,12 +165,6 @@ def _close_vector_env(resource: object | None) -> None:
     except Exception:
         pass
 
-    workers_alive = False
-    for process in processes:
-        try:
-            workers_alive = process.is_alive() or workers_alive
-        except Exception:
-            workers_alive = True
     if workers_alive:
         raise _VectorEnvCleanupError("Subprocess worker cleanup could not be confirmed")
 
@@ -159,34 +177,15 @@ def _cleanup_partial_vector_env(
 
     processes = getattr(vector_env, "processes", None)
     if isinstance(processes, list):
-        cleanup_errors: list[Exception] = []
         for remote_group_name in ("remotes", "work_remotes"):
             for remote in getattr(vector_env, remote_group_name, ()):
                 try:
                     remote.close()
-                except Exception as exc:
-                    cleanup_errors.append(exc)
-        for process in processes:
-            try:
-                if process.is_alive():
-                    process.terminate()
-                process.join(timeout=1.0)
-                if process.is_alive():
-                    kill = getattr(process, "kill", None)
-                    if callable(kill):
-                        kill()
-                        process.join(timeout=1.0)
-            except Exception as exc:
-                cleanup_errors.append(exc)
-        workers_alive = False
-        for process in processes:
-            try:
-                workers_alive = process.is_alive() or workers_alive
-            except Exception as exc:
-                cleanup_errors.append(exc)
-                workers_alive = True
+                except Exception:
+                    pass
+        workers_alive = _stop_processes(processes, graceful_join=False)
         owner.close()
-        if cleanup_errors or workers_alive:
+        if workers_alive:
             raise _VectorEnvCleanupError("Subprocess worker cleanup could not be confirmed")
         return
 
@@ -216,8 +215,11 @@ def _construct_vector_env(
         instance = factory_class.__new__(factory_class)
         try:
             factory_class.__init__(instance, env_fns)
-        except Exception:
-            _cleanup_partial_vector_env(instance, owner)
+        except BaseException as construction_error:
+            try:
+                _cleanup_partial_vector_env(instance, owner)
+            except Exception as cleanup_error:
+                construction_error.add_note(f"Cleanup also failed: {cleanup_error}")
             raise
         owner.transfer()
         return instance
@@ -466,12 +468,13 @@ def run_training(
         eval_owner.close()
         train_owner.close()
         if cleanup_staging:
-            _cleanup_checkpoint_staging(staging_dir, checkpoints_dir)
+            try:
+                _cleanup_checkpoint_staging(staging_dir, checkpoints_dir)
+            except Exception as exc:
+                cleanup_errors.append(exc)
         if cleanup_errors:
-            cleanup_error = _VectorEnvCleanupError(
-                "Vector environment worker cleanup could not be confirmed"
-            )
+            details = "; ".join(str(error) for error in cleanup_errors)
+            cleanup_error = RuntimeError(f"Training resource cleanup failed: {details}")
             if primary_error is None:
                 raise cleanup_error from cleanup_errors[0]
-            details = "; ".join(str(error) for error in cleanup_errors)
             primary_error.add_note(f"Cleanup also failed: {details}")

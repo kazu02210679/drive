@@ -179,7 +179,7 @@ class RewardConfig(StrictTypedFrozenModel):
     unnecessary_brake_safe_ttc_s: FiniteFloat = Field(default=5.0, gt=0.0)
     unnecessary_brake_lookahead_steps: PositiveInt = 3
     standstill_per_second: FiniteFloat = Field(default=0.50, ge=0.0)
-    standstill_speed_mps: FiniteFloat = Field(default=0.10, ge=0.0)
+    standstill_speed_mps: FiniteFloat = Field(default=0.10, gt=0.0)
     shield_intervention: FiniteFloat = Field(default=2.0, ge=0.0)
 
 
