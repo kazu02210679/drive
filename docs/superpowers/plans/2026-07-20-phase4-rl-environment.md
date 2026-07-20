@@ -490,7 +490,7 @@ git commit -m "feat: add gymnasium multi-agent speed environment"
 - Verifies installed MetaDrive 0.4.3 and Gymnasium 1.3.0 behavior only.
 - Does not add a scenario or alter MetaDrive termination rules.
 
-- [ ] **Step 1: Write the real `check_env` integration test**
+- [x] **Step 1: Write the real `check_env` integration test**
 
 ```python
 @pytest.mark.integration
@@ -502,31 +502,31 @@ def test_real_rl_environment_passes_gymnasium_checker() -> None:
         env.close()
 ```
 
-- [ ] **Step 2: Write real 100-step finite/deterministic tests**
+- [x] **Step 2: Write real 100-step finite/deterministic tests**
 
 Use seed 42 and a deterministic action sequence. Verify every Observation is `(24,)`, `float32`,
 finite, and contained by the space; every Reward/component is finite; API is five elements; and close
 runs. Run two short identical seed/action episodes and compare initial Observation and first 10 traces.
 
-- [ ] **Step 3: Run integration and observe the first concrete RED mismatch**
+- [x] **Step 3: Run integration and observe the first concrete RED mismatch**
 
 Run: `.venv\Scripts\python.exe -m pytest tests/integration/test_rl_metadrive_headless.py -v`
 
 Expected: fail on the first concrete MetaDrive/Gymnasium assumption until adapted.
 
-- [ ] **Step 4: Apply only the minimal API-compatible correction**
+- [x] **Step 4: Apply only the minimal API-compatible correction**
 
 Inspect installed source before any change. MetaDrive 0.4.3 verified info keys are
 `arrive_dest`, `crash_vehicle`, `crash_human`, `out_of_road`, and `max_step`.
 Document the mismatch, cause, and correction in `docs/phase4_implementation_log.md`.
 
-- [ ] **Step 5: Re-run real integration and verify GREEN**
+- [x] **Step 5: Re-run real integration and verify GREEN**
 
 Run: `.venv\Scripts\python.exe -m pytest tests/integration/test_rl_metadrive_headless.py -v`
 
 Expected: checker and real 100-step tests pass headlessly without a visible window.
 
-- [ ] **Step 6: Commit Task 5**
+- [x] **Step 6: Commit Task 5**
 
 ```powershell
 git add tests/integration/test_rl_metadrive_headless.py docs/phase4_implementation_log.md src
