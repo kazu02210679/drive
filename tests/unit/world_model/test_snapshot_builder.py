@@ -189,3 +189,25 @@ def test_prefers_current_agent_api_without_accessing_deprecated_vehicle() -> Non
             raise AssertionError("deprecated env.vehicle was accessed")
 
     assert build(AgentApiEnv()).ego.speed_mps == pytest.approx(10.0)  # type: ignore[arg-type]
+
+
+def test_builder_accepts_scenario_flags() -> None:
+    snapshot = SceneSnapshotBuilder().build(
+        make_env(),
+        step_index=1,
+        scenario_id="scenario_flags",
+        seed=42,
+        previous_action=0,
+        previous_shield_intervention=False,
+        stop_required=True,
+        occlusion_present=True,
+        distance_to_conflict_point_m=12.0,
+        intersection_entry_prohibited=True,
+    )
+
+    assert snapshot.stop_required is True
+    assert snapshot.occlusion_present is True
+    assert snapshot.distance_to_conflict_point_m == 12.0
+    assert snapshot.intersection_entry_prohibited is True
+    assert snapshot.collision_occurred is False
+    assert snapshot.off_road is False

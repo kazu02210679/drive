@@ -27,6 +27,10 @@ class SceneSnapshotBuilder:
         seed: int,
         previous_action: int,
         previous_shield_intervention: bool,
+        stop_required: bool = False,
+        occlusion_present: bool = False,
+        distance_to_conflict_point_m: float | None = None,
+        intersection_entry_prohibited: bool = False,
     ) -> SceneSnapshot:
         config = self._config(env)
         interval_s = decision_interval_s(config)
@@ -61,11 +65,14 @@ class SceneSnapshotBuilder:
             seed=seed,
             ego=ego,
             actors=actors,
-            stop_required=False,
-            occlusion_present=False,
-            distance_to_conflict_point_m=None,
+            stop_required=stop_required,
+            occlusion_present=occlusion_present,
+            distance_to_conflict_point_m=distance_to_conflict_point_m,
             previous_action=previous_action,
             previous_shield_intervention=previous_shield_intervention,
+            collision_occurred=False,
+            off_road=False,
+            intersection_entry_prohibited=intersection_entry_prohibited,
         )
 
     @staticmethod

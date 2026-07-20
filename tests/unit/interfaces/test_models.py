@@ -59,6 +59,9 @@ def make_snapshot(**overrides: Any) -> SceneSnapshot:
         "distance_to_conflict_point_m": None,
         "previous_action": 0,
         "previous_shield_intervention": False,
+        "collision_occurred": False,
+        "off_road": False,
+        "intersection_entry_prohibited": False,
     }
     values.update(overrides)
     return SceneSnapshot(**values)
@@ -116,6 +119,18 @@ def test_models_are_frozen_and_json_serializable() -> None:
     with pytest.raises(FrozenInstanceError):
         snapshot.step_index = 2  # type: ignore[misc]
     json.dumps(asdict(trace))
+
+
+def test_scene_snapshot_contains_explicit_rule_state() -> None:
+    snapshot = make_snapshot(
+        collision_occurred=True,
+        off_road=True,
+        intersection_entry_prohibited=True,
+    )
+
+    assert snapshot.collision_occurred is True
+    assert snapshot.off_road is True
+    assert snapshot.intersection_entry_prohibited is True
 
 
 def test_decision_trace_copies_reward_components() -> None:

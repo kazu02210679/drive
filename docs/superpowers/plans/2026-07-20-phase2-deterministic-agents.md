@@ -150,7 +150,7 @@ git commit -m "feat: add deterministic agent configuration"
 - Extends `SceneSnapshotBuilder.build(..., stop_required=False, occlusion_present=False, distance_to_conflict_point_m=None, intersection_entry_prohibited=False)`.
 - Leaves collision and off-road extraction in Task 10 after installed MetaDrive property inspection.
 
-- [ ] **Step 1: Add failing interface and builder tests**
+- [x] **Step 1: Add failing interface and builder tests**
 
 ```python
 def test_scene_snapshot_contains_explicit_rule_state() -> None:
@@ -183,23 +183,23 @@ def test_builder_accepts_scenario_flags() -> None:
     assert snapshot.intersection_entry_prohibited is True
 ```
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run: `.venv\Scripts\python.exe -m pytest tests\unit\interfaces tests\unit\world_model -v`
 
 Expected: constructor and builder reject the new keyword arguments.
 
-- [ ] **Step 3: Add the required fields and keyword-only builder inputs**
+- [x] **Step 3: Add the required fields and keyword-only builder inputs**
 
 Do not add defaults to the dataclass fields; update every constructor so missing rule state is visible in code review. Builder-created `collision_occurred` and `off_road` remain neutral `False` until Task 10 inspects and tests MetaDrive's concrete properties.
 
-- [ ] **Step 4: Verify GREEN across all current tests**
+- [x] **Step 4: Verify GREEN across all current tests**
 
 Run: `.venv\Scripts\python.exe -m pytest tests\unit -q`
 
 Expected: all tests pass with explicit booleans present.
 
-- [ ] **Step 5: Commit the approved boundary change**
+- [x] **Step 5: Commit the approved boundary change**
 
 ```powershell
 git add src\mad_driving\interfaces src\mad_driving\world_model tests
