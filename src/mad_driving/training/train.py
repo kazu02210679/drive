@@ -19,11 +19,18 @@ from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 
 from mad_driving.config.models import AppConfig
 from mad_driving.envs.multi_agent_speed_env import MultiAgentSpeedEnv
+from mad_driving.scenarios import EnvironmentRole
 from mad_driving.training.callbacks import RewardComponentsCallback
 
 
 class EnvironmentFactory(Protocol):
-    def __call__(self, config: AppConfig) -> gym.Env[Any, Any]: ...
+    def __call__(
+        self,
+        config: AppConfig,
+        *,
+        role: EnvironmentRole,
+        worker_index: int,
+    ) -> gym.Env[Any, Any]: ...
 
 
 class _VectorEnvCleanupError(RuntimeError):
@@ -50,8 +57,13 @@ class TrainingResult:
     timesteps: int
 
 
-def _default_env_factory(config: AppConfig) -> gym.Env[Any, Any]:
-    return MultiAgentSpeedEnv(config, role="train", worker_index=0)
+def _default_env_factory(
+    config: AppConfig,
+    *,
+    role: EnvironmentRole,
+    worker_index: int,
+) -> gym.Env[Any, Any]:
+    return MultiAgentSpeedEnv(config, role=role, worker_index=worker_index)
 
 
 @dataclass
@@ -64,13 +76,35 @@ class _OwnedEnvironments:
     def create(cls, config: AppConfig, factory: EnvironmentFactory) -> _OwnedEnvironments:
         return cls(config=config, factory=factory, created=[])
 
-    def new(self) -> gym.Env[Any, Any]:
-        environment = self.factory(self.config)
+    def new(
+        self,
+        config: AppConfig,
+        *,
+        role: EnvironmentRole,
+        worker_index: int,
+    ) -> gym.Env[Any, Any]:
+        environment = self.factory(
+            config,
+            role=role,
+            worker_index=worker_index,
+        )
         self.created.append(environment)
         return environment
 
-    def thunks(self, count: int) -> list[Callable[[], gym.Env[Any, Any]]]:
-        return [partial(self.new) for _ in range(count)]
+    def thunks(
+        self,
+        role: EnvironmentRole,
+        count: int,
+    ) -> list[Callable[[], gym.Env[Any, Any]]]:
+        return [
+            partial(
+                self.new,
+                self.config.model_copy(deep=True),
+                role=role,
+                worker_index=worker_index,
+            )
+            for worker_index in range(count)
+        ]
 
     def transfer(self) -> None:
         """Transfer underlying environment ownership to a constructed vector env."""
@@ -240,8 +274,16 @@ def _build_train_env(
 ) -> Any:
     count = config.training.num_envs
     if count == 1:
-        return _construct_vector_env(dummy_vec_env_factory, owner.thunks(1), owner)
-    return _construct_vector_env(subproc_vec_env_factory, owner.thunks(count), owner)
+        return _construct_vector_env(
+            dummy_vec_env_factory,
+            owner.thunks("train", 1),
+            owner,
+        )
+    return _construct_vector_env(
+        subproc_vec_env_factory,
+        owner.thunks("train", count),
+        owner,
+    )
 
 
 def _scaled_frequency(interval_steps: int, num_envs: int) -> int:
@@ -386,7 +428,7 @@ def run_training(
         )
         eval_env = _construct_vector_env(
             eval_vec_env_factory,
-            eval_owner.thunks(1),
+            eval_owner.thunks("validation", 1),
             eval_owner,
         )
 

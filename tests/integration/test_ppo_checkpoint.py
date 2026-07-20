@@ -12,6 +12,7 @@ from numpy.typing import NDArray
 from stable_baselines3 import PPO
 
 from mad_driving.config.models import AppConfig
+from mad_driving.scenarios import EnvironmentRole
 from mad_driving.training import run_training
 
 
@@ -89,8 +90,16 @@ def test_real_ppo_writes_artifacts_and_resumes_transactionally(tmp_path: Path) -
     run_dir = tmp_path / "run"
     environments: list[TinyDeterministicEnv] = []
 
-    def env_factory(received_config: AppConfig) -> TinyDeterministicEnv:
-        assert received_config is config
+    def env_factory(
+        received_config: AppConfig,
+        *,
+        role: EnvironmentRole,
+        worker_index: int,
+    ) -> TinyDeterministicEnv:
+        assert received_config == config
+        assert received_config is not config
+        assert role in {"train", "validation"}
+        assert worker_index == 0
         environment = TinyDeterministicEnv()
         environments.append(environment)
         return environment

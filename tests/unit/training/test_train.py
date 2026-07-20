@@ -1,6 +1,7 @@
 import math
 import zipfile
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -9,13 +10,24 @@ import pytest
 import yaml
 
 from mad_driving.config.models import AppConfig
+from mad_driving.scenarios import EnvironmentRole
 from mad_driving.training import train as train_module
 from mad_driving.training.train import TrainingResult, run_training
 
 
 class FakeEnv:
-    def __init__(self, identifier: int) -> None:
+    def __init__(
+        self,
+        identifier: int,
+        *,
+        config: AppConfig,
+        role: EnvironmentRole,
+        worker_index: int,
+    ) -> None:
         self.identifier = identifier
+        self.config = config
+        self.role = role
+        self.worker_index = worker_index
         self.closed = False
         self.close_calls = 0
 
@@ -24,13 +36,32 @@ class FakeEnv:
         self.close_calls += 1
 
 
+@dataclass(frozen=True)
+class EnvironmentCall:
+    config: AppConfig
+    role: EnvironmentRole
+    worker_index: int
+
+
 class EnvFactory:
     def __init__(self) -> None:
         self.created: list[FakeEnv] = []
+        self.calls: list[EnvironmentCall] = []
 
-    def __call__(self, config: AppConfig) -> FakeEnv:
-        del config
-        env = FakeEnv(len(self.created))
+    def __call__(
+        self,
+        config: AppConfig,
+        *,
+        role: EnvironmentRole,
+        worker_index: int,
+    ) -> FakeEnv:
+        self.calls.append(EnvironmentCall(config, role, worker_index))
+        env = FakeEnv(
+            len(self.created),
+            config=config,
+            role=role,
+            worker_index=worker_index,
+        )
         self.created.append(env)
         return env
 
@@ -501,8 +532,14 @@ def assert_no_invocation_staging(run_dir: Path) -> None:
 
 
 class FailingEnvFactory:
-    def __call__(self, config: AppConfig) -> FakeEnv:
-        del config
+    def __call__(
+        self,
+        config: AppConfig,
+        *,
+        role: EnvironmentRole,
+        worker_index: int,
+    ) -> FakeEnv:
+        del config, role, worker_index
         raise RuntimeError("environment construction failed")
 
 
@@ -706,6 +743,64 @@ def test_num_envs_above_one_uses_subprocess_train_env_and_separate_dummy_eval(
     assert len({env.identifier for env in environments.created}) == 4
     assert all(env.closed for env in environments.created)
     assert all(env.close_calls == 1 for env in environments.created)
+
+
+def test_training_constructs_train_workers_and_validation_eval(tmp_path: Path) -> None:
+    environments = EnvFactory()
+
+    run_with_fakes(
+        make_config(num_envs=3),
+        tmp_path / "role-aware",
+        env_factory=environments,
+        subproc_factory=VecFactory(),
+    )
+
+    assert [(call.role, call.worker_index) for call in environments.calls] == [
+        ("train", 0),
+        ("train", 1),
+        ("train", 2),
+        ("validation", 0),
+    ]
+    assert all(call.role != "test" for call in environments.calls)
+
+
+def test_environment_thunks_capture_independent_config_copies(tmp_path: Path) -> None:
+    config = make_config(num_envs=3)
+    environments = EnvFactory()
+
+    run_with_fakes(
+        config,
+        tmp_path / "independent-configs",
+        env_factory=environments,
+        subproc_factory=VecFactory(),
+    )
+
+    captured_configs = [call.config for call in environments.calls]
+    assert len(captured_configs) == 4
+    assert all(captured is not config for captured in captured_configs)
+    assert len({id(captured) for captured in captured_configs}) == 4
+    assert all(captured == config for captured in captured_configs)
+
+
+@pytest.mark.parametrize(
+    ("role", "worker_index", "message"),
+    [
+        ("invalid", 0, "role"),
+        ("train", -1, "worker_index"),
+        ("train", True, "worker_index"),
+    ],
+)
+def test_default_environment_factory_rejects_invalid_identity(
+    role: str,
+    worker_index: int,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        train_module._default_env_factory(  # type: ignore[arg-type]
+            make_config(),
+            role=role,
+            worker_index=worker_index,
+        )
 
 
 class FailingSubprocVecEnv:
@@ -1039,7 +1134,16 @@ def test_successful_training_confirms_subprocess_evaluation_worker_exited(
 
 
 def test_runtime_cleanup_continues_to_kill_after_join_and_terminate_fail() -> None:
-    vector_env = RuntimeProcessVecEnv([lambda: FakeEnv(0)])
+    vector_env = RuntimeProcessVecEnv(
+        [
+            lambda: FakeEnv(
+                0,
+                config=make_config(),
+                role="train",
+                worker_index=0,
+            )
+        ]
+    )
     process = OperationFailingProcess()
     vector_env.processes = [process]
     vector_env.remotes = (FakeRemote(),)
@@ -1101,6 +1205,12 @@ class SerializingVecFactory(VecFactory):
         return super().__call__(env_fns)
 
 
+class RoundTripVecFactory(VecFactory):
+    def __call__(self, env_fns: list[Callable[[], FakeEnv]]) -> FakeVecEnv:
+        restored = [cloudpickle.loads(cloudpickle.dumps(env_fn)) for env_fn in env_fns]
+        return super().__call__(restored)
+
+
 def test_every_train_and_eval_env_thunk_is_cloudpickle_serializable(tmp_path: Path) -> None:
     subproc = SerializingVecFactory()
     dummy = SerializingVecFactory()
@@ -1114,6 +1224,31 @@ def test_every_train_and_eval_env_thunk_is_cloudpickle_serializable(tmp_path: Pa
 
     assert subproc.serialized_thunks == 3
     assert dummy.serialized_thunks == 1
+
+
+def test_cloudpickle_round_trip_preserves_each_role_and_worker_without_shared_config(
+    tmp_path: Path,
+) -> None:
+    subproc = RoundTripVecFactory()
+    dummy = RoundTripVecFactory()
+
+    run_with_fakes(
+        make_config(num_envs=3),
+        tmp_path / "cloudpickle-identities",
+        dummy_factory=dummy,
+        subproc_factory=subproc,
+    )
+
+    train_envs = subproc.created[0].envs
+    eval_envs = dummy.created[0].envs
+    assert [(env.role, env.worker_index) for env in train_envs] == [
+        ("train", 0),
+        ("train", 1),
+        ("train", 2),
+    ]
+    assert [(env.role, env.worker_index) for env in eval_envs] == [("validation", 0)]
+    configs = [env.config for env in (*train_envs, *eval_envs)]
+    assert len({id(config) for config in configs}) == 4
 
 
 def test_resume_loads_ppo_with_train_env_and_keeps_timesteps(tmp_path: Path) -> None:

@@ -124,23 +124,23 @@ def test_real_rl_environment_passes_gymnasium_checker() -> None:
 
 
 @pytest.mark.integration
-def test_real_control_adapter_wraps_arbitrary_seeds_into_configured_scenario_range() -> None:
+def test_real_control_adapter_rejects_out_of_range_before_simulator_side_effects() -> None:
     config = load_config("configs/base.yaml")
     metadrive_config = config.metadrive_dict()
     metadrive_config.update({"start_seed": 40, "num_scenarios": 3})
     env = create_control_metadrive_env(metadrive_config, config.control)
-    expected_scenario_seeds = ((39, 42), (41, 41), (43, 40))
     try:
-        first_observation = None
-        for requested_seed, expected_scenario_seed in expected_scenario_seeds:
-            observation, info = env.reset(seed=requested_seed)
-            assert info["env_seed"] == expected_scenario_seed
-            if requested_seed == 39:
-                first_observation = np.asarray(observation).copy()
+        assert env.engine is None
+        for invalid_seed in (39, 43):
+            with pytest.raises(ValueError, match="configured scenario range"):
+                env.reset(seed=invalid_seed)
+            assert env.engine is None
 
-        repeated_observation, repeated_info = env.reset(seed=39)
-        assert repeated_info["env_seed"] == 42
-        np.testing.assert_array_equal(first_observation, repeated_observation)
+        for valid_seed in (40, 42):
+            _, info = env.reset(seed=valid_seed)
+            assert info["env_seed"] == valid_seed
+            assert info["metadrive_scenario_index"] == valid_seed
+            assert env.current_seed == valid_seed
     finally:
         env.close()
 
@@ -202,6 +202,34 @@ def test_real_rl_environment_reports_the_actual_allocated_scenario_identity() ->
         assert info["scenario_seed"] == info["scenario_parameter_seed"]
         assert info["role"] == "train"
         assert info["worker_index"] == 4
+    finally:
+        env.close()
+
+
+@pytest.mark.integration
+def test_real_validation_environment_uses_actual_validation_scenario_identity() -> None:
+    config = load_config("configs/base.yaml")
+    created = []
+
+    def factory(options: dict[str, object], control: Any):
+        environment = create_control_metadrive_env(options, control)
+        created.append(environment)
+        return environment
+
+    env = MultiAgentSpeedEnv(
+        config,
+        role="validation",
+        worker_index=0,
+        env_factory=factory,
+    )
+    try:
+        _, info = env.reset(seed=SEED)
+        actual_index = info["metadrive_scenario_index"]
+        assert 10_000 <= actual_index < 11_000
+        assert info["env_seed"] == actual_index
+        assert created[0].current_seed == actual_index
+        assert info["role"] == "validation"
+        assert info["worker_index"] == 0
     finally:
         env.close()
 
