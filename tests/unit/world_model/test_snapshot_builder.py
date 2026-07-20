@@ -4,14 +4,25 @@ from typing import Any
 
 import pytest
 
+from mad_driving.scenarios import (
+    EpisodeSeeds,
+    ScenarioObservationContext,
+    ScenarioStepResult,
+)
 from mad_driving.world_model.snapshot_builder import SceneSnapshotBuilder
 from mad_driving.world_model.validation import decision_interval_s
 
 
 class FakeLane:
-    def __init__(self, index: tuple[str, str, int], speed_limit: float = 36.0) -> None:
+    def __init__(
+        self,
+        index: tuple[str, str, int],
+        speed_limit: float = 36.0,
+        width: float | None = 3.5,
+    ) -> None:
         self.index = index
         self.speed_limit = speed_limit
+        self.width = width
 
     def local_coordinates(self, position: tuple[float, float]) -> tuple[float, float]:
         return position[0], position[1]
@@ -73,6 +84,7 @@ class FakeEnv:
         self.config: dict[str, Any] = {
             "physics_world_step_size": 0.02,
             "decision_repeat": 5,
+            "map_config": {"lane_width": 3.5},
         }
 
 
@@ -80,7 +92,11 @@ class MetaDriveStyleConfig:
     """MetaDrive Config has get(), but does not implement Mapping."""
 
     def __init__(self) -> None:
-        self.values = {"physics_world_step_size": 0.02, "decision_repeat": 5}
+        self.values = {
+            "physics_world_step_size": 0.02,
+            "decision_repeat": 5,
+            "map_config": {"lane_width": 3.5},
+        }
 
     def get(self, key: str, default: Any = None) -> Any:
         return self.values.get(key, default)
@@ -112,32 +128,46 @@ def make_env() -> FakeEnv:
     return FakeEnv(ego, [actor_z, actor_a])
 
 
-def build(env: FakeEnv):
+def build_frame(
+    env: FakeEnv,
+    *,
+    visible_actor_ids: frozenset[str] | None = None,
+    raw_info: dict[str, object] | None = None,
+):
     return SceneSnapshotBuilder().build(
         env,
         step_index=2,
-        scenario_id="unit",
-        seed=42,
-        previous_action=1,
+        seeds=EpisodeSeeds(
+            episode_rng_seed=42,
+            metadrive_scenario_index=7,
+            scenario_parameter_seed=11,
+        ),
+        context=ScenarioObservationContext(
+            scenario_id="unit",
+            visible_actor_ids=visible_actor_ids,
+        ),
+        scenario_result=ScenarioStepResult(success=False, failure=False),
+        raw_info={} if raw_info is None else raw_info,
+        previous_executed_action=1,
         previous_shield_intervention=False,
     )
 
 
 def test_builds_si_ego_state_and_stable_actor_order() -> None:
-    snapshot = build(make_env())
+    observation = build_frame(make_env()).observation
 
-    assert snapshot.sim_time_s == pytest.approx(0.2)
-    assert snapshot.ego.speed_mps == pytest.approx(10.0)
-    assert snapshot.ego.acceleration_mps2 == pytest.approx(10.0)
-    assert snapshot.ego.lane_offset_m == pytest.approx(0.5)
-    assert snapshot.ego.route_progress == pytest.approx(0.25)
-    assert snapshot.ego.speed_limit_mps == pytest.approx(10.0)
-    assert [actor.actor_id for actor in snapshot.actors] == ["a-vehicle", "z-vehicle"]
+    assert observation.sim_time_s == pytest.approx(0.2)
+    assert observation.ego.speed_mps == pytest.approx(10.0)
+    assert observation.ego.acceleration_mps2 == pytest.approx(10.0)
+    assert observation.ego.lane_offset_m == pytest.approx(0.5)
+    assert observation.ego.route_progress == pytest.approx(0.25)
+    assert observation.ego.speed_limit_mps == pytest.approx(10.0)
+    assert [actor.actor_id for actor in observation.visible_actors] == ["a-vehicle", "z-vehicle"]
 
 
 def test_projects_relative_coordinates_and_lane_membership() -> None:
-    snapshot = build(make_env())
-    actors = {actor.actor_id: actor for actor in snapshot.actors}
+    observation = build_frame(make_env()).observation
+    actors = {actor.actor_id: actor for actor in observation.visible_actors}
 
     assert actors["z-vehicle"].relative_longitudinal_m == pytest.approx(12.0)
     assert actors["z-vehicle"].relative_lateral_m == pytest.approx(1.0)
@@ -147,8 +177,8 @@ def test_projects_relative_coordinates_and_lane_membership() -> None:
 
 
 def test_identical_runtime_state_produces_identical_snapshot() -> None:
-    first = build(make_env())
-    second = build(make_env())
+    first = build_frame(make_env())
+    second = build_frame(make_env())
 
     assert asdict(first) == asdict(second)
 
@@ -161,11 +191,11 @@ def test_missing_navigation_uses_safe_finite_defaults() -> None:
         last_velocity=(2.0, 0.0),
         lane=None,
     )
-    snapshot = build(FakeEnv(ego, []))
+    observation = build_frame(FakeEnv(ego, [])).observation
 
-    assert snapshot.ego.lane_offset_m == 0.0
-    assert snapshot.ego.route_progress == 0.0
-    assert snapshot.ego.speed_limit_mps == 20.0
+    assert observation.ego.lane_offset_m == 0.0
+    assert observation.ego.route_progress == 0.0
+    assert observation.ego.speed_limit_mps == 20.0
 
 
 def test_non_finite_simulator_state_is_rejected() -> None:
@@ -173,14 +203,14 @@ def test_non_finite_simulator_state_is_rejected() -> None:
     env.vehicle.velocity = (math.nan, 0.0)
 
     with pytest.raises(ValueError, match="speed_mps|velocity"):
-        build(env)
+        build_frame(env)
 
 
 def test_accepts_metadrive_config_object_with_get_method() -> None:
     env = make_env()
     env.config = MetaDriveStyleConfig()  # type: ignore[assignment]
 
-    assert build(env).sim_time_s == pytest.approx(0.2)
+    assert build_frame(env).observation.sim_time_s == pytest.approx(0.2)
 
 
 def test_decision_interval_requires_explicit_runtime_timing() -> None:
@@ -203,29 +233,31 @@ def test_prefers_current_agent_api_without_accessing_deprecated_vehicle() -> Non
         def vehicle(self) -> FakeVehicle:
             raise AssertionError("deprecated env.vehicle was accessed")
 
-    assert build(AgentApiEnv()).ego.speed_mps == pytest.approx(10.0)  # type: ignore[arg-type]
+    assert build_frame(AgentApiEnv()).observation.ego.speed_mps == pytest.approx(10.0)  # type: ignore[arg-type]
 
 
-def test_builder_accepts_scenario_flags() -> None:
-    snapshot = SceneSnapshotBuilder().build(
+def test_builder_uses_scenario_context_only_for_observable_road_facts() -> None:
+    frame = SceneSnapshotBuilder().build(
         make_env(),
         step_index=1,
-        scenario_id="scenario_flags",
-        seed=42,
-        previous_action=0,
+        seeds=EpisodeSeeds(42, 7, 11),
+        context=ScenarioObservationContext(
+            scenario_id="scenario_flags",
+            stop_required=True,
+            distance_to_conflict_point_m=12.0,
+            intersection_entry_prohibited=True,
+        ),
+        scenario_result=ScenarioStepResult(success=False, failure=False),
+        raw_info={},
+        previous_executed_action=0,
         previous_shield_intervention=False,
-        stop_required=True,
-        occlusion_present=True,
-        distance_to_conflict_point_m=12.0,
-        intersection_entry_prohibited=True,
     )
 
-    assert snapshot.stop_required is True
-    assert snapshot.occlusion_present is True
-    assert snapshot.distance_to_conflict_point_m == 12.0
-    assert snapshot.intersection_entry_prohibited is True
-    assert snapshot.collision_occurred is False
-    assert snapshot.off_road is False
+    assert frame.observation.road_context.stop_required is True
+    assert frame.observation.road_context.distance_to_conflict_point_m == 12.0
+    assert frame.observation.road_context.intersection_entry_prohibited is True
+    assert frame.privileged.collision_occurred is False
+    assert frame.privileged.off_road is False
 
 
 @pytest.mark.parametrize(
@@ -242,16 +274,75 @@ def test_builder_maps_any_metadrive_collision_flag(collision_flag: str) -> None:
     env = make_env()
     setattr(env.vehicle, collision_flag, True)
 
-    assert build(env).collision_occurred is True
+    assert build_frame(env).privileged.collision_occurred is True
 
 
 def test_builder_maps_explicit_outside_lane_state_only() -> None:
     env = make_env()
     env.vehicle.on_lane = False
-    assert build(env).off_road is True
+    assert build_frame(env).privileged.off_road is True
 
     env.vehicle.on_lane = True
-    assert build(env).off_road is False
+    assert build_frame(env).privileged.off_road is False
 
     del env.vehicle.on_lane
-    assert build(env).off_road is False
+    assert build_frame(env).privileged.off_road is False
+
+
+def test_hidden_actor_exists_only_in_privileged_state() -> None:
+    frame = build_frame(
+        make_env(),
+        visible_actor_ids=frozenset({"z-vehicle"}),
+    )
+
+    assert tuple(actor.actor_id for actor in frame.observation.visible_actors) == (
+        "z-vehicle",
+    )
+    assert tuple(actor.actor_id for actor in frame.privileged.all_actors) == (
+        "a-vehicle",
+        "z-vehicle",
+    )
+    assert not hasattr(frame.observation, "collision_occurred")
+
+
+def test_privileged_outcomes_combine_raw_info_and_vehicle_state() -> None:
+    frame = build_frame(
+        make_env(),
+        raw_info={"out_of_road": True, "arrive_dest": True},
+    )
+
+    assert frame.privileged.off_road is True
+    assert frame.privileged.arrived is True
+
+
+def test_builder_normalizes_heading_and_uses_ego_left_lateral_coordinates() -> None:
+    env = make_env()
+    env.vehicle.heading_theta = math.pi / 2.0
+    env.engine.get_objects()["z-vehicle"].heading_theta = -3.0 * math.pi
+    env.engine.get_objects()["z-vehicle"].position = (-1.0, 0.0)
+
+    observation = build_frame(env).observation
+    actor = next(actor for actor in observation.visible_actors if actor.actor_id == "z-vehicle")
+
+    assert observation.ego.heading_rad == pytest.approx(math.pi / 2.0)
+    assert actor.heading_rad == pytest.approx(-math.pi)
+    assert actor.relative_lateral_m == pytest.approx(1.0)
+
+
+def test_builder_normalizes_ego_heading_to_half_open_pi_interval() -> None:
+    env = make_env()
+    env.vehicle.heading_theta = 3.0 * math.pi
+
+    assert build_frame(env).observation.ego.heading_rad == pytest.approx(-math.pi)
+
+
+def test_same_lane_requires_lane_identity_and_lateral_position_inside_lane_width() -> None:
+    env = make_env()
+    env.engine.get_objects()["z-vehicle"].position = (12.0, 2.0)
+
+    actors = {
+        actor.actor_id: actor for actor in build_frame(env).observation.visible_actors
+    }
+
+    assert actors["z-vehicle"].same_lane is False
+    assert actors["a-vehicle"].same_lane is False

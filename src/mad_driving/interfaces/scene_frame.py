@@ -1,12 +1,28 @@
-"""Immutable road and occlusion context supplied by scenarios."""
+"""Immutable scene context and privileged simulator state."""
+
+from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Literal
 
 from mad_driving.interfaces._validation import (
     require_finite,
     require_finite_values,
     require_non_empty,
 )
+from mad_driving.interfaces.actor_state import ActorState
+
+if TYPE_CHECKING:
+    from mad_driving.interfaces.scene_snapshot import SceneObservation
+
+
+CollisionKind = Literal[
+    "vehicle",
+    "crossing_actor",
+    "object",
+    "sidewalk",
+    "building",
+]
 
 
 @dataclass(frozen=True)
@@ -39,3 +55,47 @@ class RoadContext:
             require_finite(
                 "distance_to_conflict_point_m", self.distance_to_conflict_point_m
             )
+
+
+@dataclass(frozen=True)
+class PrivilegedWorldState:
+    """Simulator truth reserved for reward, evaluation, and debug outputs."""
+
+    all_actors: tuple[ActorState, ...]
+    collision_occurred: bool
+    collision_kind: CollisionKind | None
+    off_road: bool
+    arrived: bool
+    scenario_success: bool
+    scenario_failure: bool
+
+    def __post_init__(self) -> None:
+        all_actors = tuple(self.all_actors)
+        if not all(isinstance(actor, ActorState) for actor in all_actors):
+            raise ValueError("all_actors must contain only ActorState values")
+        if self.collision_kind not in {
+            None,
+            "vehicle",
+            "crossing_actor",
+            "object",
+            "sidewalk",
+            "building",
+        }:
+            raise ValueError("collision_kind is not recognized")
+        object.__setattr__(self, "all_actors", all_actors)
+
+
+@dataclass(frozen=True)
+class SceneFrame:
+    """One decision-boundary view split between observation and simulator truth."""
+
+    observation: SceneObservation
+    privileged: PrivilegedWorldState
+
+    def __post_init__(self) -> None:
+        from mad_driving.interfaces.scene_snapshot import SceneObservation
+
+        if not isinstance(self.observation, SceneObservation):
+            raise ValueError("observation must be a SceneObservation")
+        if not isinstance(self.privileged, PrivilegedWorldState):
+            raise ValueError("privileged must be a PrivilegedWorldState")

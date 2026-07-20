@@ -9,8 +9,14 @@ from mad_driving.interfaces.actor_state import ActorState
 from mad_driving.interfaces.critic_review import CriticReview
 from mad_driving.interfaces.decision_trace import DecisionTrace
 from mad_driving.interfaces.risk_claim import RiskClaim
-from mad_driving.interfaces.scene_frame import OcclusionRegion, RoadContext
-from mad_driving.interfaces.scene_snapshot import EgoState, SceneSnapshot
+from mad_driving.interfaces.scene_frame import (
+    OcclusionRegion,
+    PrivilegedWorldState,
+    RoadContext,
+    SceneFrame,
+)
+from mad_driving.interfaces.scene_snapshot import EgoState, SceneObservation
+from mad_driving.scenarios import EpisodeSeeds
 
 
 def make_actor(**overrides: Any) -> ActorState:
@@ -47,25 +53,58 @@ def make_ego(**overrides: Any) -> EgoState:
     return EgoState(**values)
 
 
-def make_snapshot(**overrides: Any) -> SceneSnapshot:
+def make_seeds(**overrides: Any) -> EpisodeSeeds:
+    values: dict[str, Any] = {
+        "episode_rng_seed": 42,
+        "metadrive_scenario_index": 7,
+        "scenario_parameter_seed": 11,
+    }
+    values.update(overrides)
+    return EpisodeSeeds(**values)
+
+
+def make_road_context(**overrides: Any) -> RoadContext:
+    values: dict[str, Any] = {
+        "stop_required": False,
+        "distance_to_conflict_point_m": None,
+        "intersection_entry_prohibited": False,
+    }
+    values.update(overrides)
+    return RoadContext(**values)
+
+
+def make_snapshot(**overrides: Any) -> SceneObservation:
     values: dict[str, Any] = {
         "step_index": 1,
         "sim_time_s": 0.1,
         "scenario_id": "test",
-        "seed": 42,
+        "seeds": make_seeds(),
         "ego": make_ego(),
-        "actors": (make_actor(),),
-        "stop_required": False,
-        "occlusion_present": False,
-        "distance_to_conflict_point_m": None,
-        "previous_action": 0,
+        "visible_actors": (make_actor(),),
+        "occlusion_regions": (),
+        "road_context": make_road_context(),
+        "previous_executed_action": 0,
         "previous_shield_intervention": False,
-        "collision_occurred": False,
-        "off_road": False,
-        "intersection_entry_prohibited": False,
     }
     values.update(overrides)
-    return SceneSnapshot(**values)
+    return SceneObservation(**values)
+
+
+def make_frame(**overrides: Any) -> SceneFrame:
+    values: dict[str, Any] = {
+        "observation": make_snapshot(),
+        "privileged": PrivilegedWorldState(
+            all_actors=(make_actor(),),
+            collision_occurred=False,
+            collision_kind=None,
+            off_road=False,
+            arrived=False,
+            scenario_success=False,
+            scenario_failure=False,
+        ),
+    }
+    values.update(overrides)
+    return SceneFrame(**values)
 
 
 def make_claim(**overrides: Any) -> RiskClaim:
@@ -104,7 +143,7 @@ def make_review(**overrides: Any) -> CriticReview:
 
 
 def test_models_are_frozen_and_json_serializable() -> None:
-    snapshot = make_snapshot()
+    frame = make_frame()
     trace = DecisionTrace(
         step_index=1,
         raw_action=0,
@@ -118,20 +157,56 @@ def test_models_are_frozen_and_json_serializable() -> None:
     )
 
     with pytest.raises(FrozenInstanceError):
-        snapshot.step_index = 2  # type: ignore[misc]
+        frame.observation.step_index = 2  # type: ignore[misc]
     json.dumps(asdict(trace))
 
 
-def test_scene_snapshot_contains_explicit_rule_state() -> None:
-    snapshot = make_snapshot(
-        collision_occurred=True,
-        off_road=True,
-        intersection_entry_prohibited=True,
+def test_scene_frame_keeps_privileged_labels_out_of_observation() -> None:
+    frame = make_frame(
+        privileged=PrivilegedWorldState(
+            all_actors=(make_actor(),),
+            collision_occurred=True,
+            collision_kind="vehicle",
+            off_road=True,
+            arrived=True,
+            scenario_success=True,
+            scenario_failure=False,
+        )
     )
 
-    assert snapshot.collision_occurred is True
-    assert snapshot.off_road is True
-    assert snapshot.intersection_entry_prohibited is True
+    assert frame.privileged.collision_occurred is True
+    assert frame.privileged.off_road is True
+    assert frame.privileged.arrived is True
+    assert frame.observation.road_context.intersection_entry_prohibited is False
+    assert not hasattr(frame.observation, "collision_occurred")
+
+
+def test_scene_observation_rejects_hidden_actor_kinematics() -> None:
+    with pytest.raises(ValueError, match="visible_actors"):
+        make_snapshot(visible_actors=(make_actor(visible=False),))
+
+
+def test_scene_observation_defensively_freezes_and_validates_inputs() -> None:
+    visible_actors = [make_actor()]
+    occlusion_regions: list[OcclusionRegion] = []
+    observation = make_snapshot(
+        visible_actors=visible_actors,
+        occlusion_regions=occlusion_regions,
+    )
+    visible_actors.clear()
+    occlusion_regions.append(
+        OcclusionRegion(
+            region_id="building-corner",
+            boundary_points_xy_m=((0.0, 0.0), (1.0, 0.0)),
+        )
+    )
+
+    assert observation.visible_actors == (make_actor(),)
+    assert observation.occlusion_regions == ()
+    with pytest.raises(ValueError, match="seeds"):
+        make_snapshot(seeds={"episode_rng_seed": 42})
+    with pytest.raises(ValueError, match="road_context"):
+        make_snapshot(road_context={"stop_required": False})
 
 
 def test_decision_trace_copies_reward_components() -> None:
@@ -172,7 +247,7 @@ def test_actor_dimensions_must_be_positive(field: str) -> None:
         (make_ego, "speed_mps", math.inf),
         (make_ego, "lane_offset_m", math.nan),
         (make_snapshot, "sim_time_s", math.inf),
-        (make_snapshot, "distance_to_conflict_point_m", math.nan),
+        (make_road_context, "distance_to_conflict_point_m", math.nan),
         (make_claim, "time_horizon_s", math.inf),
         (make_claim, "min_ttc_s", math.nan),
         (make_review, "conflict_score", math.inf),
@@ -213,10 +288,16 @@ def test_route_progress_is_normalized(route_progress: float) -> None:
         make_ego(route_progress=route_progress)
 
 
-@pytest.mark.parametrize("previous_action", [-1, 4])
-def test_snapshot_action_is_discrete_four(previous_action: int) -> None:
-    with pytest.raises(ValueError, match="previous_action"):
-        make_snapshot(previous_action=previous_action)
+@pytest.mark.parametrize("previous_executed_action", [-1, 4])
+def test_scene_observation_action_is_discrete_four(previous_executed_action: int) -> None:
+    with pytest.raises(ValueError, match="previous_executed_action"):
+        make_snapshot(previous_executed_action=previous_executed_action)
+
+
+@pytest.mark.parametrize("heading_rad", [math.pi, 3.0 * math.pi])
+def test_ego_heading_must_be_normalized_at_project_boundary(heading_rad: float) -> None:
+    with pytest.raises(ValueError, match="heading_rad"):
+        make_ego(heading_rad=heading_rad)
 
 
 @pytest.mark.parametrize("field", ["raw_action", "executed_action"])

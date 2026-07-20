@@ -1,6 +1,15 @@
 from typing import Any
 
-from mad_driving.interfaces import ActorState, EgoState, RiskClaim, SceneSnapshot
+from mad_driving.interfaces import (
+    ActorState,
+    EgoState,
+    PrivilegedWorldState,
+    RiskClaim,
+    RoadContext,
+    SceneFrame,
+    SceneObservation,
+)
+from mad_driving.scenarios import EpisodeSeeds
 
 
 def make_claim(agent_id: str = "nominal", **overrides: Any) -> RiskClaim:
@@ -78,22 +87,53 @@ def make_snapshot(
     speed_limit_mps: float = 15.0,
     actors: tuple[ActorState, ...] = (),
     **overrides: Any,
-) -> SceneSnapshot:
+) -> SceneObservation:
     values: dict[str, Any] = {
         "step_index": step_index,
         "sim_time_s": step_index * 0.1,
         "scenario_id": "phase2_unit",
-        "seed": 42,
+        "seeds": EpisodeSeeds(
+            episode_rng_seed=42,
+            metadrive_scenario_index=7,
+            scenario_parameter_seed=11,
+        ),
         "ego": make_ego(speed_mps=ego_speed_mps, speed_limit_mps=speed_limit_mps),
-        "actors": actors,
-        "stop_required": False,
-        "occlusion_present": False,
-        "distance_to_conflict_point_m": None,
-        "previous_action": 0,
+        "visible_actors": actors,
+        "occlusion_regions": (),
+        "road_context": RoadContext(
+            stop_required=False,
+            distance_to_conflict_point_m=None,
+            intersection_entry_prohibited=False,
+        ),
+        "previous_executed_action": 0,
         "previous_shield_intervention": False,
-        "collision_occurred": False,
-        "off_road": False,
-        "intersection_entry_prohibited": False,
     }
     values.update(overrides)
-    return SceneSnapshot(**values)
+    return SceneObservation(**values)
+
+
+def make_frame(
+    *,
+    observation: SceneObservation | None = None,
+    all_actors: tuple[ActorState, ...] = (),
+    collision_occurred: bool = False,
+    collision_kind: str | None = None,
+    off_road: bool = False,
+    arrived: bool = False,
+    scenario_success: bool = False,
+    scenario_failure: bool = False,
+) -> SceneFrame:
+    """Build a full frame for reward and environment tests."""
+
+    return SceneFrame(
+        observation=make_snapshot() if observation is None else observation,
+        privileged=PrivilegedWorldState(
+            all_actors=all_actors,
+            collision_occurred=collision_occurred,
+            collision_kind=collision_kind,  # type: ignore[arg-type]
+            off_road=off_road,
+            arrived=arrived,
+            scenario_success=scenario_success,
+            scenario_failure=scenario_failure,
+        ),
+    )
