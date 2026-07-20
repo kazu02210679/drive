@@ -9,3 +9,30 @@ metadrive:
   start_seed: 42
   traffic_density: 0.1
   horizon: 200
+agents:
+  nominal:
+    horizon_s: 5.0
+    time_step_s: 0.25
+    ego_length_m: 4.5
+    ego_width_m: 1.8
+    lane_half_width_m: 1.75
+    longitudinal_buffer_m: 0.5
+    lateral_buffer_m: 0.25
+    probability_ttc_scale_s: 3.0
+    probability_distance_scale_m: 3.0
+  hazard:
+    lead_max_deceleration_mps2: -8.0
+    crossing_actor_max_speed_mps: 8.0
+    reaction_delay_s: 0.5
+    ego_max_safe_deceleration_mps2: -6.0
+    ego_length_m: 4.5
+    safety_buffer_m: 2.0
+    occlusion_crawl_speed_mps: 2.0
+    severe_margin_scale_m: 10.0
+    crossing_occupancy_allowance_s: 1.0
+  rule: {}
+  critic:
+    nominal_low_risk_threshold: 0.3
+    recommendation_spread_mps: 5.0
+    low_confidence_threshold: 0.5
+    definitive_speed_fraction: 0.5

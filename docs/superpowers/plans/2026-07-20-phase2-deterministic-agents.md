@@ -50,7 +50,7 @@
 - Produces: `AppConfig.agents: AgentsConfig`.
 - Defaults: horizon `5.0`, step `0.25`, lead deceleration `-8.0`, crossing speed `8.0`, reaction `0.5`, ego deceleration `-6.0`, crawl speed `2.0`, crossing allowance `1.0`, speed spread `5.0`, low confidence `0.5`.
 
-- [ ] **Step 1: Write failing strict-config tests**
+- [x] **Step 1: Write failing strict-config tests**
 
 Create tests that demonstrate the intended API and constraints:
 
@@ -90,13 +90,13 @@ def test_unknown_agent_key_is_rejected() -> None:
         AppConfig.model_validate(payload)
 ```
 
-- [ ] **Step 2: Run the tests and verify RED**
+- [x] **Step 2: Run the tests and verify RED**
 
 Run: `.venv\Scripts\python.exe -m pytest tests\unit\config\test_agent_config.py -v`
 
 Expected: collection fails because the agent config classes and `AppConfig.agents` do not exist.
 
-- [ ] **Step 3: Implement frozen Pydantic models and explicit YAML defaults**
+- [x] **Step 3: Implement frozen Pydantic models and explicit YAML defaults**
 
 Use `FiniteFloat` plus `Field` constraints. Add a model validator to Nominal:
 
@@ -121,13 +121,13 @@ class NominalAgentConfig(StrictFrozenModel):
 
 Implement Hazard and Critic with the exact approved fields and constraints; `RuleAgentConfig` is a strict empty model. Declare `AppConfig.agents` with `Field(default_factory=AgentsConfig)` so old minimal configs continue to load, while adding all four sections explicitly to `configs/base.yaml` so the active defaults remain reviewable.
 
-- [ ] **Step 4: Verify GREEN and config regressions**
+- [x] **Step 4: Verify GREEN and config regressions**
 
 Run: `.venv\Scripts\python.exe -m pytest tests\unit\config -v`
 
 Expected: all Phase 1 and Phase 2 config tests pass.
 
-- [ ] **Step 5: Commit the independently reviewable config boundary**
+- [x] **Step 5: Commit the independently reviewable config boundary**
 
 ```powershell
 git add configs\base.yaml src\mad_driving\config\models.py tests\unit\config
