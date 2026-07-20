@@ -4,7 +4,7 @@ from collections.abc import Sequence
 
 from mad_driving.config.models import CoordinatorConfig
 from mad_driving.control import DrivingAction, action_for_speed_cap
-from mad_driving.interfaces import CriticReview, RiskClaim, SceneSnapshot
+from mad_driving.interfaces import CriticReview, RiskClaim, SceneObservation
 from mad_driving.interfaces.defensive_validation import (
     valid_claim,
     valid_review,
@@ -22,7 +22,7 @@ class RuleBasedCoordinator:
 
     def decide(
         self,
-        snapshot: SceneSnapshot,
+        snapshot: SceneObservation,
         claims: Sequence[RiskClaim],
         review: CriticReview,
     ) -> DrivingAction:

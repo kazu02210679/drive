@@ -49,6 +49,30 @@ def test_any_required_agent_missing_applies_prepare_stop_floor() -> None:
     assert action is DrivingAction.PREPARE_STOP
 
 
+def test_adding_a_more_hazardous_claim_never_weakens_action() -> None:
+    coordinator = RuleBasedCoordinator(CoordinatorConfig())
+    baseline_claims = (
+        make_claim("nominal", recommended_max_speed_mps=20.0),
+        make_claim("hazard", recommended_max_speed_mps=20.0),
+        make_claim("rule", recommended_max_speed_mps=20.0),
+    )
+    augmented_claims = (
+        *baseline_claims,
+        make_claim(
+            "hazard",
+            claim_id="hazard:2:none:test",
+            recommended_max_speed_mps=0.0,
+            hard_stop_required=True,
+        ),
+    )
+
+    baseline = coordinator.decide(make_snapshot(speed_limit_mps=20.0), baseline_claims, review())
+    augmented = coordinator.decide(make_snapshot(speed_limit_mps=20.0), augmented_claims, review())
+
+    assert augmented >= baseline
+    assert augmented is DrivingAction.STOP
+
+
 def test_conflict_and_severity_apply_minimum_actions() -> None:
     coordinator = RuleBasedCoordinator(CoordinatorConfig())
     claims = (

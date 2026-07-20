@@ -1,6 +1,7 @@
 """Fixed 24-dimensional coordinator observation assembly."""
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from math import isfinite
 
 import numpy as np
@@ -8,10 +9,65 @@ from numpy.typing import NDArray
 
 from mad_driving.config.models import ObservationConfig
 from mad_driving.control import target_speed_mps
-from mad_driving.interfaces import CriticReview, RiskClaim, SceneSnapshot
+from mad_driving.interfaces import CriticReview, RiskClaim, SceneObservation
 from mad_driving.interfaces.defensive_validation import valid_claim, valid_review, valid_snapshot
 
 _REQUIRED_AGENT_IDS = ("nominal", "hazard", "rule")
+
+
+@dataclass(frozen=True)
+class _AggregatedClaim:
+    """Safety-conservative feature values for one specialist's claims."""
+
+    agent_id: str
+    min_ttc_s: float | None
+    stopping_margin_m: float | None
+    probability: float | None
+    confidence: float
+    severity: float
+    recommended_max_speed_mps: float
+    hard_stop_required: bool
+
+
+def aggregate_agent_claims(
+    agent_id: str, claims: Sequence[RiskClaim]
+) -> _AggregatedClaim | None:
+    """Return one conservative aggregate, or ``None`` when an agent made no claim."""
+
+    if not isinstance(agent_id, str) or not agent_id:
+        raise ValueError("invalid agent_id")
+    if any(not valid_claim(claim) for claim in claims):
+        raise ValueError("invalid claim")
+
+    agent_claims = tuple(claim for claim in claims if claim.agent_id == agent_id)
+    if not agent_claims:
+        return None
+
+    finite_ttc = tuple(
+        claim.min_ttc_s
+        for claim in agent_claims
+        if claim.min_ttc_s is not None and isfinite(claim.min_ttc_s)
+    )
+    finite_margins = tuple(
+        claim.stopping_margin_m
+        for claim in agent_claims
+        if claim.stopping_margin_m is not None and isfinite(claim.stopping_margin_m)
+    )
+    probabilities = tuple(
+        claim.probability for claim in agent_claims if claim.probability is not None
+    )
+    return _AggregatedClaim(
+        agent_id=agent_id,
+        min_ttc_s=min(finite_ttc, default=None),
+        stopping_margin_m=min(finite_margins, default=None),
+        probability=max(probabilities, default=None),
+        confidence=min(claim.confidence for claim in agent_claims),
+        severity=max(claim.severity for claim in agent_claims),
+        recommended_max_speed_mps=min(
+            claim.recommended_max_speed_mps for claim in agent_claims
+        ),
+        hard_stop_required=any(claim.hard_stop_required for claim in agent_claims),
+    )
 
 
 def _unit(value: float, maximum: float) -> float:
@@ -40,19 +96,22 @@ class ObservationBuilder:
 
     def build(
         self,
-        snapshot: SceneSnapshot,
+        snapshot: SceneObservation,
         claims: Sequence[RiskClaim],
         review: CriticReview,
     ) -> NDArray[np.float32]:
         """Return the finite, bounded, fixed 24-slot observation."""
 
         self._validate(snapshot, claims, review)
-        indexed = self._claim_index(claims)
-        nominal = indexed.get("nominal")
-        hazard = indexed.get("hazard")
-        rule = indexed.get("rule")
+        nominal = aggregate_agent_claims("nominal", claims)
+        hazard = aggregate_agent_claims("hazard", claims)
+        rule = aggregate_agent_claims("rule", claims)
         ego = snapshot.ego
-        target = target_speed_mps(snapshot.previous_action, ego.speed_mps, ego.speed_limit_mps)
+        target = target_speed_mps(
+            snapshot.previous_executed_action,
+            ego.speed_mps,
+            ego.speed_limit_mps,
+        )
         supported = set(review.supported_agent_ids)
 
         values = np.asarray(
@@ -84,16 +143,14 @@ class ObservationBuilder:
                 1.0 if rule is None or rule.hard_stop_required else 0.0,
                 float(
                     rule is None
-                    or snapshot.stop_required
-                    or snapshot.intersection_entry_prohibited
-                    or snapshot.collision_occurred
-                    or snapshot.off_road
+                    or snapshot.road_context.stop_required
+                    or snapshot.road_context.intersection_entry_prohibited
                 ),
                 _unit(review.conflict_score, 1.0),
                 float(review.unresolved_conflict),
                 _unit(len(supported.intersection(_REQUIRED_AGENT_IDS)) / 3.0, 1.0),
                 _unit(review.max_severity, 1.0),
-                _unit(float(snapshot.previous_action), 3.0),
+                _unit(float(snapshot.previous_executed_action), 3.0),
                 float(snapshot.previous_shield_intervention),
             ],
             dtype=np.float32,
@@ -101,14 +158,6 @@ class ObservationBuilder:
         if values.shape != (24,) or not np.isfinite(values).all():
             raise ValueError("observation must contain 24 finite values")
         return np.clip(values, -1.0, 1.0).astype(np.float32, copy=False)
-
-    def _claim_index(self, claims: Sequence[RiskClaim]) -> dict[str, RiskClaim]:
-        indexed: dict[str, RiskClaim] = {}
-        for claim in claims:
-            if claim.agent_id in indexed:
-                raise ValueError(f"duplicate agent_id: {claim.agent_id}")
-            indexed[claim.agent_id] = claim
-        return indexed
 
     @staticmethod
     def _speed_ratio(target_speed_mps: float, speed_limit_mps: float) -> float:
@@ -118,7 +167,7 @@ class ObservationBuilder:
 
     @staticmethod
     def _validate(
-        snapshot: SceneSnapshot,
+        snapshot: SceneObservation,
         claims: Sequence[RiskClaim],
         review: CriticReview,
     ) -> None:

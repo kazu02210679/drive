@@ -60,13 +60,13 @@ def make_layout_snapshot() -> object:
     snapshot = make_snapshot(
         ego_speed_mps=20.0,
         speed_limit_mps=30.0,
-        previous_action=1,
+        previous_executed_action=1,
         previous_shield_intervention=True,
-        intersection_entry_prohibited=True,
     )
     return replace(
         snapshot,
         ego=replace(snapshot.ego, acceleration_mps2=5.0, lane_offset_m=-1.75),
+        road_context=replace(snapshot.road_context, intersection_entry_prohibited=True),
     )
 
 
@@ -186,6 +186,95 @@ def test_hazard_none_ttc_maps_slot_10_to_safe_upper_bound() -> None:
     assert obs[10] == 1.0
 
 
+def test_multiple_hazard_claims_are_aggregated_field_wise() -> None:
+    claims = (
+        make_claim(
+            "hazard",
+            min_ttc_s=4.0,
+            severity=0.9,
+            stopping_margin_m=8.0,
+            recommended_max_speed_mps=10.0,
+        ),
+        make_claim(
+            "hazard",
+            claim_id="hazard:2:none:test",
+            min_ttc_s=1.0,
+            severity=0.4,
+            stopping_margin_m=-2.0,
+            recommended_max_speed_mps=4.0,
+        ),
+    )
+    complete_claims = (make_claim("nominal"), *claims, make_claim("rule"))
+    review = make_review(
+        conflict_score=0.0,
+        unresolved_conflict=False,
+        max_severity=0.9,
+        supported_agent_ids=("nominal", "hazard", "rule"),
+        reasons=(),
+    )
+
+    observation = ObservationBuilder(ObservationConfig()).build(
+        make_snapshot(), complete_claims, review
+    )
+
+    assert observation[10] == pytest.approx(0.1)
+    assert observation[11] == pytest.approx(-0.04)
+    assert observation[12] == pytest.approx(0.9)
+    assert observation[14] == pytest.approx(0.1)
+
+
+def test_observation_stays_24_float32_with_duplicate_agent_claims() -> None:
+    claims = (
+        make_claim("nominal", min_ttc_s=4.0, probability=0.2, confidence=0.8),
+        make_claim(
+            "nominal",
+            claim_id="nominal:2:none:test",
+            min_ttc_s=2.0,
+            probability=0.9,
+            confidence=0.3,
+            recommended_max_speed_mps=4.0,
+        ),
+        make_claim("hazard"),
+        make_claim("rule"),
+    )
+    review = make_review(
+        conflict_score=0.0,
+        unresolved_conflict=False,
+        max_severity=0.0,
+        supported_agent_ids=("nominal", "hazard", "rule"),
+        reasons=(),
+    )
+
+    value = ObservationBuilder(ObservationConfig()).build(make_snapshot(), claims, review)
+
+    assert value.shape == (24,)
+    assert value.dtype == np.float32
+    assert np.isfinite(value).all()
+    assert value[6] == pytest.approx(0.2)
+    assert value[7] == pytest.approx(0.9)
+    assert value[8] == pytest.approx(0.3)
+    assert value[9] == pytest.approx(0.1)
+
+
+def test_rule_claims_aggregate_any_hard_stop_and_lowest_speed() -> None:
+    claims = (
+        make_claim("nominal"),
+        make_claim("hazard"),
+        make_claim("rule", recommended_max_speed_mps=20.0),
+        make_claim(
+            "rule",
+            claim_id="rule:2:none:test",
+            recommended_max_speed_mps=0.0,
+            hard_stop_required=True,
+        ),
+    )
+
+    value = ObservationBuilder(ObservationConfig()).build(make_snapshot(), claims, make_review())
+
+    assert value[15] == 0.0
+    assert value[16] == 1.0
+
+
 def test_huge_valid_values_are_clipped_to_observation_bounds() -> None:
     snapshot = make_snapshot(ego_speed_mps=1_000_000.0, speed_limit_mps=1_000_000.0)
     snapshot = replace(
@@ -217,11 +306,12 @@ def test_huge_valid_values_are_clipped_to_observation_bounds() -> None:
 @pytest.mark.parametrize(
     ("claims", "review"),
     [
-        ((make_claim("nominal"), make_claim("nominal", claim_id="nominal:2")), make_review()),
         ((make_claim("nominal"),), make_review(supported_agent_ids=("nominal", "nominal"))),
     ],
 )
-def test_duplicate_agent_ids_are_rejected(claims: tuple[object, ...], review: CriticReview) -> None:
+def test_duplicate_review_agent_ids_are_rejected(
+    claims: tuple[object, ...], review: CriticReview
+) -> None:
     with pytest.raises(ValueError, match="duplicate agent_id"):
         ObservationBuilder(ObservationConfig()).build(
             make_snapshot(),
@@ -255,12 +345,8 @@ def test_randomized_valid_inputs_are_finite_bounded_and_deterministic() -> None:
         snapshot = make_snapshot(
             ego_speed_mps=speed,
             speed_limit_mps=limit,
-            previous_action=rng.randrange(4),
+            previous_executed_action=rng.randrange(4),
             previous_shield_intervention=bool(rng.randrange(2)),
-            stop_required=bool(rng.randrange(2)),
-            collision_occurred=bool(rng.randrange(2)),
-            off_road=bool(rng.randrange(2)),
-            intersection_entry_prohibited=bool(rng.randrange(2)),
         )
         snapshot = replace(
             snapshot,
@@ -269,6 +355,11 @@ def test_randomized_valid_inputs_are_finite_bounded_and_deterministic() -> None:
                 acceleration_mps2=rng.uniform(-10_000.0, 10_000.0),
                 lane_offset_m=rng.uniform(-10_000.0, 10_000.0),
                 route_progress=rng.uniform(0.0, 1.0),
+            ),
+            road_context=replace(
+                snapshot.road_context,
+                stop_required=bool(rng.randrange(2)),
+                intersection_entry_prohibited=bool(rng.randrange(2)),
             ),
         )
         claims = (
