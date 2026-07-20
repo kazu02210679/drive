@@ -112,11 +112,7 @@ class LaneKeepingLongitudinalPolicy(BasePolicy):  # type: ignore[misc]
         dt_s: float,
     ) -> tuple[float, float, float]:
         navigation = getattr(vehicle, "navigation", None)
-        lane = (
-            getattr(navigation, "current_lane", None)
-            if navigation is not None
-            else None
-        )
+        lane = getattr(navigation, "current_lane", None) if navigation is not None else None
         if lane is None:
             lane = getattr(vehicle, "lane", None)
         if lane is None:
@@ -132,8 +128,8 @@ class LaneKeepingLongitudinalPolicy(BasePolicy):  # type: ignore[misc]
         target = target_speed_mps(action, current_speed, speed_limit)
 
         heading_error = atan2(
-            sin(vehicle_heading - lane_heading),
-            cos(vehicle_heading - lane_heading),
+            sin(lane_heading - vehicle_heading),
+            cos(lane_heading - vehicle_heading),
         )
         heading_command = self._heading_pid.update(
             heading_error,
@@ -142,7 +138,7 @@ class LaneKeepingLongitudinalPolicy(BasePolicy):  # type: ignore[misc]
             1.0,
         )
         lateral_command = self._lateral_pid.update(
-            -float(lateral),
+            float(lateral),
             dt_s,
             -1.0,
             1.0,

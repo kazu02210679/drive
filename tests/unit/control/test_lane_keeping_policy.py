@@ -55,9 +55,7 @@ def test_policy_keep_accelerates_below_target(
     fake_vehicle: FakeVehicle,
 ) -> None:
     fake_vehicle.speed = 2.0
-    steering, throttle = fake_policy._compute_action(
-        fake_vehicle, DrivingAction.KEEP, 0.1
-    )
+    steering, throttle = fake_policy._compute_action(fake_vehicle, DrivingAction.KEEP, 0.1)
     assert -1.0 <= steering <= 1.0
     assert 0.0 < throttle <= 1.0
 
@@ -76,16 +74,12 @@ def test_lateral_errors_steer_toward_lane(
     fake_vehicle: FakeVehicle,
 ) -> None:
     fake_vehicle.position = (5.0, 1.0)
-    right_correction = fake_policy._compute_action(
-        fake_vehicle, DrivingAction.KEEP, 0.1
-    )[0]
+    right_correction = fake_policy._compute_action(fake_vehicle, DrivingAction.KEEP, 0.1)[0]
     fake_policy.reset_controller_state()
     fake_vehicle.position = (5.0, -1.0)
-    left_correction = fake_policy._compute_action(
-        fake_vehicle, DrivingAction.KEEP, 0.1
-    )[0]
+    left_correction = fake_policy._compute_action(fake_vehicle, DrivingAction.KEEP, 0.1)[0]
     assert right_correction == -left_correction
-    assert right_correction < 0.0 < left_correction
+    assert left_correction < 0.0 < right_correction
 
 
 def test_heading_error_steers_toward_lane(
@@ -93,9 +87,7 @@ def test_heading_error_steers_toward_lane(
     fake_vehicle: FakeVehicle,
 ) -> None:
     fake_vehicle.heading_theta = 0.2
-    assert (
-        fake_policy._compute_action(fake_vehicle, DrivingAction.KEEP, 0.1)[0] > 0.0
-    )
+    assert fake_policy._compute_action(fake_vehicle, DrivingAction.KEEP, 0.1)[0] < 0.0
 
 
 def test_missing_lane_fails_safe(
@@ -104,9 +96,7 @@ def test_missing_lane_fails_safe(
 ) -> None:
     fake_vehicle.navigation.current_lane = None
     fake_vehicle.lane = None
-    assert fake_policy._compute_action(
-        fake_vehicle, DrivingAction.KEEP, 0.1
-    ) == (0.0, -1.0)
+    assert fake_policy._compute_action(fake_vehicle, DrivingAction.KEEP, 0.1) == (0.0, -1.0)
     assert fake_policy.action_info["fail_safe"] is True
 
 
@@ -125,9 +115,7 @@ def test_non_finite_vehicle_speed_fails_safe(
     fake_vehicle: FakeVehicle,
 ) -> None:
     fake_vehicle.speed = math.nan
-    assert fake_policy._compute_action(
-        fake_vehicle, DrivingAction.KEEP, 0.1
-    ) == (0.0, -1.0)
+    assert fake_policy._compute_action(fake_vehicle, DrivingAction.KEEP, 0.1) == (0.0, -1.0)
 
 
 def test_speed_limit_falls_back_to_vehicle_limit(

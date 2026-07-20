@@ -34,12 +34,15 @@ adding production Policy code.
 
 ## Minimal compatibility choices
 
-MetaDrive's bundled `LaneChangePolicy.steering_control()` negates both the
-wrapped lane-heading difference and lateral offset. The approved pseudocode
-showed positive errors, which would use the opposite sign under the installed
-coordinate convention. The custom Policy therefore follows MetaDrive 0.4.3:
-positive lateral offset produces negative steering, and the heading error is
-`vehicle_heading - lane_heading`, wrapped to `[-pi, pi]`.
+MetaDrive's bundled `LaneChangePolicy.steering_control()` passes negated errors
+to its PID, but that bundled PID also negates its output. The first direct port
+preserved the input negation while replacing the PID with positive-output
+`BoundedPID`; the canonical control smoke then left the road at decision 32.
+A real regression test reproduced the failure. Accounting for the bundled
+PID's hidden output sign shows that the approved pseudocode was correct:
+positive lateral offset produces positive steering, and heading error is
+`lane_heading - vehicle_heading`, wrapped to `[-pi, pi]`. This minimal sign
+correction keeps the installed coordinate and steering conventions intact.
 
 `MetaDriveEnv.default_config()` returns a fresh `Config`. Its `update()` method
 supports `allow_add_new_key=True`, so the smallest binding is a subclass whose
@@ -59,3 +62,36 @@ full emergency braking at moderate speed, while the approved behavior and its
 acceptance test require STOP to use emergency deceleration. STOP therefore
 resets the longitudinal PID and directly commands the configured emergency
 deceleration; the other three actions remain PID controlled.
+
+## Verification environment
+
+- Python 3.11.9
+- metadrive-simulator 0.4.3
+- Gymnasium 1.3.0
+- Pydantic 2.11.7
+- pytest 8.4.1
+- Ruff 0.12.4
+- mypy 1.16.1
+
+## Canonical verification evidence
+
+The canonical seed is 42 and one decision interval is 0.1 seconds.
+
+- The shielded control smoke completed 100 decisions, or 10.0 simulated
+  seconds, without termination or truncation.
+- Its Action counts were `(78, 22, 0, 0)` for KEEP, SLOW, PREPARE_STOP, and
+  STOP. The Shield made 0 actual interventions. The final Action was SLOW.
+- The unchanged fixed-action smoke also completed 100 decisions, or 10.0
+  simulated seconds, without termination or truncation and returned all three
+  Agent claims.
+- The real Policy integration covers `Discrete(4)`, finite steering and
+  throttle/brake, forced STOP deceleration, and 60 KEEP decisions without an
+  out-of-road result.
+- The complete suite passed 247 tests with 96.90% branch coverage (reported as
+  97% in the rounded table), above the required 80%.
+- Strict mypy and Ruff checks pass for the Phase 3 boundaries. The final fresh
+  repository-wide gate is recorded by the Phase 3 plan checklist.
+
+The only accepted warnings are 14 upstream Pyparsing deprecations imported by
+Matplotlib: one `oneOf`, six `parseString`, six `resetCache`, and one
+`enablePackrat` warning. No project warning is suppressed.

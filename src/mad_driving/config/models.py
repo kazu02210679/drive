@@ -120,10 +120,7 @@ class SpeedPIDConfig(StrictFrozenModel):
     @model_validator(mode="after")
     def validate_deceleration_order(self) -> Self:
         if self.emergency_deceleration_mps2 > self.normal_deceleration_mps2:
-            raise ValueError(
-                "emergency_deceleration_mps2 must not exceed "
-                "normal_deceleration_mps2"
-            )
+            raise ValueError("emergency_deceleration_mps2 must not exceed normal_deceleration_mps2")
         return self
 
 

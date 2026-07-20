@@ -50,11 +50,7 @@ class BoundedPID:
         _require_finite(error, dt_s, lower, upper)
         if dt_s <= 0.0 or lower > upper:
             raise ValueError("invalid PID update bounds")
-        derivative = (
-            0.0
-            if self._previous_error is None
-            else (error - self._previous_error) / dt_s
-        )
+        derivative = 0.0 if self._previous_error is None else (error - self._previous_error) / dt_s
         candidate = _clip(
             self._integral + error * dt_s,
             -self._integral_limit,
@@ -65,11 +61,7 @@ class BoundedPID:
         saturated_low = raw < lower
         if not ((saturated_high and error > 0.0) or (saturated_low and error < 0.0)):
             self._integral = candidate
-            raw = (
-                self._kp * error
-                + self._ki * self._integral
-                + self._kd * derivative
-            )
+            raw = self._kp * error + self._ki * self._integral + self._kd * derivative
         self._previous_error = error
         return _clip(raw, lower, upper)
 

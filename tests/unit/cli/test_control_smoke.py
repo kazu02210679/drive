@@ -118,9 +118,7 @@ class RecordingSuite:
         self.min_ttc_s = min_ttc_s
         self.snapshots: list[SceneSnapshot] = []
 
-    def analyze(
-        self, snapshot: SceneSnapshot
-    ) -> tuple[tuple[Any, ...], CriticReview]:
+    def analyze(self, snapshot: SceneSnapshot) -> tuple[tuple[Any, ...], CriticReview]:
         self.snapshots.append(snapshot)
         claims = (
             make_claim("nominal"),
@@ -139,9 +137,7 @@ class FailingSuite:
 def test_control_smoke_runs_decision_pipeline_and_closes() -> None:
     created: list[FakeControlEnv] = []
 
-    def factory(
-        options: dict[str, object], control: ControlConfig
-    ) -> FakeControlEnv:
+    def factory(options: dict[str, object], control: ControlConfig) -> FakeControlEnv:
         del control
         env = FakeControlEnv(options)
         created.append(env)
@@ -246,9 +242,7 @@ def test_main_serializes_finite_json(
 
     document = json.loads(
         capsys.readouterr().out,
-        parse_constant=lambda value: (_ for _ in ()).throw(
-            ValueError(f"non-finite JSON: {value}")
-        ),
+        parse_constant=lambda value: (_ for _ in ()).throw(ValueError(f"non-finite JSON: {value}")),
     )
     assert exit_code == 0
     assert document["action_counts"] == [2, 0, 0, 0]

@@ -19,9 +19,7 @@ class ShieldResult:
     def __post_init__(self) -> None:
         for name in ("requested_action", "required_action", "executed_action"):
             object.__setattr__(self, name, DrivingAction(getattr(self, name)))
-        if self.intervention_required != (
-            self.required_action > self.requested_action
-        ):
+        if self.intervention_required != (self.required_action > self.requested_action):
             raise ValueError("intervention_required is inconsistent")
         if self.intervened != (self.executed_action != self.requested_action):
             raise ValueError("intervened is inconsistent")

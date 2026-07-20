@@ -55,8 +55,7 @@ def test_conflict_and_severity_apply_minimum_actions() -> None:
         make_claim("rule"),
     )
     assert (
-        coordinator.decide(make_snapshot(), claims, review(unresolved=True))
-        is DrivingAction.SLOW
+        coordinator.decide(make_snapshot(), claims, review(unresolved=True)) is DrivingAction.SLOW
     )
     assert (
         coordinator.decide(

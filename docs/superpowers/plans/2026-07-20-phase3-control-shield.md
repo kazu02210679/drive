@@ -1425,7 +1425,7 @@ Run: `.venv\Scripts\python.exe -m pytest tests\unit\cli\test_control_smoke.py te
 
 Expected: control lifecycle, fallback STOP, closure, action counts, trace, finite JSON, and unchanged fixed-action smoke all pass.
 
-- [ ] **Step 7: Commit control smoke independently**
+- [x] **Step 7: Commit control smoke independently**
 
 ```powershell
 git add src\mad_driving\envs\multi_agent_speed_env.py src\mad_driving\cli\control_smoke.py tests\unit\cli
@@ -1446,7 +1446,7 @@ git commit -m "feat: run shielded rule-based control smoke"
 - Verifies real MetaDrive lifecycle, Discrete(4), finite low-level commands, lane keeping, forced STOP deceleration, Agent decisions, Shield results, typed trace, and closure.
 - Documents exact dependency versions, API observations, deviations, test count, branch coverage, warnings, and simulated seconds.
 
-- [ ] **Step 1: Add a real forced-STOP integration assertion**
+- [x] **Step 1: Add a real forced-STOP integration assertion**
 
 Create a short test that accelerates from reset with KEEP, captures speed, then applies STOP for enough decisions to observe deceleration:
 
@@ -1470,7 +1470,7 @@ def test_real_policy_stop_reduces_speed() -> None:
 
 If MetaDrive terminates before either loop completes, break on terminated/truncated and assert only when the required samples exist; record this installed-API behavior. Do not disable collision or out-of-road termination merely to force the assertion.
 
-- [ ] **Step 2: Run targeted real integration and control smoke**
+- [x] **Step 2: Run targeted real integration and control smoke**
 
 Run:
 
@@ -1488,13 +1488,13 @@ Expected:
 - final JSON contains finite snapshot, claims, review, trace, and intervention count;
 - no render window opens.
 
-- [ ] **Step 3: Prove the old fixed-action smoke still works**
+- [x] **Step 3: Prove the old fixed-action smoke still works**
 
 Run: `.venv\Scripts\python.exe -m mad_driving.cli.smoke --config configs\base.yaml`
 
 Expected: 100-step Phase 2 fixed-action JSON remains present and does not use Coordinator, Shield, or custom Policy.
 
-- [ ] **Step 4: Update README and Phase 3 evidence**
+- [x] **Step 4: Update README and Phase 3 evidence**
 
 README must state:
 
@@ -1515,7 +1515,7 @@ README must state:
 - action counts and intervention count from the canonical control smoke;
 - all accepted upstream warnings.
 
-- [ ] **Step 5: Run the complete quality gate fresh**
+- [x] **Step 5: Run the complete quality gate fresh**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest --cov=mad_driving --cov-report=term-missing -q
@@ -1528,7 +1528,7 @@ git diff --check
 
 Expected: all tests pass, total branch coverage is at least 80%, Ruff and formatting report no changes, mypy reports no issues, and both diff checks exit zero. Only documented upstream Matplotlib/Pyparsing warnings are accepted.
 
-- [ ] **Step 6: Review scope and commit verification evidence**
+- [x] **Step 6: Review scope and commit verification evidence**
 
 Run:
 

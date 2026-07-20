@@ -56,9 +56,7 @@ def test_pid_rejects_non_finite_update_values(value: float) -> None:
     ("dt_s", "lower", "upper"),
     [(0.0, -1.0, 1.0), (-0.1, -1.0, 1.0), (0.1, 2.0, 1.0)],
 )
-def test_pid_rejects_invalid_update_bounds(
-    dt_s: float, lower: float, upper: float
-) -> None:
+def test_pid_rejects_invalid_update_bounds(dt_s: float, lower: float, upper: float) -> None:
     with pytest.raises(ValueError):
         BoundedPID(1.0, 0.0, 0.0, 1.0).update(1.0, dt_s, lower, upper)
 

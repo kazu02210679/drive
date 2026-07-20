@@ -26,9 +26,7 @@ def test_enforce_never_relaxes_requested_action() -> None:
 
 def test_modes_distinguish_candidate_from_real_intervention() -> None:
     claims = complete_claims(min_ttc_s=0.5)
-    off = SafetyShield(ShieldConfig(mode="off")).filter(
-        DrivingAction.KEEP, make_snapshot(), claims
-    )
+    off = SafetyShield(ShieldConfig(mode="off")).filter(DrivingAction.KEEP, make_snapshot(), claims)
     monitor = SafetyShield(ShieldConfig(mode="monitor")).filter(
         DrivingAction.KEEP, make_snapshot(), claims
     )
@@ -140,15 +138,9 @@ def test_margin_boundaries_are_explicit() -> None:
 
 def test_ttc_boundaries_are_explicit() -> None:
     shield = SafetyShield(ShieldConfig())
-    imminent = shield.filter(
-        DrivingAction.KEEP, make_snapshot(), complete_claims(min_ttc_s=1.0)
-    )
-    caution = shield.filter(
-        DrivingAction.KEEP, make_snapshot(), complete_claims(min_ttc_s=3.0)
-    )
-    clear = shield.filter(
-        DrivingAction.KEEP, make_snapshot(), complete_claims(min_ttc_s=3.001)
-    )
+    imminent = shield.filter(DrivingAction.KEEP, make_snapshot(), complete_claims(min_ttc_s=1.0))
+    caution = shield.filter(DrivingAction.KEEP, make_snapshot(), complete_claims(min_ttc_s=3.0))
+    clear = shield.filter(DrivingAction.KEEP, make_snapshot(), complete_claims(min_ttc_s=3.001))
     assert imminent.reasons == ("imminent_ttc",)
     assert caution.reasons == ("caution_ttc",)
     assert clear.reasons == ()
@@ -157,9 +149,7 @@ def test_ttc_boundaries_are_explicit() -> None:
 def test_invalid_claim_is_stopped_before_arithmetic() -> None:
     claim = make_claim()
     object.__setattr__(claim, "min_ttc_s", math.nan)
-    result = SafetyShield(ShieldConfig()).filter(
-        DrivingAction.KEEP, make_snapshot(), (claim,)
-    )
+    result = SafetyShield(ShieldConfig()).filter(DrivingAction.KEEP, make_snapshot(), (claim,))
     assert result.executed_action is DrivingAction.STOP
     assert result.reasons == ("invalid_input", "multiple_agents_missing")
 
@@ -167,9 +157,7 @@ def test_invalid_claim_is_stopped_before_arithmetic() -> None:
 def test_invalid_snapshot_is_stopped_before_speed_mapping() -> None:
     snapshot = make_snapshot()
     object.__setattr__(snapshot.ego, "speed_limit_mps", math.nan)
-    result = SafetyShield(ShieldConfig()).filter(
-        DrivingAction.KEEP, snapshot, complete_claims()
-    )
+    result = SafetyShield(ShieldConfig()).filter(DrivingAction.KEEP, snapshot, complete_claims())
     assert result.executed_action is DrivingAction.STOP
     assert result.reasons == ("invalid_input",)
 

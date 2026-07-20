@@ -80,29 +80,17 @@ class SafetyShield:
             reasons.append("agent_missing")
             candidates.append(DrivingAction(self._config.missing_agent_action))
 
-        ttc_values = tuple(
-            claim.min_ttc_s
-            for claim in valid_claims
-            if claim.min_ttc_s is not None
-        )
+        ttc_values = tuple(claim.min_ttc_s for claim in valid_claims if claim.min_ttc_s is not None)
         minimum_ttc = min(ttc_values, default=None)
-        if (
-            minimum_ttc is not None
-            and minimum_ttc <= self._config.imminent_ttc_s
-        ):
+        if minimum_ttc is not None and minimum_ttc <= self._config.imminent_ttc_s:
             reasons.append("imminent_ttc")
             candidates.append(DrivingAction.STOP)
 
         margin_values = tuple(
-            claim.stopping_margin_m
-            for claim in valid_claims
-            if claim.stopping_margin_m is not None
+            claim.stopping_margin_m for claim in valid_claims if claim.stopping_margin_m is not None
         )
         minimum_margin = min(margin_values, default=None)
-        if (
-            minimum_margin is not None
-            and minimum_margin < self._config.emergency_margin_m
-        ):
+        if minimum_margin is not None and minimum_margin < self._config.emergency_margin_m:
             reasons.append("negative_stopping_margin")
             candidates.append(DrivingAction.STOP)
 
@@ -138,11 +126,7 @@ class SafetyShield:
                 candidates.append(claim_action)
 
         required = max(candidates)
-        executed = (
-            requested
-            if self._config.mode == "monitor"
-            else max(requested, required)
-        )
+        executed = requested if self._config.mode == "monitor" else max(requested, required)
         return ShieldResult(
             requested_action=requested,
             required_action=required,
