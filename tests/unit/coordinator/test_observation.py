@@ -178,6 +178,14 @@ def test_normalization_boundaries_and_none_ttc_are_exact() -> None:
     )
 
 
+def test_hazard_none_ttc_maps_slot_10_to_safe_upper_bound() -> None:
+    claims = (make_claim("hazard", min_ttc_s=None, stopping_margin_m=0.0),)
+
+    obs = ObservationBuilder(ObservationConfig()).build(make_snapshot(), claims, make_review())
+
+    assert obs[10] == 1.0
+
+
 def test_huge_valid_values_are_clipped_to_observation_bounds() -> None:
     snapshot = make_snapshot(ego_speed_mps=1_000_000.0, speed_limit_mps=1_000_000.0)
     snapshot = replace(
@@ -216,7 +224,9 @@ def test_huge_valid_values_are_clipped_to_observation_bounds() -> None:
 def test_duplicate_agent_ids_are_rejected(claims: tuple[object, ...], review: CriticReview) -> None:
     with pytest.raises(ValueError, match="duplicate agent_id"):
         ObservationBuilder(ObservationConfig()).build(
-            make_snapshot(), claims, review  # type: ignore[arg-type]
+            make_snapshot(),
+            claims,
+            review,  # type: ignore[arg-type]
         )
 
 
