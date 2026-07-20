@@ -223,7 +223,7 @@ git commit -m "feat: add rule state to scene snapshots"
 - Produces: `stopping_distance(speed_mps, deceleration_mps2) -> float` where deceleration is strictly negative.
 - Produces: `safe_speed_for_distance(distance_m, reaction_s, deceleration_mps2) -> float`.
 
-- [ ] **Step 1: Write focused failing physics tests**
+- [x] **Step 1: Write focused failing physics tests**
 
 ```python
 def test_sample_times_includes_exact_horizon() -> None:
@@ -247,13 +247,13 @@ def test_stopping_distance_rejects_invalid_deceleration(bad: float) -> None:
 
 Also cover zero speed, negative distance clamped to zero safe speed, vector rotation at `pi/2`, relative constant acceleration, and non-finite inputs.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run: `.venv\Scripts\python.exe -m pytest tests\unit\agents\test_kinematics.py -v`
 
 Expected: import failure because `mad_driving.agents.kinematics` does not exist.
 
-- [ ] **Step 3: Implement only the tested finite formulas**
+- [x] **Step 3: Implement only the tested finite formulas**
 
 Use existing `finite_float` validation. Construct sample times by integer index through `floor(horizon/step)` and append the exact horizon only when the last regular sample is smaller; never replace or duplicate a regular sample. Use the approved quadratic positive root:
 
@@ -262,13 +262,13 @@ braking = abs(deceleration_mps2)
 return max(0.0, sqrt((braking * reaction_s) ** 2 + 2 * braking * distance_m) - braking * reaction_s)
 ```
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 Run: `.venv\Scripts\python.exe -m pytest tests\unit\agents\test_kinematics.py -v`
 
 Expected: every kinematic boundary test passes.
 
-- [ ] **Step 5: Commit pure physics utilities**
+- [x] **Step 5: Commit pure physics utilities**
 
 ```powershell
 git add src\mad_driving\agents tests\unit\agents\test_kinematics.py
