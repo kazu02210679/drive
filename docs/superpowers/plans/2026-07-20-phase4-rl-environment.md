@@ -393,7 +393,7 @@ git commit -m "feat: calculate phase 4 driving rewards"
   factories for real and fake tests.
 - Public Gym API is exactly `reset(*, seed=None, options=None)` and `step(action)`.
 
-- [ ] **Step 1: Write failing space/reset/seed tests with a complete fake simulator**
+- [x] **Step 1: Write failing space/reset/seed tests with a complete fake simulator**
 
 ```python
 def test_env_exposes_fixed_spaces_and_seeded_reset() -> None:
@@ -411,7 +411,7 @@ def test_env_exposes_fixed_spaces_and_seeded_reset() -> None:
         env.close()
 ```
 
-- [ ] **Step 2: Write failing decision-pipeline and trace tests**
+- [x] **Step 2: Write failing decision-pipeline and trace tests**
 
 Prove that requested action reaches Shield, only executed action reaches simulator, next claims build
 next Observation, scalar reward equals component sum, and `DecisionTrace` uses pre-step claims/review
@@ -426,19 +426,19 @@ assert info["decision_trace"].reward_components == info["reward_components"]
 assert reward == pytest.approx(sum(info["reward_components"].values()))
 ```
 
-- [ ] **Step 3: Write failing lifecycle/error tests**
+- [x] **Step 3: Write failing lifecycle/error tests**
 
 Cover step-before-reset, invalid action, idempotent close, reset after close, raw terminated/truncated
 mapping, arrival/crash info mapping, Agent exception fallback, Observation failure causing STOP/truncation,
 simulator step exception returning `truncated=True`, and simulator recreation on next reset.
 
-- [ ] **Step 4: Run the wrapper tests and verify RED**
+- [x] **Step 4: Run the wrapper tests and verify RED**
 
 Run: `.venv\Scripts\python.exe -m pytest tests/unit/envs/test_multi_agent_speed_env.py -v`
 
 Expected: import failure because concrete `MultiAgentSpeedEnv` does not exist.
 
-- [ ] **Step 5: Implement the minimal Gymnasium wrapper**
+- [x] **Step 5: Implement the minimal Gymnasium wrapper**
 
 ```python
 class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
@@ -465,13 +465,13 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
 Move Phase 3 `_fallback_analysis` and `_analyze_safely` to a shared simulator-independent helper only
 if needed by both the old smoke and wrapper; preserve the old CLI behavior and tests exactly.
 
-- [ ] **Step 6: Run wrapper plus Phase 3 smoke suites and verify GREEN**
+- [x] **Step 6: Run wrapper plus Phase 3 smoke suites and verify GREEN**
 
 Run: `.venv\Scripts\python.exe -m pytest tests/unit/envs/test_multi_agent_speed_env.py tests/unit/cli/test_control_smoke.py -v`
 
 Expected: all new lifecycle tests and all existing control smoke tests pass.
 
-- [ ] **Step 7: Commit Task 4**
+- [x] **Step 7: Commit Task 4**
 
 ```powershell
 git add src/mad_driving/envs src/mad_driving/agents src/mad_driving/cli/control_smoke.py tests/unit/envs/test_multi_agent_speed_env.py
