@@ -284,7 +284,7 @@ git commit -m "feat: build fixed coordinator observations"
 - Produces immutable `RewardResult(total, components)`.
 - Produces stateful `RewardCalculator(config).reset()` and `.calculate(context)`.
 
-- [ ] **Step 1: Write one failing test per Reward component**
+- [x] **Step 1: Write one failing test per Reward component**
 
 ```python
 def test_reward_components_are_signed_and_sum_to_total() -> None:
@@ -307,7 +307,7 @@ Separate tests cover forward-only progress, one-shot arrival, continuous near-mi
 `0`, midpoint, threshold and above, off-road, rule violation, jerk with fallback `dt`, standstill,
 and Shield intervention.
 
-- [ ] **Step 2: Write the failing unnecessary-brake lookahead/reset tests**
+- [x] **Step 2: Write the failing unnecessary-brake lookahead/reset tests**
 
 ```python
 def test_unnecessary_brake_penalty_starts_after_safe_lookahead() -> None:
@@ -325,13 +325,13 @@ def test_unnecessary_brake_penalty_starts_after_safe_lookahead() -> None:
 
 Also prove any dangerous post-step event clears the streak.
 
-- [ ] **Step 3: Run Reward tests and verify RED**
+- [x] **Step 3: Run Reward tests and verify RED**
 
 Run: `.venv\Scripts\python.exe -m pytest tests/unit/envs/test_reward.py -v`
 
 Expected: import failure because the Reward module does not exist.
 
-- [ ] **Step 4: Implement the minimal Reward state machine**
+- [x] **Step 4: Implement the minimal Reward state machine**
 
 ```python
 @dataclass(frozen=True)
@@ -364,13 +364,13 @@ class RewardCalculator:
 Validate every computed value before returning and copy the components mapping in
 `RewardResult.__post_init__`.
 
-- [ ] **Step 5: Run Reward tests and verify GREEN**
+- [x] **Step 5: Run Reward tests and verify GREEN**
 
 Run: `.venv\Scripts\python.exe -m pytest tests/unit/envs/test_reward.py -v`
 
 Expected: all ten components, reset behavior, continuity, and finite-value tests pass.
 
-- [ ] **Step 6: Commit Task 3**
+- [x] **Step 6: Commit Task 3**
 
 ```powershell
 git add src/mad_driving/envs/reward.py tests/unit/envs/test_reward.py
