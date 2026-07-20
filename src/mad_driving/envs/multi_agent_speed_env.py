@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from dataclasses import dataclass
+from math import isclose
 from numbers import Integral
 from typing import Any, Protocol, cast
 
@@ -34,7 +36,6 @@ from mad_driving.interfaces import (
     RiskClaim,
     SceneFrame,
     SceneObservation,
-    SceneSnapshot,
     ShieldResult,
 )
 from mad_driving.safety import SafetyShield
@@ -149,7 +150,7 @@ class SmokeResult:
     steps_completed: int
     terminated: bool
     truncated: bool
-    final_snapshot: SceneSnapshot
+    final_snapshot: SceneObservation
     final_claims: tuple[RiskClaim, ...]
     final_review: CriticReview
 
@@ -161,7 +162,7 @@ class ControlSmokeResult:
     steps_completed: int
     terminated: bool
     truncated: bool
-    final_snapshot: SceneSnapshot
+    final_snapshot: SceneObservation
     final_claims: tuple[RiskClaim, ...]
     final_review: CriticReview
     final_trace: DecisionTrace
@@ -187,8 +188,8 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
         self,
         config: AppConfig,
         *,
-        role: EnvironmentRole = "train",
-        worker_index: int = 0,
+        role: EnvironmentRole,
+        worker_index: int,
         scenario_runtime_factory: ScenarioRuntimeFactory = NoOpScenarioRuntime,
         env_factory: ControlEnvironmentFactory = _create_control_environment,
         suite_factory: SuiteFactory = AgentSuite.from_config,
@@ -269,6 +270,7 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
             scenario_state = runtime.reset(environment, seeds=seeds)
             if not isinstance(scenario_state, ScenarioState):
                 raise TypeError("ScenarioRuntime.reset must return ScenarioState")
+            self._validate_scenario_state(scenario_state, seeds)
             _, raw_reset_info = environment.reset(seed=seeds.metadrive_scenario_index)
             reset_info = self._copy_info(raw_reset_info)
             actual_scenario_index = self._verified_actual_scenario_index(
@@ -361,6 +363,7 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
             )
             if not isinstance(scenario_result, ScenarioStepResult):
                 raise TypeError("ScenarioRuntime.after_step must return ScenarioStepResult")
+            runtime_decision_interval_s = self._validated_decision_interval(environment)
             context = self._runtime_context(runtime, scenario_state)
             next_frame = self._build_frame(
                 builder,
@@ -381,7 +384,7 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
                     analysis=next_analysis,
                     executed_action=int(executed),
                     shield_intervened=shield_result.intervened,
-                    decision_interval_s=decision_interval_s(environment.config),
+                    decision_interval_s=runtime_decision_interval_s,
                 )
             )
             observation = self._build_observation(
@@ -409,6 +412,8 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
                 claims=analysis.claims,
                 review=analysis.review,
                 reward_components=reward_result.components,
+                failed_agent_ids=analysis.failed_agent_ids,
+                errors=analysis.errors,
                 episode_rng_seed=seeds.episode_rng_seed,
                 metadrive_scenario_index=actual_scenario_index,
                 scenario_parameter_seed=seeds.scenario_parameter_seed,
@@ -424,8 +429,8 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
                     "shield_intervened": shield_result.intervened,
                     "shield_reasons": tuple(shield_result.reasons),
                     "target_speed_mps": target,
-                    "failed_agent_ids": tuple(next_analysis.failed_agent_ids),
-                    "analysis_errors": tuple(next_analysis.errors),
+                    "failed_agent_ids": tuple(analysis.failed_agent_ids),
+                    "analysis_errors": tuple(analysis.errors),
                     "reward_components": dict(reward_result.components),
                     "decision_trace": trace,
                 }
@@ -544,7 +549,30 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
     def _copy_info(raw_info: Mapping[str, object]) -> dict[str, object]:
         if not isinstance(raw_info, Mapping):
             raise TypeError("simulator info must be a mapping")
-        return dict(raw_info)
+        return deepcopy(dict(raw_info))
+
+    def _validate_scenario_state(
+        self,
+        state: ScenarioState,
+        expected_seeds: EpisodeSeeds,
+    ) -> None:
+        if state.seeds != expected_seeds:
+            raise RuntimeError("ScenarioState seeds mismatch for current episode")
+        if state.scenario_id != self._config.scenario_id:
+            raise RuntimeError(
+                "ScenarioState scenario_id mismatch: "
+                f"expected {self._config.scenario_id!r}, returned {state.scenario_id!r}"
+            )
+
+    def _validated_decision_interval(self, environment: DrivingEnvironment) -> float:
+        runtime_value = decision_interval_s(environment.config)
+        configured_value = float(self._config.metadrive.decision_dt_s)
+        if not isclose(runtime_value, configured_value, rel_tol=1e-12, abs_tol=1e-12):
+            raise RuntimeError(
+                "simulator decision interval mismatch: "
+                f"runtime {runtime_value}, configured {configured_value}"
+            )
+        return configured_value
 
     @staticmethod
     def _verified_actual_scenario_index(
@@ -583,8 +611,8 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
         if not all(callable(getattr(runtime, method, None)) for method in methods):
             raise TypeError("scenario_runtime_factory must return a ScenarioRuntime")
 
-    @staticmethod
     def _runtime_context(
+        self,
         runtime: ScenarioRuntime,
         state: ScenarioState,
     ) -> ScenarioObservationContext:
@@ -592,6 +620,15 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
         if not isinstance(context, ScenarioObservationContext):
             raise TypeError(
                 "ScenarioRuntime.observation_context must return ScenarioObservationContext"
+            )
+        if context.scenario_id != state.scenario_id:
+            raise RuntimeError(
+                "observation context scenario_id mismatch: "
+                f"state {state.scenario_id!r}, returned {context.scenario_id!r}"
+            )
+        if context.scenario_id != self._config.scenario_id:
+            raise RuntimeError(
+                "observation context scenario_id does not match configured scenario"
             )
         return context
 

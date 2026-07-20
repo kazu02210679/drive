@@ -51,7 +51,7 @@ class TrainingResult:
 
 
 def _default_env_factory(config: AppConfig) -> gym.Env[Any, Any]:
-    return MultiAgentSpeedEnv(config)
+    return MultiAgentSpeedEnv(config, role="train", worker_index=0)
 
 
 @dataclass

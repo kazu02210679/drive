@@ -220,7 +220,32 @@ def test_metadrive_random_seed_stabilizes_regenerated_actor_ids() -> None:
     first_actor = build_frame(first).observation.visible_actors[0]
     second_actor = build_frame(second).observation.visible_actors[0]
 
-    assert first_actor.actor_id == second_actor.actor_id == "metadrive-1234"
+    assert first_actor.actor_id == second_actor.actor_id == "metadrive-FakeVehicle-1234"
+
+
+def test_duplicate_generated_actor_ids_fail_before_visibility_filtering() -> None:
+    env = make_env()
+    lane = FakeLane(("A", "B", 0))
+    first = FakeVehicle(
+        "49d65b79-497d-43be-973e-3e72b4c4a2b9",
+        position=(12.0, 0.0),
+        velocity=(5.0, 0.0),
+        last_velocity=(5.0, 0.0),
+        lane=lane,
+        random_seed=1234,
+    )
+    second = FakeVehicle(
+        "a30aca0f-ca69-4e16-a5d8-1f6b109d8be4",
+        position=(15.0, 0.0),
+        velocity=(5.0, 0.0),
+        last_velocity=(5.0, 0.0),
+        lane=lane,
+        random_seed=1234,
+    )
+    env.engine = FakeEngine([env.vehicle, first, second])
+
+    with pytest.raises(ValueError, match="duplicate actor_id"):
+        build_frame(env, visible_actor_ids=frozenset())
 
 
 def test_missing_navigation_uses_safe_finite_defaults() -> None:

@@ -225,6 +225,48 @@ def test_decision_trace_copies_reward_components() -> None:
 
     components["progress"] = 99.0
     assert trace.reward_components == {"progress": 0.1}
+    with pytest.raises(TypeError):
+        trace.reward_components["progress"] = 2.0  # type: ignore[index]
+
+
+def test_decision_trace_freezes_and_validates_analysis_diagnostics() -> None:
+    failed_agent_ids = ["hazard"]
+    errors = ["hazard:RuntimeError:failed"]
+    trace = DecisionTrace(
+        step_index=1,
+        raw_action=0,
+        executed_action=0,
+        target_speed_mps=8.0,
+        shield_intervened=False,
+        shield_reasons=[],  # type: ignore[arg-type]
+        claims=[make_claim()],  # type: ignore[arg-type]
+        review=make_review(),
+        reward_components={"progress": 0.1},
+        failed_agent_ids=failed_agent_ids,  # type: ignore[arg-type]
+        errors=errors,  # type: ignore[arg-type]
+    )
+
+    failed_agent_ids.clear()
+    errors.clear()
+    assert trace.failed_agent_ids == ("hazard",)
+    assert trace.errors == ("hazard:RuntimeError:failed",)
+    assert trace.shield_reasons == ()
+    assert isinstance(trace.claims, tuple)
+
+    with pytest.raises(ValueError, match="one-to-one|match failed_agent_ids"):
+        DecisionTrace(
+            step_index=1,
+            raw_action=0,
+            executed_action=0,
+            target_speed_mps=8.0,
+            shield_intervened=False,
+            shield_reasons=(),
+            claims=(make_claim(),),
+            review=make_review(),
+            reward_components={},
+            failed_agent_ids=("hazard",),
+            errors=("rule:RuntimeError:failed",),
+        )
 
 
 @pytest.mark.parametrize("actor_type", ["pedestrian", "", "VEHICLE"])

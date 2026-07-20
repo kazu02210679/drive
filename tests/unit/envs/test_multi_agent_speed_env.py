@@ -261,13 +261,17 @@ class RecordingRuntime:
         invalid_reset_result: bool = False,
         invalid_step_result: bool = False,
         invalid_context_result: bool = False,
+        reset_state: ScenarioState | None = None,
     ) -> None:
         self.events = events
-        self.context = context or ScenarioObservationContext(scenario_id="unit_runtime")
+        self.context = context or ScenarioObservationContext(
+            scenario_id="unit_multi_agent_speed_env"
+        )
         self.step_results = tuple(step_results) or (ScenarioStepResult(False, False),)
         self.invalid_reset_result = invalid_reset_result
         self.invalid_step_result = invalid_step_result
         self.invalid_context_result = invalid_context_result
+        self.reset_state = reset_state
         self.states: list[ScenarioState] = []
         self.after_step_calls = 0
 
@@ -277,7 +281,7 @@ class RecordingRuntime:
             self.events.append("runtime.reset")
         if self.invalid_reset_result:
             return object()  # type: ignore[return-value]
-        state = ScenarioState(self.context.scenario_id, seeds, {})
+        state = self.reset_state or ScenarioState(self.context.scenario_id, seeds, {})
         self.states.append(state)
         return state
 
@@ -481,6 +485,12 @@ def make_config() -> AppConfig:
             "metadrive": {"use_render": False},
         }
     )
+
+
+def make_config_for_scenario(scenario_id: str) -> AppConfig:
+    values = make_config().model_dump(mode="python")
+    values["scenario_id"] = scenario_id
+    return AppConfig.model_validate(values)
 
 
 @dataclass
@@ -730,6 +740,48 @@ def test_actual_simulator_scenario_mismatch_closes_and_raises() -> None:
     assert simulator.close_calls == 1
 
 
+def test_runtime_rejects_stale_prior_episode_state_before_simulator_reset() -> None:
+    simulator = FakeSimulator()
+    stale_state = ScenarioState(
+        scenario_id=make_config().scenario_id,
+        seeds=expected_seeds(70),
+        parameters={},
+    )
+    runtime = RecordingRuntime(reset_state=stale_state)
+    harness = make_env(simulators=(simulator,), runtime=runtime)
+
+    with pytest.raises(RuntimeError, match="ScenarioState seeds mismatch"):
+        harness.env.reset(seed=71)
+
+    assert simulator.reset_seeds == []
+    assert simulator.close_calls == 1
+
+
+@pytest.mark.parametrize(
+    ("state_scenario_id", "context_scenario_id", "message"),
+    [
+        ("stale_scenario", "unit_multi_agent_speed_env", "ScenarioState scenario_id"),
+        ("unit_multi_agent_speed_env", "stale_context", "observation context scenario_id"),
+    ],
+)
+def test_runtime_rejects_inconsistent_scenario_identity(
+    state_scenario_id: str,
+    context_scenario_id: str,
+    message: str,
+) -> None:
+    seeds = expected_seeds(72)
+    runtime = RecordingRuntime(
+        context=ScenarioObservationContext(scenario_id=context_scenario_id),
+        reset_state=ScenarioState(state_scenario_id, seeds, {}),
+    )
+    harness = make_env(runtime=runtime)
+
+    with pytest.raises(RuntimeError, match=message):
+        harness.env.reset(seed=72)
+
+    assert harness.env_factory.created[0].close_calls == 1
+
+
 @pytest.mark.parametrize(
     "runtime_factory",
     [lambda scenario_id: object()],
@@ -794,6 +846,7 @@ def test_runtime_context_flows_to_frame_builder_and_hidden_actor_stays_privilege
     runtime = RecordingRuntime(context=context)
     suite = SequenceSuite()
     harness = make_env(
+        config=make_config_for_scenario("visibility_case"),
         simulators=(simulator,),
         runtime=runtime,
         suite=suite,
@@ -829,8 +882,22 @@ def test_step_uses_analysis_result_observation_only_shield_and_frame_reward_cont
         assert context.next_frame.observation is suite.observations[1]
         assert context.analysis == post
         assert context.executed_action == int(DrivingAction.STOP)
+        assert context.decision_interval_s == pytest.approx(0.10)
     finally:
         harness.env.close()
+
+
+def test_runtime_timing_mismatch_is_fatal_before_reward() -> None:
+    simulator = FakeSimulator()
+    harness = make_env(simulators=(simulator,))
+    harness.env.reset(seed=78)
+    simulator.config["physics_world_step_size"] = 0.03
+
+    with pytest.raises(RuntimeError, match="decision interval mismatch.*0.15.*0.1"):
+        harness.env.step(DrivingAction.KEEP)
+
+    assert harness.reward.calculate_calls == 0
+    assert simulator.close_calls == 1
 
 
 @pytest.mark.parametrize("failure", ["simulator", "snapshot", "reward", "observation"])
@@ -944,7 +1011,10 @@ def test_reset_clears_episode_local_reward_action_frame_and_runtime_state() -> N
 
 
 def test_returned_info_and_reward_components_do_not_alias_internal_values() -> None:
-    raw_step_info: dict[str, Any] = {"simulator_value": "original"}
+    raw_step_info: dict[str, Any] = {
+        "simulator_value": "original",
+        "nested": {"values": [1, {"status": "original"}]},
+    }
     simulator = FakeSimulator(step_results=((False, False, raw_step_info),))
     harness = make_env(simulators=(simulator,))
     try:
@@ -954,7 +1024,16 @@ def test_returned_info_and_reward_components_do_not_alias_internal_values() -> N
 
         _, _, _, _, info = harness.env.step(DrivingAction.KEEP)
         info["simulator_value"] = "changed"
-        assert raw_step_info == {"simulator_value": "original"}
+        nested = info["nested"]
+        assert isinstance(nested, dict)
+        values = nested["values"]
+        assert isinstance(values, list)
+        assert isinstance(values[1], dict)
+        values[1]["status"] = "changed"
+        assert raw_step_info == {
+            "simulator_value": "original",
+            "nested": {"values": [1, {"status": "original"}]},
+        }
 
         components = info["reward_components"]
         trace = info["decision_trace"]
@@ -968,7 +1047,11 @@ def test_returned_info_and_reward_components_do_not_alias_internal_values() -> N
 
 
 def test_step_builds_trace_from_pre_step_analysis_and_post_step_reward() -> None:
-    pre = make_analysis(claims=complete_claims(severity=0.1))
+    pre = make_analysis(
+        claims=(make_claim("nominal"), make_claim("rule")),
+        failed_agent_ids=("hazard",),
+        errors=("hazard:RuntimeError:pre-decision failure",),
+    )
     post = make_analysis(
         claims=complete_claims(severity=0.9),
         review=neutral_review(reason="post"),
@@ -988,6 +1071,10 @@ def test_step_builds_trace_from_pre_step_analysis_and_post_step_reward() -> None
         trace = info["decision_trace"]
         assert trace.claims == pre.claims
         assert trace.review == pre.review
+        assert trace.failed_agent_ids == pre.failed_agent_ids
+        assert trace.errors == pre.errors
+        assert info["failed_agent_ids"] == pre.failed_agent_ids
+        assert info["analysis_errors"] == pre.errors
         assert trace.reward_components == info["reward_components"]
         assert trace.episode_rng_seed == 87
         assert trace.metadrive_scenario_index == info["metadrive_scenario_index"]
@@ -1131,6 +1218,11 @@ def test_invalid_actions_are_rejected_without_clipping(action: object) -> None:
 def test_constructor_validates_role_and_worker_index(role: str, worker_index: int) -> None:
     with pytest.raises(ValueError, match="role|worker_index"):
         make_env(role=role, worker_index=worker_index)
+
+
+def test_constructor_requires_explicit_role_and_worker_index() -> None:
+    with pytest.raises(TypeError, match="role.*worker_index|worker_index.*role"):
+        MultiAgentSpeedEnv(make_config())  # type: ignore[call-arg]
 
 
 def test_simulator_creation_is_lazy() -> None:

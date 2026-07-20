@@ -207,6 +207,9 @@ class SceneSnapshotBuilder:
                     occluded=False,
                 )
             )
+        actor_ids = tuple(actor.actor_id for actor in actors)
+        if len(actor_ids) != len(set(actor_ids)):
+            raise ValueError("simulator actors produced a duplicate actor_id")
         return tuple(sorted(actors, key=lambda actor: actor.actor_id))
 
     @staticmethod
@@ -219,7 +222,7 @@ class SceneSnapshotBuilder:
         random_seed = getattr(simulator_object, "random_seed", None)
         if isinstance(random_seed, bool) or not isinstance(random_seed, Integral):
             return actor_id
-        return f"metadrive-{int(random_seed)}"
+        return f"metadrive-{type(simulator_object).__name__}-{int(random_seed)}"
 
     @staticmethod
     def _normalized_heading(name: str, value: Any) -> float:

@@ -9,7 +9,7 @@ from collections.abc import Sequence
 from dataclasses import asdict
 from typing import Protocol
 
-from mad_driving.agents.suite import AgentSuite, SuiteFactory, analyze_safely
+from mad_driving.agents.suite import AgentAnalysisResult, AgentSuite, SuiteFactory, analyze_safely
 from mad_driving.config.loader import load_config
 from mad_driving.config.models import (
     AppConfig,
@@ -27,16 +27,18 @@ from mad_driving.interfaces import (
     CriticReview,
     DecisionTrace,
     RiskClaim,
-    SceneSnapshot,
+    SceneFrame,
+    SceneObservation,
 )
 from mad_driving.safety import SafetyShield
+from mad_driving.scenarios import EpisodeSeeds, NoOpScenarioRuntime, ScenarioStepResult
 from mad_driving.world_model import SceneSnapshotBuilder
 
 
 class Coordinator(Protocol):
     def decide(
         self,
-        snapshot: SceneSnapshot,
+        observation: SceneObservation,
         claims: Sequence[RiskClaim],
         review: CriticReview,
     ) -> DrivingAction: ...
@@ -62,36 +64,46 @@ def run_control_smoke(
     terminated = False
     truncated = False
     final_trace: DecisionTrace | None = None
-    snapshot: SceneSnapshot | None = None
-    claims: tuple[RiskClaim, ...] | None = None
-    review: CriticReview | None = None
+    frame: SceneFrame | None = None
+    analysis: AgentAnalysisResult | None = None
+    seeds = EpisodeSeeds(config.seed, config.seed, config.seed)
+    runtime = NoOpScenarioRuntime(config.scenario_id)
 
     try:
         builder = SceneSnapshotBuilder()
         suite = suite_factory(config.agents)
         coordinator = coordinator_factory(config.coordinator)
         shield = shield_factory(config.shield)
-        env.reset(seed=config.seed)
-        snapshot = builder.build(
+        state = runtime.reset(env, seeds=seeds)
+        _, reset_info = env.reset(seed=seeds.metadrive_scenario_index)
+        runtime.after_simulator_reset(env, state)
+        frame = builder.build(
             env,
             step_index=0,
-            scenario_id=config.scenario_id,
-            seed=config.seed,
-            previous_action=int(DrivingAction.KEEP),
+            seeds=seeds,
+            context=runtime.observation_context(state),
+            scenario_result=ScenarioStepResult(False, False),
+            raw_info=reset_info,
+            previous_executed_action=int(DrivingAction.KEEP),
             previous_shield_intervention=False,
         )
-        claims, review = analyze_safely(suite, snapshot)
+        analysis = analyze_safely(suite, frame.observation)
 
         for step_index in range(1, config.decision_steps + 1):
-            requested = coordinator.decide(snapshot, claims, review)
-            shield_result = shield.filter(requested, snapshot, claims)
+            requested = coordinator.decide(
+                frame.observation,
+                analysis.claims,
+                analysis.review,
+            )
+            shield_result = shield.filter(requested, frame.observation, analysis.claims)
             executed = shield_result.executed_action
             target = target_speed_mps(
                 executed,
-                snapshot.ego.speed_mps,
-                snapshot.ego.speed_limit_mps,
+                frame.observation.ego.speed_mps,
+                frame.observation.ego.speed_limit_mps,
             )
-            _, _, terminated_value, truncated_value, _ = env.step(int(executed))
+            runtime.before_step(env, state, step_index=step_index)
+            _, _, terminated_value, truncated_value, raw_info = env.step(int(executed))
             terminated = bool(terminated_value)
             truncated = bool(truncated_value)
             steps_completed = step_index
@@ -104,19 +116,34 @@ def run_control_smoke(
                 target_speed_mps=target,
                 shield_intervened=shield_result.intervened,
                 shield_reasons=shield_result.reasons,
-                claims=claims,
-                review=review,
+                claims=analysis.claims,
+                review=analysis.review,
                 reward_components={},
+                failed_agent_ids=analysis.failed_agent_ids,
+                errors=analysis.errors,
+                episode_rng_seed=seeds.episode_rng_seed,
+                metadrive_scenario_index=seeds.metadrive_scenario_index,
+                scenario_parameter_seed=seeds.scenario_parameter_seed,
+                role="train",
+                worker_index=0,
             )
-            snapshot = builder.build(
+            scenario_result = runtime.after_step(
+                env,
+                state,
+                step_index=step_index,
+                raw_info=raw_info,
+            )
+            frame = builder.build(
                 env,
                 step_index=step_index,
-                scenario_id=config.scenario_id,
-                seed=config.seed,
-                previous_action=int(executed),
+                seeds=seeds,
+                context=runtime.observation_context(state),
+                scenario_result=scenario_result,
+                raw_info=raw_info,
+                previous_executed_action=int(executed),
                 previous_shield_intervention=shield_result.intervened,
             )
-            claims, review = analyze_safely(suite, snapshot)
+            analysis = analyze_safely(suite, frame.observation)
             if terminated or truncated:
                 break
     finally:
@@ -124,9 +151,8 @@ def run_control_smoke(
 
     if (
         steps_completed == 0
-        or snapshot is None
-        or claims is None
-        or review is None
+        or frame is None
+        or analysis is None
         or final_trace is None
     ):
         raise RuntimeError("Control smoke completed without a simulator step")
@@ -134,9 +160,9 @@ def run_control_smoke(
         steps_completed=steps_completed,
         terminated=terminated,
         truncated=truncated,
-        final_snapshot=snapshot,
-        final_claims=claims,
-        final_review=review,
+        final_snapshot=frame.observation,
+        final_claims=analysis.claims,
+        final_review=analysis.review,
         final_trace=final_trace,
         action_counts=(
             action_counts[0],

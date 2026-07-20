@@ -3,10 +3,11 @@ from typing import Any
 
 import pytest
 
+from mad_driving.agents.suite import AgentAnalysisResult
 from mad_driving.cli import smoke as smoke_module
 from mad_driving.cli.smoke import main, run_smoke
 from mad_driving.config.models import AppConfig
-from mad_driving.interfaces import SceneSnapshot
+from mad_driving.interfaces import SceneObservation
 
 
 class FakeLane:
@@ -33,6 +34,12 @@ class FakeVehicle:
     lane_index = FakeLane.index
     max_speed_m_s = 20.0
     speed = 1.0
+    on_lane = True
+    crash_vehicle = False
+    crash_human = False
+    crash_object = False
+    crash_sidewalk = False
+    crash_building = False
 
 
 class FakeEngine:
@@ -48,6 +55,7 @@ class FakeEnv:
         self.options = options
         self.fail_on_step = fail_on_step
         self.vehicle = FakeVehicle()
+        self.agent = self.vehicle
         self.engine = FakeEngine(self.vehicle)
         self.config: dict[str, Any] = {
             **options,
@@ -57,10 +65,13 @@ class FakeEnv:
         self.reset_seeds: list[int | None] = []
         self.actions: list[tuple[float, float]] = []
         self.closed = False
+        self.current_seed = 0
 
     def reset(self, *, seed: int | None = None):
         self.reset_seeds.append(seed)
-        return {}, {}
+        assert seed is not None
+        self.current_seed = seed
+        return {}, {"env_seed": seed}
 
     def step(self, action: tuple[float, float]):
         self.actions.append(action)
@@ -128,8 +139,8 @@ def test_run_smoke_closes_when_step_raises() -> None:
 
 
 class FailingSuite:
-    def analyze(self, snapshot: SceneSnapshot):
-        del snapshot
+    def analyze(self, observation: SceneObservation) -> AgentAnalysisResult:
+        del observation
         raise RuntimeError("analysis failed")
 
 
