@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from numbers import Integral
 from typing import Any, Protocol, cast
@@ -12,6 +12,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from mad_driving.agents.suite import (
+    AgentAnalysisResult,
     AgentSuite,
     AnalysisSuite,
     SuiteFactory,
@@ -26,32 +27,40 @@ from mad_driving.config.models import (
 )
 from mad_driving.control import DrivingAction, target_speed_mps
 from mad_driving.coordinator import ObservationBuilder
-from mad_driving.envs.reward import (
-    CollisionKind,
-    RewardCalculator,
-    RewardContext,
-    RewardResult,
-)
+from mad_driving.envs.reward import RewardCalculator, RewardContext, RewardResult
 from mad_driving.interfaces import (
     CriticReview,
     DecisionTrace,
     RiskClaim,
+    SceneFrame,
+    SceneObservation,
     SceneSnapshot,
     ShieldResult,
 )
 from mad_driving.safety import SafetyShield
+from mad_driving.scenarios import (
+    EnvironmentRole,
+    EpisodeSeedAllocator,
+    EpisodeSeeds,
+    NoOpScenarioRuntime,
+    ScenarioObservationContext,
+    ScenarioRuntime,
+    ScenarioState,
+    ScenarioStepResult,
+)
 from mad_driving.world_model import SceneSnapshotBuilder
 from mad_driving.world_model.validation import decision_interval_s
 
 
 class DrivingEnvironment(Protocol):
-    """Small subset of the MetaDrive environment API required by Phase 1."""
+    """Subset of the MetaDrive API owned by the outer Gymnasium environment."""
 
     config: dict[str, Any]
     vehicle: Any
     engine: Any
     agent: Any
     action_space: Any
+    current_seed: int
 
     def reset(self, *, seed: int | None = None) -> tuple[Any, dict[str, Any]]: ...
 
@@ -78,7 +87,7 @@ class Shield(Protocol):
     def filter(
         self,
         requested_action: DrivingAction | int,
-        snapshot: SceneSnapshot,
+        observation: SceneObservation,
         claims: Sequence[RiskClaim],
     ) -> ShieldResult: ...
 
@@ -87,21 +96,23 @@ class ShieldFactory(Protocol):
     def __call__(self, config: ShieldConfig) -> Shield: ...
 
 
-class SnapshotBuilder(Protocol):
+class FrameBuilder(Protocol):
     def build(
         self,
         env: DrivingEnvironment,
         *,
         step_index: int,
-        scenario_id: str,
-        seed: int,
-        previous_action: int,
+        seeds: EpisodeSeeds,
+        context: ScenarioObservationContext,
+        scenario_result: ScenarioStepResult,
+        raw_info: Mapping[str, object],
+        previous_executed_action: int,
         previous_shield_intervention: bool,
-    ) -> SceneSnapshot: ...
+    ) -> SceneFrame: ...
 
 
-class SnapshotBuilderFactory(Protocol):
-    def __call__(self) -> SnapshotBuilder: ...
+class FrameBuilderFactory(Protocol):
+    def __call__(self) -> FrameBuilder: ...
 
 
 class Reward(Protocol):
@@ -117,7 +128,7 @@ class RewardFactory(Protocol):
 class Observation(Protocol):
     def build(
         self,
-        snapshot: SceneSnapshot,
+        observation: SceneObservation,
         claims: Sequence[RiskClaim],
         review: CriticReview,
     ) -> NDArray[np.float32]: ...
@@ -125,6 +136,10 @@ class Observation(Protocol):
 
 class ObservationFactory(Protocol):
     def __call__(self, config: ObservationConfig) -> Observation: ...
+
+
+class ScenarioRuntimeFactory(Protocol):
+    def __call__(self, scenario_id: str) -> ScenarioRuntime: ...
 
 
 @dataclass(frozen=True)
@@ -171,14 +186,24 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
     def __init__(
         self,
         config: AppConfig,
+        *,
+        role: EnvironmentRole = "train",
+        worker_index: int = 0,
+        scenario_runtime_factory: ScenarioRuntimeFactory = NoOpScenarioRuntime,
         env_factory: ControlEnvironmentFactory = _create_control_environment,
         suite_factory: SuiteFactory = AgentSuite.from_config,
         shield_factory: ShieldFactory = SafetyShield,
-        builder_factory: SnapshotBuilderFactory = SceneSnapshotBuilder,
+        builder_factory: FrameBuilderFactory = SceneSnapshotBuilder,
         reward_factory: RewardFactory = RewardCalculator,
         observation_factory: ObservationFactory = ObservationBuilder,
     ) -> None:
         super().__init__()
+        if role not in {"train", "validation", "test"}:
+            raise ValueError("role must be train, validation, or test")
+        if isinstance(worker_index, bool) or not isinstance(worker_index, int):
+            raise ValueError("worker_index must be a non-negative integer")
+        split = getattr(config.scenarios, role)
+        self._seed_allocator = EpisodeSeedAllocator(role, split, worker_index)
         self.action_space = gym.spaces.Discrete(4)
         self.observation_space = gym.spaces.Box(
             low=-1.0,
@@ -187,6 +212,9 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
             dtype=np.float32,
         )
         self._config = config
+        self._role = role
+        self._worker_index = worker_index
+        self._scenario_runtime_factory = scenario_runtime_factory
         self._env_factory = env_factory
         self._suite_factory = suite_factory
         self._shield_factory = shield_factory
@@ -196,14 +224,19 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
         self._environment: DrivingEnvironment | None = None
         self._suite: AnalysisSuite | None = None
         self._shield: Shield | None = None
-        self._builder: SnapshotBuilder | None = None
+        self._builder: FrameBuilder | None = None
         self._reward: Reward | None = None
         self._observation: Observation | None = None
-        self._snapshot: SceneSnapshot | None = None
-        self._claims: tuple[RiskClaim, ...] | None = None
-        self._review: CriticReview | None = None
-        self._episode_seed: int | None = None
+        self._runtime: ScenarioRuntime | None = None
+        self._scenario_state: ScenarioState | None = None
+        self._frame: SceneFrame | None = None
+        self._analysis: AgentAnalysisResult | None = None
+        self._episode_seeds: EpisodeSeeds | None = None
+        self._actual_scenario_index: int | None = None
         self._episode_active = False
+        self._gym_rng_initialized = False
+        self._closed = False
+        self._fatally_closed = False
 
     def reset(
         self,
@@ -211,14 +244,15 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
         seed: int | None = None,
         options: dict[str, Any] | None = None,
     ) -> tuple[NDArray[np.float32], dict[str, object]]:
-        """Reset simulator-owned state and return the initial fixed observation."""
+        """Reset every episode-owned component and return the initial observation."""
 
+        self._require_resettable()
+        del options
+        episode_rng_seed = self._next_episode_rng_seed(seed)
+        seeds = self._seed_allocator.allocate(episode_rng_seed)
         environment = self._environment
         self._clear_episode()
-        episode_seed = self._config.seed if seed is None else seed
         try:
-            super().reset(seed=seed)
-            del options
             if environment is None:
                 environment = self._new_environment()
             self._environment = environment
@@ -229,28 +263,43 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
             reward = self._reward_factory(self._config.reward)
             reward.reset()
             observation_builder = self._observation_factory(self._config.observation)
+            runtime = self._scenario_runtime_factory(self._config.scenario_id)
+            self._validate_runtime(runtime)
 
-            _, raw_info = environment.reset(seed=episode_seed)
-            snapshot = builder.build(
+            scenario_state = runtime.reset(environment, seeds=seeds)
+            if not isinstance(scenario_state, ScenarioState):
+                raise TypeError("ScenarioRuntime.reset must return ScenarioState")
+            _, raw_reset_info = environment.reset(seed=seeds.metadrive_scenario_index)
+            reset_info = self._copy_info(raw_reset_info)
+            actual_scenario_index = self._verified_actual_scenario_index(
+                environment,
+                reset_info,
+                seeds.metadrive_scenario_index,
+            )
+            runtime.after_simulator_reset(environment, scenario_state)
+            context = self._runtime_context(runtime, scenario_state)
+            initial_result = ScenarioStepResult(success=False, failure=False)
+            frame = self._build_frame(
+                builder,
                 environment,
                 step_index=0,
-                scenario_id=self._config.scenario_id,
-                seed=episode_seed,
-                previous_action=int(DrivingAction.KEEP),
+                seeds=seeds,
+                context=context,
+                scenario_result=initial_result,
+                raw_info=reset_info,
+                previous_executed_action=int(DrivingAction.KEEP),
                 previous_shield_intervention=False,
             )
-            claims, review = analyze_safely(suite, snapshot)
+            analysis = self._analyze(suite, frame.observation)
             observation = self._build_observation(
                 observation_builder,
-                snapshot,
-                claims,
-                review,
+                frame.observation,
+                analysis,
             )
-            info: dict[str, object] = dict(raw_info)
-            info["seed"] = episode_seed
-        except Exception:
-            self._environment = environment
-            self._close_simulator()
+            info = reset_info
+            info.update(self._episode_metadata(seeds, actual_scenario_index))
+        except Exception as error:
+            self._fatal_close(error)
             raise
 
         self._suite = suite
@@ -258,10 +307,12 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
         self._builder = builder
         self._reward = reward
         self._observation = observation_builder
-        self._snapshot = snapshot
-        self._claims = claims
-        self._review = review
-        self._episode_seed = episode_seed
+        self._runtime = runtime
+        self._scenario_state = scenario_state
+        self._frame = frame
+        self._analysis = analysis
+        self._episode_seeds = seeds
+        self._actual_scenario_index = actual_scenario_index
         self._episode_active = True
         return observation, info
 
@@ -276,85 +327,78 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
         environment = cast(DrivingEnvironment, self._environment)
         suite = cast(AnalysisSuite, self._suite)
         shield = cast(Shield, self._shield)
-        builder = cast(SnapshotBuilder, self._builder)
+        builder = cast(FrameBuilder, self._builder)
         reward_calculator = cast(Reward, self._reward)
         observation_builder = cast(Observation, self._observation)
-        snapshot = cast(SceneSnapshot, self._snapshot)
-        claims = cast(tuple[RiskClaim, ...], self._claims)
-        review = cast(CriticReview, self._review)
-        episode_seed = cast(int, self._episode_seed)
-
-        shield_result = shield.filter(requested, snapshot, claims)
-        executed = shield_result.executed_action
-        target = target_speed_mps(
-            executed,
-            snapshot.ego.speed_mps,
-            snapshot.ego.speed_limit_mps,
-        )
+        runtime = cast(ScenarioRuntime, self._runtime)
+        scenario_state = cast(ScenarioState, self._scenario_state)
+        frame = cast(SceneFrame, self._frame)
+        analysis = cast(AgentAnalysisResult, self._analysis)
+        seeds = cast(EpisodeSeeds, self._episode_seeds)
+        actual_scenario_index = cast(int, self._actual_scenario_index)
 
         try:
-            _, _, raw_terminated, raw_truncated, raw_info = environment.step(int(executed))
-        except Exception as exc:
-            self._close_simulator()
-            return (
-                self._safe_observation(),
-                0.0,
-                False,
-                True,
-                {
-                    "requested_action": int(requested),
-                    "executed_action": int(executed),
-                    "simulator_error": str(exc),
-                },
+            shield_result = shield.filter(
+                requested,
+                frame.observation,
+                analysis.claims,
             )
-
-        step_index = snapshot.step_index + 1
-        try:
-            next_snapshot = builder.build(
+            executed = shield_result.executed_action
+            target = target_speed_mps(
+                executed,
+                frame.observation.ego.speed_mps,
+                frame.observation.ego.speed_limit_mps,
+            )
+            step_index = frame.observation.step_index + 1
+            runtime.before_step(environment, scenario_state, step_index=step_index)
+            _, _, raw_terminated, raw_truncated, raw_step_info = environment.step(int(executed))
+            step_info = self._copy_info(raw_step_info)
+            scenario_result = runtime.after_step(
+                environment,
+                scenario_state,
+                step_index=step_index,
+                raw_info=step_info,
+            )
+            if not isinstance(scenario_result, ScenarioStepResult):
+                raise TypeError("ScenarioRuntime.after_step must return ScenarioStepResult")
+            context = self._runtime_context(runtime, scenario_state)
+            next_frame = self._build_frame(
+                builder,
                 environment,
                 step_index=step_index,
-                scenario_id=self._config.scenario_id,
-                seed=episode_seed,
-                previous_action=int(executed),
+                seeds=seeds,
+                context=context,
+                scenario_result=scenario_result,
+                raw_info=step_info,
+                previous_executed_action=int(executed),
                 previous_shield_intervention=shield_result.intervened,
             )
-        except Exception as exc:
-            self._episode_active = False
-            return (
-                self._safe_observation(),
-                0.0,
-                False,
-                True,
-                {"analysis_error": str(exc)},
-            )
-
-        try:
-            next_claims, next_review = analyze_safely(suite, next_snapshot)
+            next_analysis = self._analyze(suite, next_frame.observation)
             reward_result = reward_calculator.calculate(
                 RewardContext(
-                    previous_snapshot=snapshot,
-                    next_snapshot=next_snapshot,
-                    post_step_claims=next_claims,
+                    previous_frame=frame,
+                    next_frame=next_frame,
+                    analysis=next_analysis,
                     executed_action=int(executed),
                     shield_intervened=shield_result.intervened,
-                    arrived=bool(raw_info.get("arrive_dest", False)),
-                    collision_kind=self._collision_kind(raw_info, next_snapshot),
                     decision_interval_s=decision_interval_s(environment.config),
                 )
             )
-        except Exception:
-            self._close_simulator()
-            raise
-
-        observation, observation_error = self._build_observation_safely(
-            observation_builder,
-            next_snapshot,
-            next_claims,
-            next_review,
-        )
-        try:
-            terminated = bool(raw_terminated)
-            truncated = bool(raw_truncated) or observation_error is not None
+            observation = self._build_observation(
+                observation_builder,
+                next_frame.observation,
+                next_analysis,
+            )
+            privileged = next_frame.privileged
+            terminated = bool(raw_terminated) or any(
+                (
+                    privileged.collision_occurred,
+                    privileged.arrived,
+                    privileged.scenario_success,
+                    privileged.scenario_failure,
+                )
+            )
+            truncated = bool(raw_truncated)
             trace = DecisionTrace(
                 step_index=step_index,
                 raw_action=int(requested),
@@ -362,47 +406,47 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
                 target_speed_mps=target,
                 shield_intervened=shield_result.intervened,
                 shield_reasons=shield_result.reasons,
-                claims=claims,
-                review=review,
+                claims=analysis.claims,
+                review=analysis.review,
                 reward_components=reward_result.components,
+                episode_rng_seed=seeds.episode_rng_seed,
+                metadrive_scenario_index=actual_scenario_index,
+                scenario_parameter_seed=seeds.scenario_parameter_seed,
+                role=self._role,
+                worker_index=self._worker_index,
             )
-            info = dict(raw_info)
+            info = step_info
+            info.update(self._episode_metadata(seeds, actual_scenario_index))
             info.update(
                 {
                     "requested_action": int(requested),
                     "executed_action": int(executed),
                     "shield_intervened": shield_result.intervened,
-                    "shield_reasons": shield_result.reasons,
+                    "shield_reasons": tuple(shield_result.reasons),
                     "target_speed_mps": target,
+                    "failed_agent_ids": tuple(next_analysis.failed_agent_ids),
+                    "analysis_errors": tuple(next_analysis.errors),
                     "reward_components": dict(reward_result.components),
                     "decision_trace": trace,
                 }
             )
-            if observation_error is not None:
-                info["observation_error"] = observation_error
-            reward_total = reward_result.total
-        except Exception:
-            self._close_simulator()
+            reward_total = float(reward_result.total)
+        except Exception as error:
+            self._fatal_close(error)
             raise
 
-        self._snapshot = next_snapshot
-        self._claims = next_claims
-        self._review = next_review
+        self._frame = next_frame
+        self._analysis = next_analysis
         self._episode_active = not (terminated or truncated)
         return observation, reward_total, terminated, truncated, info
 
     def close(self) -> None:
-        """Close the current simulator instance at most once."""
+        """Close the owned simulator exactly once and make this wrapper terminal."""
 
-        self._close_simulator()
-
-    def _new_environment(self) -> DrivingEnvironment:
-        return self._env_factory(self._config.metadrive_dict(), self._config.control)
-
-    def _close_simulator(self) -> None:
-        environment = self._environment
-        self._environment = None
-        self._clear_episode()
+        if self._closed:
+            return
+        self._closed = True
+        environment = self._detach_environment()
         if environment is None:
             return
         try:
@@ -410,17 +454,64 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
         except Exception:
             pass
 
+    def _new_environment(self) -> DrivingEnvironment:
+        metadrive_config = self._config.metadrive_dict()
+        split = getattr(self._config.scenarios, self._role)
+        metadrive_config.update(
+            {
+                "start_seed": split.seed_start,
+                "num_scenarios": split.seed_count,
+            }
+        )
+        return self._env_factory(metadrive_config, self._config.control)
+
+    def _next_episode_rng_seed(self, requested_seed: int | None) -> int:
+        if requested_seed is not None:
+            super().reset(seed=requested_seed)
+            self._gym_rng_initialized = True
+            return requested_seed
+        if not self._gym_rng_initialized:
+            super().reset(seed=self._config.seed)
+            self._gym_rng_initialized = True
+            return self._config.seed
+        super().reset(seed=None)
+        return int(self.np_random.integers(0, np.iinfo(np.int32).max))
+
+    def _fatal_close(self, primary_error: Exception) -> None:
+        self._fatally_closed = True
+        environment = self._detach_environment()
+        if environment is None:
+            return
+        try:
+            environment.close()
+        except Exception as cleanup_error:
+            primary_error.add_note(f"simulator cleanup failed: {cleanup_error}")
+
+    def _detach_environment(self) -> DrivingEnvironment | None:
+        environment = self._environment
+        self._environment = None
+        self._clear_episode()
+        return environment
+
     def _clear_episode(self) -> None:
         self._suite = None
         self._shield = None
         self._builder = None
         self._reward = None
         self._observation = None
-        self._snapshot = None
-        self._claims = None
-        self._review = None
-        self._episode_seed = None
+        self._runtime = None
+        self._scenario_state = None
+        self._frame = None
+        self._analysis = None
+        self._episode_seeds = None
+        self._actual_scenario_index = None
         self._episode_active = False
+
+    def _require_resettable(self) -> None:
+        if self._fatally_closed:
+            raise RuntimeError("environment is fatally closed after an internal error")
+        if self._closed:
+            raise RuntimeError("environment is closed")
 
     def _require_active_episode(self) -> None:
         if not self._episode_active:
@@ -434,43 +525,111 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
             raise ValueError("action must be an integer from 0 through 3")
         return DrivingAction(value)
 
-    def _build_observation_safely(
+    def _episode_metadata(
         self,
-        observation_builder: Observation,
-        snapshot: SceneSnapshot,
-        claims: tuple[RiskClaim, ...],
-        review: CriticReview,
-    ) -> tuple[NDArray[np.float32], str | None]:
-        try:
-            return self._build_observation(observation_builder, snapshot, claims, review), None
-        except Exception as exc:
-            return self._safe_observation(), str(exc)
+        seeds: EpisodeSeeds,
+        actual_scenario_index: int,
+    ) -> dict[str, object]:
+        return {
+            "episode_rng_seed": int(seeds.episode_rng_seed),
+            "simulator_seed": int(seeds.metadrive_scenario_index),
+            "scenario_seed": int(seeds.scenario_parameter_seed),
+            "metadrive_scenario_index": int(actual_scenario_index),
+            "scenario_parameter_seed": int(seeds.scenario_parameter_seed),
+            "role": self._role,
+            "worker_index": int(self._worker_index),
+        }
+
+    @staticmethod
+    def _copy_info(raw_info: Mapping[str, object]) -> dict[str, object]:
+        if not isinstance(raw_info, Mapping):
+            raise TypeError("simulator info must be a mapping")
+        return dict(raw_info)
+
+    @staticmethod
+    def _verified_actual_scenario_index(
+        environment: DrivingEnvironment,
+        raw_info: Mapping[str, object],
+        requested_index: int,
+    ) -> int:
+        reported = raw_info.get("env_seed")
+        current = getattr(environment, "current_seed", None)
+        candidates = (reported, current)
+        if all(candidate is None for candidate in candidates):
+            raise RuntimeError("simulator did not report its actual scenario index")
+        actual_values: list[int] = []
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            if isinstance(candidate, bool) or not isinstance(candidate, Integral):
+                raise TypeError("simulator scenario index must be an integer")
+            actual_values.append(int(candidate))
+        if any(actual != requested_index for actual in actual_values):
+            raise RuntimeError(
+                "simulator scenario index mismatch: "
+                f"requested {requested_index}, returned {actual_values}"
+            )
+        return actual_values[0]
+
+    @staticmethod
+    def _validate_runtime(runtime: object) -> None:
+        methods = (
+            "reset",
+            "after_simulator_reset",
+            "before_step",
+            "after_step",
+            "observation_context",
+        )
+        if not all(callable(getattr(runtime, method, None)) for method in methods):
+            raise TypeError("scenario_runtime_factory must return a ScenarioRuntime")
+
+    @staticmethod
+    def _runtime_context(
+        runtime: ScenarioRuntime,
+        state: ScenarioState,
+    ) -> ScenarioObservationContext:
+        context = runtime.observation_context(state)
+        if not isinstance(context, ScenarioObservationContext):
+            raise TypeError(
+                "ScenarioRuntime.observation_context must return ScenarioObservationContext"
+            )
+        return context
+
+    @staticmethod
+    def _build_frame(
+        builder: FrameBuilder,
+        environment: DrivingEnvironment,
+        **kwargs: Any,
+    ) -> SceneFrame:
+        frame = builder.build(environment, **kwargs)
+        if not isinstance(frame, SceneFrame):
+            raise TypeError("frame builder must return SceneFrame")
+        return frame
+
+    @staticmethod
+    def _analyze(
+        suite: AnalysisSuite,
+        observation: SceneObservation,
+    ) -> AgentAnalysisResult:
+        analysis = analyze_safely(suite, observation)
+        if not isinstance(analysis, AgentAnalysisResult):
+            raise TypeError("analyze_safely must return AgentAnalysisResult")
+        return analysis
 
     def _build_observation(
         self,
         observation_builder: Observation,
-        snapshot: SceneSnapshot,
-        claims: tuple[RiskClaim, ...],
-        review: CriticReview,
+        scene_observation: SceneObservation,
+        analysis: AgentAnalysisResult,
     ) -> NDArray[np.float32]:
-        observation = observation_builder.build(snapshot, claims, review)
+        observation = observation_builder.build(
+            scene_observation,
+            analysis.claims,
+            analysis.review,
+        )
         if not self.observation_space.contains(observation):
             raise ValueError("observation is outside the declared observation space")
         return observation
-
-    def _safe_observation(self) -> NDArray[np.float32]:
-        return np.zeros((24,), dtype=np.float32)
-
-    @staticmethod
-    def _collision_kind(
-        raw_info: dict[str, Any],
-        next_snapshot: SceneSnapshot,
-    ) -> CollisionKind | None:
-        if bool(raw_info.get("crash_human", False)):
-            return "crossing_actor"
-        if bool(raw_info.get("crash_vehicle", False)) or next_snapshot.collision_occurred:
-            return "vehicle"
-        return None
 
 
 def create_metadrive_env(config: dict[str, object]) -> DrivingEnvironment:

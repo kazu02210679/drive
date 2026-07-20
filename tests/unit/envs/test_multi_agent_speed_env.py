@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -8,7 +8,9 @@ import gymnasium as gym
 import numpy as np
 import pytest
 from numpy.typing import NDArray
+from stable_baselines3.common.vec_env import DummyVecEnv
 
+from mad_driving.agents.suite import AgentAnalysisResult
 from mad_driving.config.models import AppConfig, ControlConfig
 from mad_driving.control import DrivingAction
 from mad_driving.envs import MultiAgentSpeedEnv
@@ -17,16 +19,28 @@ from mad_driving.interfaces import (
     CriticReview,
     DecisionTrace,
     RiskClaim,
-    SceneSnapshot,
+    RoadContext,
+    SceneFrame,
+    SceneObservation,
     ShieldResult,
 )
 from mad_driving.safety import SafetyShield
-from tests.unit.agents.factories import make_claim, make_snapshot
+from mad_driving.scenarios import (
+    EpisodeSeedAllocator,
+    EpisodeSeeds,
+    NoOpScenarioRuntime,
+    ScenarioObservationContext,
+    ScenarioState,
+    ScenarioStepResult,
+)
+from mad_driving.world_model import SceneSnapshotBuilder
+from tests.unit.agents.factories import make_analysis, make_claim, make_frame, make_snapshot
 
 
 class FakeLane:
     speed_limit = 54.0
     index = ("A", "B", 0)
+    width = 3.5
 
     @staticmethod
     def local_coordinates(position: tuple[float, float]) -> tuple[float, float]:
@@ -40,9 +54,17 @@ class FakeNavigation:
 
 
 class FakeVehicle:
-    def __init__(self) -> None:
-        self.name = "ego"
-        self.position = (0.0, 0.0)
+    LENGTH = 4.5
+    WIDTH = 1.8
+
+    def __init__(
+        self,
+        name: str = "ego",
+        *,
+        position: tuple[float, float] = (0.0, 0.0),
+    ) -> None:
+        self.name = name
+        self.position = position
         self.velocity = (10.0, 0.0)
         self.last_velocity = (10.0, 0.0)
         self.heading_theta = 0.0
@@ -59,11 +81,16 @@ class FakeVehicle:
 
 
 class FakeEngine:
-    def __init__(self, vehicle: FakeVehicle) -> None:
-        self._vehicle = vehicle
+    def __init__(
+        self,
+        vehicle: FakeVehicle,
+        actors: Sequence[FakeVehicle] = (),
+    ) -> None:
+        self._objects = {vehicle.name: vehicle}
+        self._objects.update({actor.name: actor for actor in actors})
 
     def get_objects(self) -> dict[str, FakeVehicle]:
-        return {"ego": self._vehicle}
+        return dict(self._objects)
 
 
 class FakeSimulator:
@@ -71,42 +98,58 @@ class FakeSimulator:
         self,
         *,
         step_results: Sequence[tuple[bool, bool, dict[str, Any]]] = (),
+        actors: Sequence[FakeVehicle] = (),
+        actual_seed_offset: int = 0,
         fail_on_reset_calls: Sequence[int] = (),
         fail_on_step: bool = False,
         fail_on_close: bool = False,
+        events: list[str] | None = None,
     ) -> None:
         self.vehicle = FakeVehicle()
         self.agent = self.vehicle
-        self.engine = FakeEngine(self.vehicle)
+        self.engine = FakeEngine(self.vehicle, actors)
         self.action_space = gym.spaces.Discrete(4)
         self.config: dict[str, Any] = {
             "physics_world_step_size": 0.02,
             "decision_repeat": 5,
+            "map_config": {"lane_width": 3.5},
         }
         self.step_results = tuple(step_results)
+        self.actual_seed_offset = actual_seed_offset
         self.fail_on_reset_calls = set(fail_on_reset_calls)
         self.fail_on_step = fail_on_step
         self.fail_on_close = fail_on_close
+        self.events = events
         self.reset_seeds: list[int | None] = []
         self.actions: list[int] = []
         self.close_calls = 0
+        self.current_seed: int | None = None
         self.reset_info: dict[str, object] = {"simulator_reset": True}
 
     def reset(self, *, seed: int | None = None) -> tuple[dict[str, object], dict[str, object]]:
         self.reset_seeds.append(seed)
+        if self.events is not None:
+            self.events.append("simulator.reset")
         if len(self.reset_seeds) in self.fail_on_reset_calls:
-            raise RuntimeError("simulator reset failed")
+            raise RuntimeError("simulator failure")
+        if seed is None:
+            raise AssertionError("the outer environment must select a simulator scenario")
+        self.current_seed = seed + self.actual_seed_offset
         self.actions.clear()
         self.vehicle.position = (0.0, 0.0)
         self.vehicle.navigation.route_completion = 0.25
         self.vehicle.crash_vehicle = False
         self.vehicle.crash_human = False
-        return {}, self.reset_info
+        info = dict(self.reset_info)
+        info["env_seed"] = self.current_seed
+        return {}, info
 
     def step(self, action: int) -> tuple[dict[str, object], float, bool, bool, dict[str, Any]]:
         self.actions.append(action)
+        if self.events is not None:
+            self.events.append("simulator.step")
         if self.fail_on_step:
-            raise RuntimeError("simulator step failed")
+            raise RuntimeError("simulator failure")
         index = len(self.actions) - 1
         terminated, truncated, info = (
             self.step_results[index] if index < len(self.step_results) else (False, False, {})
@@ -119,8 +162,10 @@ class FakeSimulator:
 
     def close(self) -> None:
         self.close_calls += 1
+        if self.events is not None:
+            self.events.append("simulator.close")
         if self.fail_on_close:
-            raise RuntimeError("simulator close failed")
+            raise RuntimeError("simulator close failure")
 
 
 class RecordingEnvironmentFactory:
@@ -142,8 +187,9 @@ class RecordingEnvironmentFactory:
     ) -> FakeSimulator:
         self.calls.append((options, control_config))
         if len(self.calls) in self._fail_on_calls:
-            raise RuntimeError("environment creation failed")
+            raise RuntimeError("environment creation failure")
         simulator = self._simulators.pop(0) if self._simulators else FakeSimulator()
+        simulator.config.update(options)
         self.created.append(simulator)
         return simulator
 
@@ -165,7 +211,7 @@ class ConfigurableFactory:
         del args
         self.calls += 1
         if self.calls in self.fail_on_calls:
-            raise RuntimeError(f"{self.name} factory failed")
+            raise RuntimeError(f"{self.name} factory failure")
         return self.value
 
 
@@ -189,28 +235,101 @@ def complete_claims(*, severity: float = 0.0) -> tuple[RiskClaim, ...]:
 
 
 class SequenceSuite:
-    def __init__(
-        self,
-        results: Sequence[tuple[tuple[RiskClaim, ...], CriticReview]] = (),
-    ) -> None:
-        self.results = tuple(results) or ((complete_claims(), neutral_review()),)
-        self.snapshots: list[SceneSnapshot] = []
+    def __init__(self, results: Sequence[AgentAnalysisResult] = ()) -> None:
+        self.results = tuple(results) or (make_analysis(claims=complete_claims()),)
+        self.observations: list[SceneObservation] = []
 
-    def analyze(self, snapshot: SceneSnapshot) -> tuple[tuple[RiskClaim, ...], CriticReview]:
-        self.snapshots.append(snapshot)
-        index = min(len(self.snapshots) - 1, len(self.results) - 1)
+    def analyze(self, observation: SceneObservation) -> AgentAnalysisResult:
+        self.observations.append(observation)
+        index = min(len(self.observations) - 1, len(self.results) - 1)
         return self.results[index]
 
 
 class FailingSuite:
-    def analyze(self, snapshot: SceneSnapshot) -> tuple[tuple[RiskClaim, ...], CriticReview]:
-        del snapshot
-        raise RuntimeError("agent analysis failed")
+    def analyze(self, observation: SceneObservation) -> AgentAnalysisResult:
+        del observation
+        raise RuntimeError("analysis failure")
+
+
+class RecordingRuntime:
+    def __init__(
+        self,
+        *,
+        events: list[str] | None = None,
+        context: ScenarioObservationContext | None = None,
+        step_results: Sequence[ScenarioStepResult] = (),
+        invalid_reset_result: bool = False,
+        invalid_step_result: bool = False,
+        invalid_context_result: bool = False,
+    ) -> None:
+        self.events = events
+        self.context = context or ScenarioObservationContext(scenario_id="unit_runtime")
+        self.step_results = tuple(step_results) or (ScenarioStepResult(False, False),)
+        self.invalid_reset_result = invalid_reset_result
+        self.invalid_step_result = invalid_step_result
+        self.invalid_context_result = invalid_context_result
+        self.states: list[ScenarioState] = []
+        self.after_step_calls = 0
+
+    def reset(self, environment: object, *, seeds: EpisodeSeeds) -> ScenarioState:
+        del environment
+        if self.events is not None:
+            self.events.append("runtime.reset")
+        if self.invalid_reset_result:
+            return object()  # type: ignore[return-value]
+        state = ScenarioState(self.context.scenario_id, seeds, {})
+        self.states.append(state)
+        return state
+
+    def after_simulator_reset(self, environment: object, state: ScenarioState) -> None:
+        del environment, state
+        if self.events is not None:
+            self.events.append("runtime.after_simulator_reset")
+
+    def before_step(
+        self,
+        environment: object,
+        state: ScenarioState,
+        *,
+        step_index: int,
+    ) -> None:
+        del environment, state, step_index
+        if self.events is not None:
+            self.events.append("runtime.before_step")
+
+    def after_step(
+        self,
+        environment: object,
+        state: ScenarioState,
+        *,
+        step_index: int,
+        raw_info: Mapping[str, object],
+    ) -> ScenarioStepResult:
+        del environment, state, step_index, raw_info
+        if self.events is not None:
+            self.events.append("runtime.after_step")
+        if self.invalid_step_result:
+            return object()  # type: ignore[return-value]
+        index = min(self.after_step_calls, len(self.step_results) - 1)
+        self.after_step_calls += 1
+        return self.step_results[index]
+
+    def observation_context(self, state: ScenarioState) -> ScenarioObservationContext:
+        del state
+        if self.invalid_context_result:
+            return object()  # type: ignore[return-value]
+        return self.context
 
 
 class RecordingSnapshotBuilder:
-    def __init__(self, *, failing_calls: Sequence[int] = ()) -> None:
+    def __init__(
+        self,
+        *,
+        failing_calls: Sequence[int] = (),
+        events: list[str] | None = None,
+    ) -> None:
         self.failing_calls = set(failing_calls)
+        self.events = events
         self.calls: list[dict[str, Any]] = []
 
     def build(
@@ -218,50 +337,74 @@ class RecordingSnapshotBuilder:
         env: FakeSimulator,
         *,
         step_index: int,
-        scenario_id: str,
-        seed: int,
-        previous_action: int,
+        seeds: EpisodeSeeds,
+        context: ScenarioObservationContext,
+        scenario_result: ScenarioStepResult,
+        raw_info: Mapping[str, object],
+        previous_executed_action: int,
         previous_shield_intervention: bool,
-    ) -> SceneSnapshot:
-        self.calls.append(
-            {
-                "env": env,
-                "step_index": step_index,
-                "scenario_id": scenario_id,
-                "seed": seed,
-                "previous_action": previous_action,
-                "previous_shield_intervention": previous_shield_intervention,
-            }
-        )
+    ) -> SceneFrame:
+        call = {
+            "env": env,
+            "step_index": step_index,
+            "seeds": seeds,
+            "context": context,
+            "scenario_result": scenario_result,
+            "raw_info": dict(raw_info),
+            "previous_executed_action": previous_executed_action,
+            "previous_shield_intervention": previous_shield_intervention,
+        }
+        self.calls.append(call)
+        if self.events is not None:
+            self.events.append("frame.initial" if step_index == 0 else "frame.next")
         if len(self.calls) in self.failing_calls:
-            raise RuntimeError("initial snapshot failed")
-        return make_snapshot(
+            raise RuntimeError("snapshot failure")
+        observation = make_snapshot(
             step_index=step_index,
-            scenario_id=scenario_id,
-            seed=seed,
-            previous_action=previous_action,
+            scenario_id=context.scenario_id,
+            seeds=seeds,
+            occlusion_regions=context.occlusion_regions,
+            road_context=RoadContext(
+                stop_required=context.stop_required,
+                distance_to_conflict_point_m=context.distance_to_conflict_point_m,
+                intersection_entry_prohibited=context.intersection_entry_prohibited,
+            ),
+            previous_executed_action=previous_executed_action,
             previous_shield_intervention=previous_shield_intervention,
-            collision_occurred=env.vehicle.crash_vehicle or env.vehicle.crash_human,
             ego_speed_mps=env.vehicle.speed,
             speed_limit_mps=FakeLane.speed_limit / 3.6,
+        )
+        collision_kind = None
+        if bool(raw_info.get("crash_human", False)):
+            collision_kind = "crossing_actor"
+        elif bool(raw_info.get("crash_vehicle", False)):
+            collision_kind = "vehicle"
+        return make_frame(
+            observation=observation,
+            collision_occurred=collision_kind is not None,
+            collision_kind=collision_kind,
+            off_road=bool(raw_info.get("out_of_road", False)),
+            arrived=bool(raw_info.get("arrive_dest", False)),
+            scenario_success=scenario_result.success,
+            scenario_failure=scenario_result.failure,
         )
 
 
 class RecordingObservationBuilder:
     def __init__(self, *, failing_calls: Sequence[int] = ()) -> None:
         self.failing_calls = set(failing_calls)
-        self.calls: list[tuple[SceneSnapshot, tuple[RiskClaim, ...], CriticReview]] = []
+        self.calls: list[tuple[SceneObservation, tuple[RiskClaim, ...], CriticReview]] = []
 
     def build(
         self,
-        snapshot: SceneSnapshot,
+        observation: SceneObservation,
         claims: Sequence[RiskClaim],
         review: CriticReview,
     ) -> NDArray[np.float32]:
-        self.calls.append((snapshot, tuple(claims), review))
+        self.calls.append((observation, tuple(claims), review))
         if len(self.calls) in self.failing_calls:
-            raise ValueError("observation build failed")
-        value = np.float32(min(snapshot.step_index / 10.0, 1.0))
+            raise RuntimeError("observation failure")
+        value = np.float32(min(observation.step_index / 10.0, 1.0))
         return np.full((24,), value, dtype=np.float32)
 
 
@@ -285,13 +428,13 @@ class RecordingRewardCalculator:
     def reset(self) -> None:
         self.reset_calls += 1
         if self.reset_calls in self.failing_reset_calls:
-            raise RuntimeError("reward reset failed")
+            raise RuntimeError("reward reset failure")
 
     def calculate(self, context: RewardContext) -> RewardResult:
         self.calculate_calls += 1
         self.contexts.append(context)
         if self.calculate_calls in self.failing_calculate_calls:
-            raise RuntimeError("reward calculate failed")
+            raise RuntimeError("reward failure")
         if self.calculate_calls in self.invalid_trace_calls:
             return InvalidTraceRewardResult()  # type: ignore[return-value]
         return RewardResult(total=sum(self.components.values()), components=self.components)
@@ -306,15 +449,15 @@ class InvalidTraceRewardResult:
 class RecordingShield:
     def __init__(self, executed_action: DrivingAction = DrivingAction.STOP) -> None:
         self.executed_action = executed_action
-        self.calls: list[tuple[DrivingAction | int, SceneSnapshot, tuple[RiskClaim, ...]]] = []
+        self.calls: list[tuple[DrivingAction | int, SceneObservation, tuple[RiskClaim, ...]]] = []
 
     def filter(
         self,
         requested_action: DrivingAction | int,
-        snapshot: SceneSnapshot,
+        observation: SceneObservation,
         claims: Sequence[RiskClaim],
     ) -> ShieldResult:
-        self.calls.append((requested_action, snapshot, tuple(claims)))
+        self.calls.append((requested_action, observation, tuple(claims)))
         requested = DrivingAction(requested_action)
         required = max(requested, self.executed_action)
         executed = max(requested, self.executed_action)
@@ -346,40 +489,52 @@ class EnvHarness:
     env_factory: RecordingEnvironmentFactory
     suite: SequenceSuite | FailingSuite
     shield: RecordingShield | SafetyShield
-    snapshot_builder: RecordingSnapshotBuilder
+    snapshot_builder: RecordingSnapshotBuilder | SceneSnapshotBuilder
     reward: RecordingRewardCalculator
     observation: RecordingObservationBuilder
+    runtime: RecordingRuntime | NoOpScenarioRuntime
 
 
 def make_env(
     *,
+    config: AppConfig | None = None,
+    role: str = "train",
+    worker_index: int = 0,
     simulators: Sequence[FakeSimulator] = (),
     env_factory: RecordingEnvironmentFactory | None = None,
     suite: SequenceSuite | FailingSuite | None = None,
     shield: RecordingShield | SafetyShield | None = None,
-    snapshot_builder: RecordingSnapshotBuilder | None = None,
+    snapshot_builder: RecordingSnapshotBuilder | SceneSnapshotBuilder | None = None,
     reward: RecordingRewardCalculator | None = None,
     observation: RecordingObservationBuilder | None = None,
+    runtime: RecordingRuntime | NoOpScenarioRuntime | None = None,
     suite_factory: Callable[..., Any] | None = None,
     shield_factory: Callable[..., Any] | None = None,
     builder_factory: Callable[..., Any] | None = None,
     reward_factory: Callable[..., Any] | None = None,
     observation_factory: Callable[..., Any] | None = None,
+    runtime_factory: Callable[..., Any] | None = None,
 ) -> EnvHarness:
+    selected_config = config or make_config()
     selected_env_factory = env_factory or RecordingEnvironmentFactory(simulators)
     selected_suite = suite or SequenceSuite()
     selected_shield = shield or RecordingShield()
     selected_snapshot_builder = snapshot_builder or RecordingSnapshotBuilder()
     selected_reward = reward or RecordingRewardCalculator()
     selected_observation = observation or RecordingObservationBuilder()
+    selected_runtime = runtime or RecordingRuntime()
     env = MultiAgentSpeedEnv(
-        make_config(),
+        selected_config,
+        role=role,  # type: ignore[arg-type]
+        worker_index=worker_index,
+        scenario_runtime_factory=runtime_factory or (lambda scenario_id: selected_runtime),
         env_factory=selected_env_factory,
-        suite_factory=suite_factory or (lambda config: selected_suite),
-        shield_factory=shield_factory or (lambda config: selected_shield),
+        suite_factory=suite_factory or (lambda agents_config: selected_suite),
+        shield_factory=shield_factory or (lambda shield_config: selected_shield),
         builder_factory=builder_factory or (lambda: selected_snapshot_builder),
-        reward_factory=reward_factory or (lambda config: selected_reward),
-        observation_factory=observation_factory or (lambda config: selected_observation),
+        reward_factory=reward_factory or (lambda reward_config: selected_reward),
+        observation_factory=observation_factory
+        or (lambda observation_config: selected_observation),
     )
     return EnvHarness(
         env=env,
@@ -389,216 +544,456 @@ def make_env(
         snapshot_builder=selected_snapshot_builder,
         reward=selected_reward,
         observation=selected_observation,
+        runtime=selected_runtime,
     )
 
 
-def test_env_exposes_fixed_spaces_and_seeded_reset() -> None:
+def expected_seeds(
+    episode_rng_seed: int,
+    *,
+    role: str = "train",
+    worker_index: int = 0,
+    config: AppConfig | None = None,
+) -> EpisodeSeeds:
+    selected_config = config or make_config()
+    split = getattr(selected_config.scenarios, role)
+    return EpisodeSeedAllocator(role, split, worker_index).allocate(episode_rng_seed)  # type: ignore[arg-type]
+
+
+def assert_episode_metadata(
+    info: Mapping[str, object],
+    seeds: EpisodeSeeds,
+    *,
+    role: str = "train",
+    worker_index: int = 0,
+) -> None:
+    assert info["episode_rng_seed"] == seeds.episode_rng_seed
+    assert info["simulator_seed"] == seeds.metadrive_scenario_index
+    assert info["scenario_seed"] == seeds.scenario_parameter_seed
+    assert info["metadrive_scenario_index"] == seeds.metadrive_scenario_index
+    assert info["scenario_parameter_seed"] == seeds.scenario_parameter_seed
+    assert info["role"] == role
+    assert info["worker_index"] == worker_index
+    for key in (
+        "episode_rng_seed",
+        "simulator_seed",
+        "scenario_seed",
+        "metadrive_scenario_index",
+        "scenario_parameter_seed",
+        "role",
+        "worker_index",
+    ):
+        assert type(info[key]) in {int, str}
+
+
+def test_env_exposes_fixed_spaces_and_explicit_reset_is_reproducible() -> None:
     harness = make_env()
     try:
         first, info = harness.env.reset(seed=123)
         second, second_info = harness.env.reset(seed=123)
+        seeds = expected_seeds(123)
 
         assert harness.env.action_space == gym.spaces.Discrete(4)
         assert harness.env.observation_space.shape == (24,)
         assert harness.env.observation_space.dtype == np.float32
         assert harness.env.observation_space.contains(first)
         np.testing.assert_array_equal(first, second)
-        assert info["seed"] == 123
-        assert info["simulator_reset"] is True
-        assert second_info["seed"] == 123
-        assert harness.env_factory.created[0].reset_seeds == [123, 123]
+        assert_episode_metadata(info, seeds)
+        assert_episode_metadata(second_info, seeds)
+        assert harness.env_factory.created[0].reset_seeds == [
+            seeds.metadrive_scenario_index,
+            seeds.metadrive_scenario_index,
+        ]
         assert harness.reward.reset_calls == 2
     finally:
         harness.env.close()
 
 
-def test_reset_uses_config_seed_when_seed_is_omitted() -> None:
+def test_implicit_resets_advance_reproducible_episode_seed_sequence() -> None:
+    first = make_env()
+    second = make_env()
+    try:
+        first_values = [first.env.reset(seed=42)[1]["episode_rng_seed"]]
+        second_values = [second.env.reset(seed=42)[1]["episode_rng_seed"]]
+        first_values.extend(first.env.reset()[1]["episode_rng_seed"] for _ in range(3))
+        second_values.extend(second.env.reset()[1]["episode_rng_seed"] for _ in range(3))
+        assert first_values == second_values
+        assert len(set(first_values)) == len(first_values)
+    finally:
+        first.env.close()
+        second.env.close()
+
+
+def test_first_implicit_reset_uses_config_seed_and_later_implicit_reset_advances() -> None:
     harness = make_env()
     try:
-        _, info = harness.env.reset()
-        assert info["seed"] == 42
-        assert harness.env_factory.created[0].reset_seeds == [42]
+        _, first_info = harness.env.reset()
+        _, second_info = harness.env.reset()
+        assert first_info["episode_rng_seed"] == 42
+        assert second_info["episode_rng_seed"] != 42
     finally:
         harness.env.close()
 
 
-def test_simulator_creation_is_lazy_and_first_failure_can_be_retried() -> None:
-    replacement = FakeSimulator()
-    env_factory = RecordingEnvironmentFactory((replacement,), fail_on_calls=(1,))
-    harness = make_env(env_factory=env_factory)
+def test_explicit_reseed_restarts_the_implicit_sequence() -> None:
+    harness = make_env()
     try:
-        assert env_factory.calls == []
+        harness.env.reset(seed=91)
+        first_sequence = [harness.env.reset()[1]["episode_rng_seed"] for _ in range(3)]
+        harness.env.reset(seed=91)
+        second_sequence = [harness.env.reset()[1]["episode_rng_seed"] for _ in range(3)]
+        assert first_sequence == second_sequence
+    finally:
+        harness.env.close()
 
-        with pytest.raises(RuntimeError, match="environment creation failed"):
-            harness.env.reset(seed=5)
-        with pytest.raises(RuntimeError, match="reset"):
+
+def test_vecenv_auto_reset_does_not_reuse_initial_episode_seed() -> None:
+    runtime = RecordingRuntime()
+    simulator = FakeSimulator(step_results=((False, True, {"max_step": True}),))
+    harness = make_env(simulators=(simulator,), runtime=runtime)
+    vector = DummyVecEnv([lambda: harness.env])
+    try:
+        vector.seed(42)
+        vector.reset()
+        vector.step(np.asarray([int(DrivingAction.KEEP)]))
+        assert runtime.states[0].seeds.episode_rng_seed == 42
+        assert len({state.seeds.episode_rng_seed for state in runtime.states[:2]}) == 2
+    finally:
+        vector.close()
+
+
+def test_runtime_hook_order_wraps_simulator_and_frame_construction() -> None:
+    events: list[str] = []
+    runtime = RecordingRuntime(events=events)
+    simulator = FakeSimulator(events=events)
+    builder = RecordingSnapshotBuilder(events=events)
+    harness = make_env(simulators=(simulator,), runtime=runtime, snapshot_builder=builder)
+    try:
+        harness.env.reset(seed=7)
+        assert events == [
+            "runtime.reset",
+            "simulator.reset",
+            "runtime.after_simulator_reset",
+            "frame.initial",
+        ]
+
+        harness.env.step(DrivingAction.KEEP)
+        assert events == [
+            "runtime.reset",
+            "simulator.reset",
+            "runtime.after_simulator_reset",
+            "frame.initial",
+            "runtime.before_step",
+            "simulator.step",
+            "runtime.after_step",
+            "frame.next",
+        ]
+    finally:
+        harness.env.close()
+
+
+def test_reset_and_step_publish_complete_episode_metadata() -> None:
+    harness = make_env(role="validation", worker_index=2)
+    try:
+        _, reset_info = harness.env.reset(seed=71)
+        seeds = expected_seeds(71, role="validation", worker_index=2)
+        assert_episode_metadata(reset_info, seeds, role="validation", worker_index=2)
+
+        _, _, _, _, step_info = harness.env.step(DrivingAction.KEEP)
+        assert_episode_metadata(step_info, seeds, role="validation", worker_index=2)
+        assert harness.runtime.states[0].seeds == seeds  # type: ignore[union-attr]
+        assert harness.snapshot_builder.calls[0]["seeds"] == seeds  # type: ignore[union-attr]
+    finally:
+        harness.env.close()
+
+
+def test_environment_uses_role_split_for_the_simulator_scenario_range() -> None:
+    harness = make_env(role="validation", worker_index=3)
+    try:
+        harness.env.reset(seed=72)
+        options = harness.env_factory.calls[0][0]
+        assert options["start_seed"] == 10_000
+        assert options["num_scenarios"] == 1_000
+    finally:
+        harness.env.close()
+
+
+def test_actual_simulator_scenario_mismatch_closes_and_raises() -> None:
+    simulator = FakeSimulator(actual_seed_offset=1)
+    harness = make_env(simulators=(simulator,))
+    with pytest.raises(RuntimeError, match="scenario index mismatch"):
+        harness.env.reset(seed=73)
+    assert simulator.close_calls == 1
+    with pytest.raises(RuntimeError, match="fatally closed"):
+        harness.env.reset(seed=74)
+    harness.env.close()
+    assert simulator.close_calls == 1
+
+
+@pytest.mark.parametrize(
+    "runtime_factory",
+    [lambda scenario_id: object()],
+)
+def test_scenario_runtime_factory_return_type_is_validated(
+    runtime_factory: Callable[..., object],
+) -> None:
+    harness = make_env(runtime_factory=runtime_factory)
+    with pytest.raises(TypeError, match="ScenarioRuntime"):
+        harness.env.reset(seed=74)
+    assert harness.env_factory.created[0].close_calls == 1
+
+
+@pytest.mark.parametrize(
+    ("runtime", "operation", "message"),
+    [
+        (RecordingRuntime(invalid_reset_result=True), "reset", "ScenarioState"),
+        (RecordingRuntime(invalid_context_result=True), "reset", "ScenarioObservationContext"),
+        (RecordingRuntime(invalid_step_result=True), "step", "ScenarioStepResult"),
+    ],
+)
+def test_scenario_runtime_hook_return_types_are_validated(
+    runtime: RecordingRuntime,
+    operation: str,
+    message: str,
+) -> None:
+    harness = make_env(runtime=runtime)
+    if operation == "reset":
+        with pytest.raises(TypeError, match=message):
+            harness.env.reset(seed=75)
+    else:
+        harness.env.reset(seed=75)
+        with pytest.raises(TypeError, match=message):
             harness.env.step(DrivingAction.KEEP)
+    assert harness.env_factory.created[0].close_calls == 1
 
-        observation, info = harness.env.reset(seed=6)
-        assert env_factory.created == [replacement]
-        assert replacement.reset_seeds == [6]
-        assert harness.env.observation_space.contains(observation)
-        assert info["seed"] == 6
+
+def test_default_noop_runtime_has_no_extra_simulator_side_effects() -> None:
+    simulator = FakeSimulator()
+    noop = NoOpScenarioRuntime(make_config().scenario_id)
+    harness = make_env(simulators=(simulator,), runtime=noop)
+    try:
+        harness.env.reset(seed=76)
+        harness.env.step(DrivingAction.KEEP)
+        assert len(simulator.reset_seeds) == 1
+        assert simulator.actions == [int(DrivingAction.STOP)]
+    finally:
+        harness.env.close()
+
+
+def test_runtime_context_flows_to_frame_builder_and_hidden_actor_stays_privileged() -> None:
+    visible = FakeVehicle("visible", position=(5.0, 0.0))
+    hidden = FakeVehicle("hidden", position=(8.0, 0.0))
+    simulator = FakeSimulator(actors=(hidden, visible))
+    context = ScenarioObservationContext(
+        scenario_id="visibility_case",
+        stop_required=True,
+        distance_to_conflict_point_m=12.5,
+        intersection_entry_prohibited=True,
+        visible_actor_ids=frozenset({"visible"}),
+    )
+    runtime = RecordingRuntime(context=context)
+    suite = SequenceSuite()
+    harness = make_env(
+        simulators=(simulator,),
+        runtime=runtime,
+        suite=suite,
+        snapshot_builder=SceneSnapshotBuilder(),
+    )
+    try:
+        harness.env.reset(seed=77)
+        observation = suite.observations[0]
+        assert tuple(actor.actor_id for actor in observation.visible_actors) == ("visible",)
+        assert observation.scenario_id == "visibility_case"
+        assert observation.road_context.stop_required is True
+        assert observation.road_context.distance_to_conflict_point_m == 12.5
+        assert observation.road_context.intersection_entry_prohibited is True
+        assert "hidden" not in repr(observation)
+    finally:
+        harness.env.close()
+
+
+def test_step_uses_analysis_result_observation_only_shield_and_frame_reward_context() -> None:
+    pre = make_analysis(claims=complete_claims(severity=0.1))
+    post = make_analysis(claims=complete_claims(severity=0.9))
+    suite = SequenceSuite((pre, post))
+    shield = RecordingShield(DrivingAction.STOP)
+    harness = make_env(suite=suite, shield=shield)
+    try:
+        harness.env.reset(seed=78)
+        harness.env.step(DrivingAction.KEEP)
+
+        assert shield.calls[0][1] is suite.observations[0]
+        assert not isinstance(shield.calls[0][1], SceneFrame)
+        context = harness.reward.contexts[-1]
+        assert context.previous_frame.observation is suite.observations[0]
+        assert context.next_frame.observation is suite.observations[1]
+        assert context.analysis == post
+        assert context.executed_action == int(DrivingAction.STOP)
+    finally:
+        harness.env.close()
+
+
+@pytest.mark.parametrize("failure", ["simulator", "snapshot", "reward", "observation"])
+def test_internal_failure_closes_simulator_once_and_propagates(failure: str) -> None:
+    simulator = FakeSimulator(fail_on_step=failure == "simulator")
+    builder = RecordingSnapshotBuilder(failing_calls=(2,) if failure == "snapshot" else ())
+    reward = RecordingRewardCalculator(failing_calculate_calls=(1,) if failure == "reward" else ())
+    observation = RecordingObservationBuilder(
+        failing_calls=(2,) if failure == "observation" else ()
+    )
+    harness = make_env(
+        simulators=(simulator,),
+        snapshot_builder=builder,
+        reward=reward,
+        observation=observation,
+    )
+    harness.env.reset(seed=79)
+
+    with pytest.raises(RuntimeError, match=failure):
+        harness.env.step(DrivingAction.KEEP)
+    assert simulator.close_calls == 1
+    harness.env.close()
+    assert simulator.close_calls == 1
+
+
+def test_cleanup_failure_is_noted_without_masking_primary_exception() -> None:
+    simulator = FakeSimulator(fail_on_step=True, fail_on_close=True)
+    harness = make_env(simulators=(simulator,))
+    harness.env.reset(seed=80)
+
+    with pytest.raises(RuntimeError, match="simulator failure") as captured:
+        harness.env.step(DrivingAction.KEEP)
+    assert captured.value.__notes__ == ["simulator cleanup failed: simulator close failure"]
+    assert simulator.close_calls == 1
+
+
+@pytest.mark.parametrize(
+    ("raw_terminated", "raw_truncated"),
+    [(False, True), (True, False), (True, True)],
+)
+def test_raw_gymnasium_termination_flags_are_preserved(
+    raw_terminated: bool,
+    raw_truncated: bool,
+) -> None:
+    simulator = FakeSimulator(step_results=((raw_terminated, raw_truncated, {}),))
+    harness = make_env(simulators=(simulator,))
+    try:
+        harness.env.reset(seed=81)
+        _, _, terminated, truncated, _ = harness.env.step(DrivingAction.KEEP)
+        assert terminated is raw_terminated
+        assert truncated is raw_truncated
     finally:
         harness.env.close()
 
 
 @pytest.mark.parametrize(
-    "failing_factory_name",
-    ["suite", "shield", "builder", "reward", "observation"],
+    ("raw_info", "scenario_result"),
+    [
+        ({"crash_vehicle": True}, ScenarioStepResult(False, False)),
+        ({}, ScenarioStepResult(True, False)),
+        ({}, ScenarioStepResult(False, True)),
+    ],
 )
-def test_second_reset_dependency_factory_failure_is_transactional_and_retryable(
-    failing_factory_name: str,
+def test_collision_success_and_failure_are_terminated(
+    raw_info: dict[str, bool],
+    scenario_result: ScenarioStepResult,
 ) -> None:
-    first = FakeSimulator()
-    replacement = FakeSimulator()
-    suite = SequenceSuite()
-    shield = RecordingShield()
-    snapshot_builder = RecordingSnapshotBuilder()
-    reward = RecordingRewardCalculator()
-    observation = RecordingObservationBuilder()
-    factories = {
-        "suite": ConfigurableFactory("suite", suite),
-        "shield": ConfigurableFactory("shield", shield),
-        "builder": ConfigurableFactory("builder", snapshot_builder),
-        "reward": ConfigurableFactory("reward", reward),
-        "observation": ConfigurableFactory("observation", observation),
-    }
-    factories[failing_factory_name].fail_on_calls.add(2)
-    harness = make_env(
-        simulators=(first, replacement),
-        suite=suite,
-        shield=shield,
-        snapshot_builder=snapshot_builder,
-        reward=reward,
-        observation=observation,
-        suite_factory=factories["suite"],
-        shield_factory=factories["shield"],
-        builder_factory=factories["builder"],
-        reward_factory=factories["reward"],
-        observation_factory=factories["observation"],
-    )
+    simulator = FakeSimulator(step_results=((False, False, raw_info),))
+    runtime = RecordingRuntime(step_results=(scenario_result,))
+    harness = make_env(simulators=(simulator,), runtime=runtime)
     try:
-        harness.env.reset(seed=10)
-
-        with pytest.raises(RuntimeError, match=f"{failing_factory_name} factory failed"):
-            harness.env.reset(seed=11)
-
-        assert first.close_calls == 1
-        with pytest.raises(RuntimeError, match="reset"):
-            harness.env.step(DrivingAction.KEEP)
-
-        observation_value, info = harness.env.reset(seed=12)
-        assert harness.env_factory.created == [first, replacement]
-        assert replacement.reset_seeds == [12]
-        assert harness.env.observation_space.contains(observation_value)
-        assert info["seed"] == 12
+        harness.env.reset(seed=82)
+        _, _, terminated, truncated, _ = harness.env.step(DrivingAction.KEEP)
+        assert terminated is True
+        assert truncated is False
     finally:
         harness.env.close()
 
 
-def test_second_reset_reward_reset_failure_clears_stale_episode() -> None:
-    first = FakeSimulator()
-    replacement = FakeSimulator()
-    reward = RecordingRewardCalculator(failing_reset_calls=(2,))
-    harness = make_env(simulators=(first, replacement), reward=reward)
+def test_horizon_and_collision_can_be_truncated_and_terminated_together() -> None:
+    simulator = FakeSimulator(
+        step_results=((False, True, {"max_step": True, "crash_vehicle": True}),)
+    )
+    harness = make_env(simulators=(simulator,))
     try:
-        harness.env.reset(seed=20)
-
-        with pytest.raises(RuntimeError, match="reward reset failed"):
-            harness.env.reset(seed=21)
-
-        assert first.close_calls == 1
-        with pytest.raises(RuntimeError, match="reset"):
-            harness.env.step(DrivingAction.KEEP)
-
-        observation, _ = harness.env.reset(seed=22)
-        assert harness.env.observation_space.contains(observation)
-        assert replacement.reset_seeds == [22]
+        harness.env.reset(seed=83)
+        _, _, terminated, truncated, _ = harness.env.step(DrivingAction.KEEP)
+        assert terminated is True
+        assert truncated is True
     finally:
         harness.env.close()
 
 
-@pytest.mark.parametrize("failure_kind", ["simulator_reset", "snapshot"])
-def test_initial_reset_pipeline_failure_closes_and_can_retry(failure_kind: str) -> None:
-    failed = FakeSimulator(fail_on_reset_calls=(1,) if failure_kind == "simulator_reset" else ())
-    replacement = FakeSimulator()
-    snapshot_builder = RecordingSnapshotBuilder(
-        failing_calls=(1,) if failure_kind == "snapshot" else ()
-    )
-    harness = make_env(
-        simulators=(failed, replacement),
-        snapshot_builder=snapshot_builder,
-    )
+def test_reset_clears_episode_local_reward_action_frame_and_runtime_state() -> None:
+    runtime = RecordingRuntime()
+    harness = make_env(runtime=runtime)
     try:
-        with pytest.raises(RuntimeError, match="simulator reset failed|initial snapshot failed"):
-            harness.env.reset(seed=30)
+        harness.env.reset(seed=84)
+        harness.env.step(DrivingAction.KEEP)
+        harness.env.reset(seed=85)
 
-        assert failed.close_calls == 1
-        with pytest.raises(RuntimeError, match="reset"):
-            harness.env.step(DrivingAction.KEEP)
-
-        observation, info = harness.env.reset(seed=31)
-        assert replacement.reset_seeds == [31]
-        assert harness.env.observation_space.contains(observation)
-        assert info["seed"] == 31
+        assert harness.reward.reset_calls == 2
+        assert len(runtime.states) == 2
+        assert runtime.states[0] is not runtime.states[1]
+        initial_call = harness.snapshot_builder.calls[-1]  # type: ignore[union-attr]
+        assert initial_call["step_index"] == 0
+        assert initial_call["previous_executed_action"] == int(DrivingAction.KEEP)
+        assert initial_call["previous_shield_intervention"] is False
     finally:
         harness.env.close()
 
 
-def test_initial_observation_failure_closes_and_can_retry() -> None:
-    failed = FakeSimulator()
-    replacement = FakeSimulator()
-    observation_builder = RecordingObservationBuilder(failing_calls=(1,))
-    harness = make_env(
-        simulators=(failed, replacement),
-        observation=observation_builder,
-    )
+def test_returned_info_and_reward_components_do_not_alias_internal_values() -> None:
+    raw_step_info: dict[str, Any] = {"simulator_value": "original"}
+    simulator = FakeSimulator(step_results=((False, False, raw_step_info),))
+    harness = make_env(simulators=(simulator,))
     try:
-        with pytest.raises(ValueError, match="observation build failed"):
-            harness.env.reset(seed=40)
+        _, reset_info = harness.env.reset(seed=86)
+        reset_info["simulator_reset"] = False
+        assert simulator.reset_info == {"simulator_reset": True}
 
-        assert failed.close_calls == 1
-        with pytest.raises(RuntimeError, match="reset"):
-            harness.env.step(DrivingAction.KEEP)
+        _, _, _, _, info = harness.env.step(DrivingAction.KEEP)
+        info["simulator_value"] = "changed"
+        assert raw_step_info == {"simulator_value": "original"}
 
-        observation, info = harness.env.reset(seed=41)
-        assert replacement.reset_seeds == [41]
-        assert harness.env.observation_space.contains(observation)
-        assert info["seed"] == 41
+        components = info["reward_components"]
+        trace = info["decision_trace"]
+        assert isinstance(components, dict)
+        assert isinstance(trace, DecisionTrace)
+        components["progress_reward"] = 99.0
+        assert trace.reward_components["progress_reward"] == 1.25
+        assert harness.reward.components["progress_reward"] == 1.25
     finally:
         harness.env.close()
 
 
-def test_step_runs_shielded_pipeline_and_builds_trace_from_both_sides() -> None:
-    pre_claims = complete_claims(severity=0.1)
-    post_claims = complete_claims(severity=0.9)
-    pre_review = neutral_review()
-    post_review = neutral_review(reason="post_step_review")
-    suite = SequenceSuite(((pre_claims, pre_review), (post_claims, post_review)))
+def test_step_builds_trace_from_pre_step_analysis_and_post_step_reward() -> None:
+    pre = make_analysis(claims=complete_claims(severity=0.1))
+    post = make_analysis(
+        claims=complete_claims(severity=0.9),
+        review=neutral_review(reason="post"),
+    )
+    suite = SequenceSuite((pre, post))
     shield = RecordingShield(DrivingAction.STOP)
     harness = make_env(suite=suite, shield=shield)
     try:
-        harness.env.reset(seed=7)
+        harness.env.reset(seed=87)
         observation, reward, terminated, truncated, info = harness.env.step(DrivingAction.KEEP)
 
         simulator = harness.env_factory.created[0]
         assert shield.calls[0][0] == DrivingAction.KEEP
-        assert shield.calls[0][2] == pre_claims
+        assert shield.calls[0][2] == pre.claims
         assert simulator.actions == [int(DrivingAction.STOP)]
-        assert harness.observation.calls[-1][1] == post_claims
-        assert harness.observation.calls[-1][2] == post_review
-        assert harness.reward.contexts[-1].post_step_claims == post_claims
-        assert harness.reward.contexts[-1].previous_snapshot == suite.snapshots[0]
-        assert harness.reward.contexts[-1].next_snapshot == suite.snapshots[1]
-        assert info["requested_action"] == int(DrivingAction.KEEP)
-        assert info["executed_action"] == int(DrivingAction.STOP)
-        assert info["shield_intervened"] is True
-        assert info["shield_reasons"] == ("fake_stop",)
-        assert info["target_speed_mps"] == 0.0
-        assert info["decision_trace"].claims == pre_claims
-        assert info["decision_trace"].review == pre_review
-        assert info["decision_trace"].reward_components == info["reward_components"]
+        assert harness.observation.calls[-1][1] == post.claims
+        trace = info["decision_trace"]
+        assert trace.claims == pre.claims
+        assert trace.review == pre.review
+        assert trace.reward_components == info["reward_components"]
+        assert trace.episode_rng_seed == 87
+        assert trace.metadrive_scenario_index == info["metadrive_scenario_index"]
+        assert trace.scenario_parameter_seed == info["scenario_parameter_seed"]
+        assert trace.role == "train"
+        assert trace.worker_index == 0
         assert reward == pytest.approx(sum(info["reward_components"].values()))
         assert harness.env.observation_space.contains(observation)
         assert terminated is False
@@ -607,10 +1002,86 @@ def test_step_runs_shielded_pipeline_and_builds_trace_from_both_sides() -> None:
         harness.env.close()
 
 
+def test_per_agent_failure_result_remains_a_valid_mdp_step() -> None:
+    failed = make_analysis(
+        claims=(make_claim("nominal"), make_claim("rule")),
+        failed_agent_ids=("hazard",),
+        errors=("hazard:RuntimeError:failed",),
+    )
+    harness = make_env(
+        suite=SequenceSuite((failed, failed)),
+        shield=SafetyShield(make_config().shield),
+    )
+    try:
+        initial_observation, _ = harness.env.reset(seed=88)
+        observation, reward, terminated, truncated, info = harness.env.step(DrivingAction.KEEP)
+        assert harness.env.observation_space.contains(initial_observation)
+        assert harness.env.observation_space.contains(observation)
+        assert info["decision_trace"].claims == failed.claims
+        assert np.isfinite(reward)
+        assert terminated is False
+        assert truncated is False
+    finally:
+        harness.env.close()
+
+
+def test_suite_level_analysis_error_is_fatal() -> None:
+    simulator = FakeSimulator()
+    harness = make_env(simulators=(simulator,), suite=FailingSuite())
+    with pytest.raises(RuntimeError, match="analysis failure"):
+        harness.env.reset(seed=89)
+    assert simulator.close_calls == 1
+
+
+def test_trace_construction_error_is_fatal() -> None:
+    simulator = FakeSimulator()
+    reward = RecordingRewardCalculator(invalid_trace_calls=(1,))
+    harness = make_env(simulators=(simulator,), reward=reward)
+    harness.env.reset(seed=90)
+    with pytest.raises(ValueError, match="reward_components must be finite"):
+        harness.env.step(DrivingAction.KEEP)
+    assert simulator.close_calls == 1
+
+
+def test_reward_context_validation_error_is_fatal() -> None:
+    simulator = FakeSimulator()
+    harness = make_env(simulators=(simulator,))
+    harness.env.reset(seed=91)
+    simulator.config["decision_repeat"] = 0
+    with pytest.raises(ValueError, match="decision interval must be positive"):
+        harness.env.step(DrivingAction.KEEP)
+    assert simulator.close_calls == 1
+
+
+def test_close_is_idempotent_and_reset_after_close_fails_fast() -> None:
+    simulator = FakeSimulator(fail_on_close=True)
+    harness = make_env(simulators=(simulator,))
+    harness.env.reset(seed=92)
+    harness.env.close()
+    harness.env.close()
+    assert simulator.close_calls == 1
+    with pytest.raises(RuntimeError, match="closed"):
+        harness.env.reset(seed=93)
+
+
+def test_step_before_reset_and_after_terminal_transition_are_rejected() -> None:
+    simulator = FakeSimulator(step_results=((False, True, {"max_step": True}),))
+    harness = make_env(simulators=(simulator,))
+    try:
+        with pytest.raises(RuntimeError, match="reset"):
+            harness.env.step(DrivingAction.KEEP)
+        harness.env.reset(seed=94)
+        harness.env.step(DrivingAction.KEEP)
+        with pytest.raises(RuntimeError, match="reset"):
+            harness.env.step(DrivingAction.KEEP)
+    finally:
+        harness.env.close()
+
+
 def test_reset_and_step_return_exact_gymnasium_runtime_types() -> None:
     harness = make_env(shield=RecordingShield(DrivingAction.KEEP))
     try:
-        reset_result = harness.env.reset(seed=70)
+        reset_result = harness.env.reset(seed=95)
         assert type(reset_result) is tuple
         initial_observation, reset_info = reset_result
         assert type(initial_observation) is np.ndarray
@@ -630,64 +1101,15 @@ def test_reset_and_step_return_exact_gymnasium_runtime_types() -> None:
         harness.env.close()
 
 
-def test_returned_info_and_reward_components_do_not_alias_internal_values() -> None:
-    raw_step_info: dict[str, Any] = {"simulator_value": "original"}
-    simulator = FakeSimulator(step_results=((False, False, raw_step_info),))
-    harness = make_env(simulators=(simulator,))
-    try:
-        _, reset_info = harness.env.reset()
-        reset_info["simulator_reset"] = False
-        assert simulator.reset_info == {"simulator_reset": True}
-
-        _, _, _, _, info = harness.env.step(DrivingAction.KEEP)
-        info["simulator_value"] = "changed"
-        assert raw_step_info == {"simulator_value": "original"}
-
-        components = info["reward_components"]
-        trace = info["decision_trace"]
-        assert isinstance(components, dict)
-        assert isinstance(trace, DecisionTrace)
-        components["progress_reward"] = 99.0
-        assert trace.reward_components["progress_reward"] == 1.25
-        assert harness.reward.components["progress_reward"] == 1.25
-
-        trace.reward_components["progress_reward"] = 77.0
-        assert components["progress_reward"] == 99.0
-        assert harness.reward.components["progress_reward"] == 1.25
-    finally:
-        harness.env.close()
-
-
-def test_step_before_reset_is_rejected() -> None:
-    harness = make_env()
-    try:
-        with pytest.raises(RuntimeError, match="reset"):
-            harness.env.step(DrivingAction.KEEP)
-    finally:
-        harness.env.close()
-
-
-def test_numpy_integer_action_from_discrete_space_is_accepted() -> None:
+def test_numpy_and_python_integer_actions_are_accepted() -> None:
     harness = make_env(shield=RecordingShield(DrivingAction.KEEP))
     try:
-        harness.env.reset()
+        harness.env.reset(seed=96)
         sampled_action = harness.env.action_space.sample()
         assert isinstance(sampled_action, np.integer)
         harness.env.step(sampled_action)
-        assert harness.env_factory.created[0].actions == [int(sampled_action)]
-    finally:
-        harness.env.close()
-
-
-def test_python_int_action_is_accepted_without_coercing_its_value() -> None:
-    harness = make_env(shield=RecordingShield(DrivingAction.KEEP))
-    try:
-        harness.env.reset()
-        action = 1
-        assert type(action) is int
-
-        harness.env.step(action)
-
+        harness.env.reset(seed=97)
+        harness.env.step(1)
         assert harness.env_factory.created[0].actions == [1]
     finally:
         harness.env.close()
@@ -697,7 +1119,7 @@ def test_python_int_action_is_accepted_without_coercing_its_value() -> None:
 def test_invalid_actions_are_rejected_without_clipping(action: object) -> None:
     harness = make_env()
     try:
-        harness.env.reset()
+        harness.env.reset(seed=98)
         with pytest.raises(ValueError, match="action"):
             harness.env.step(action)  # type: ignore[arg-type]
         assert harness.env_factory.created[0].actions == []
@@ -705,270 +1127,34 @@ def test_invalid_actions_are_rejected_without_clipping(action: object) -> None:
         harness.env.close()
 
 
-def test_close_is_idempotent_and_swallows_simulator_close_error() -> None:
-    simulator = FakeSimulator(fail_on_close=True)
-    harness = make_env(simulators=(simulator,))
+@pytest.mark.parametrize(("role", "worker_index"), [("invalid", 0), ("train", -1)])
+def test_constructor_validates_role_and_worker_index(role: str, worker_index: int) -> None:
+    with pytest.raises(ValueError, match="role|worker_index"):
+        make_env(role=role, worker_index=worker_index)
 
-    harness.env.reset()
+
+def test_simulator_creation_is_lazy() -> None:
+    env_factory = RecordingEnvironmentFactory()
+    harness = make_env(env_factory=env_factory)
+    assert env_factory.calls == []
     harness.env.close()
-    harness.env.close()
-
-    assert simulator.close_calls == 1
 
 
-def test_reset_after_close_recreates_the_simulator() -> None:
-    first = FakeSimulator()
-    second = FakeSimulator()
-    harness = make_env(simulators=(first, second))
-    try:
-        harness.env.reset(seed=8)
-        harness.env.close()
-        observation, info = harness.env.reset(seed=9)
+def test_environment_lifecycle_protocols_are_public() -> None:
+    from mad_driving.envs import DrivingEnvironment, ScenarioRuntimeFactory
 
-        assert first.close_calls == 1
-        assert harness.env_factory.created == [first, second]
-        assert second.reset_seeds == [9]
-        assert harness.env.observation_space.contains(observation)
-        assert info["seed"] == 9
-    finally:
-        harness.env.close()
+    assert DrivingEnvironment.__name__ == "DrivingEnvironment"
+    assert ScenarioRuntimeFactory.__name__ == "ScenarioRuntimeFactory"
 
 
-def test_reset_after_close_error_recreates_the_simulator() -> None:
-    first = FakeSimulator(fail_on_close=True)
-    replacement = FakeSimulator()
-    harness = make_env(simulators=(first, replacement))
-    try:
-        harness.env.reset(seed=50)
-        harness.env.close()
-
-        observation, info = harness.env.reset(seed=51)
-
-        assert first.close_calls == 1
-        assert harness.env_factory.created == [first, replacement]
-        assert replacement.reset_seeds == [51]
-        assert harness.env.observation_space.contains(observation)
-        assert info["seed"] == 51
-    finally:
-        harness.env.close()
-
-
-@pytest.mark.parametrize(
-    ("raw_terminated", "raw_truncated"),
-    [(True, False), (False, True), (True, True)],
-)
-def test_step_preserves_raw_termination_flags(
-    raw_terminated: bool,
-    raw_truncated: bool,
-) -> None:
-    simulator = FakeSimulator(step_results=((raw_terminated, raw_truncated, {}),))
-    harness = make_env(simulators=(simulator,))
-    try:
-        harness.env.reset()
-        _, _, terminated, truncated, _ = harness.env.step(DrivingAction.KEEP)
-        assert terminated is raw_terminated
-        assert truncated is raw_truncated
-    finally:
-        harness.env.close()
-
-
-@pytest.mark.parametrize(
-    ("raw_terminated", "raw_truncated"),
-    [(True, False), (False, True)],
-)
-def test_terminal_step_rejects_further_steps_and_reset_starts_clean(
-    raw_terminated: bool,
-    raw_truncated: bool,
-) -> None:
-    simulator = FakeSimulator(step_results=((raw_terminated, raw_truncated, {}),))
-    harness = make_env(simulators=(simulator,))
-    try:
-        harness.env.reset(seed=80)
-        _, _, terminated, truncated, _ = harness.env.step(DrivingAction.KEEP)
-        assert terminated is raw_terminated
-        assert truncated is raw_truncated
-
-        with pytest.raises(RuntimeError, match="reset"):
-            harness.env.step(DrivingAction.KEEP)
-
-        observation, info = harness.env.reset(seed=81)
-        assert simulator.reset_seeds == [80, 81]
-        assert simulator.actions == []
-        assert harness.snapshot_builder.calls[-1]["step_index"] == 0
-        assert harness.snapshot_builder.calls[-1]["previous_action"] == int(DrivingAction.KEEP)
-        assert harness.env.observation_space.contains(observation)
-        assert info["seed"] == 81
-
-        harness.env.step(DrivingAction.KEEP)
-    finally:
-        harness.env.close()
-
-
-@pytest.mark.parametrize(
-    ("raw_info", "arrived", "collision_kind"),
-    [
-        ({"arrive_dest": True}, True, None),
-        ({"crash_vehicle": True}, False, "vehicle"),
-        ({"crash_human": True}, False, "crossing_actor"),
-        ({"crash_vehicle": True, "crash_human": True}, False, "crossing_actor"),
-    ],
-)
-def test_reward_context_maps_arrival_and_collision_info(
-    raw_info: dict[str, bool],
-    arrived: bool,
-    collision_kind: str | None,
-) -> None:
-    simulator = FakeSimulator(step_results=((False, False, raw_info),))
-    harness = make_env(simulators=(simulator,))
-    try:
-        harness.env.reset()
-        _, _, _, _, info = harness.env.step(DrivingAction.KEEP)
-        context = harness.reward.contexts[-1]
-        assert context.arrived is arrived
-        assert context.collision_kind == collision_kind
-        assert all(info[key] is value for key, value in raw_info.items())
-    finally:
-        harness.env.close()
-
-
-def test_agent_failure_uses_conservative_analysis_and_does_not_crash_rollout() -> None:
-    harness = make_env(suite=FailingSuite(), shield=SafetyShield(make_config().shield))
-    try:
-        initial_observation, _ = harness.env.reset()
-        observation, reward, terminated, truncated, info = harness.env.step(DrivingAction.KEEP)
-
-        assert harness.env.observation_space.contains(initial_observation)
-        assert harness.env.observation_space.contains(observation)
-        assert harness.env_factory.created[0].actions == [int(DrivingAction.STOP)]
-        assert info["executed_action"] == int(DrivingAction.STOP)
-        assert info["decision_trace"].claims == ()
-        assert info["decision_trace"].review.reasons == ("agent_analysis_failed",)
-        assert np.isfinite(reward)
-        assert terminated is False
-        assert truncated is False
-    finally:
-        harness.env.close()
-
-
-def test_post_step_observation_failure_returns_safe_values_and_truncates() -> None:
-    observation_builder = RecordingObservationBuilder(failing_calls=(2,))
+def test_dependency_factory_failure_closes_owned_simulator_and_is_fatal() -> None:
+    simulator = FakeSimulator()
     harness = make_env(
-        shield=SafetyShield(make_config().shield),
-        observation=observation_builder,
+        simulators=(simulator,),
+        runtime_factory=ConfigurableFactory("runtime", object(), fail_on_calls=(1,)),
     )
-    try:
-        initial_observation, _ = harness.env.reset()
-        observation, _, terminated, truncated, info = harness.env.step(DrivingAction.KEEP)
-
-        assert harness.env.observation_space.contains(initial_observation)
-        assert np.isfinite(initial_observation).all()
-        assert harness.env_factory.created[0].actions == [int(DrivingAction.KEEP)]
-        assert harness.env.observation_space.contains(observation)
-        assert np.isfinite(observation).all()
-        assert terminated is False
-        assert truncated is True
-        assert "observation_error" in info
-    finally:
-        harness.env.close()
-
-
-def test_reward_exception_after_simulator_advance_closes_and_recreates() -> None:
-    failed = FakeSimulator()
-    replacement = FakeSimulator()
-    reward = RecordingRewardCalculator(failing_calculate_calls=(1,))
-    harness = make_env(simulators=(failed, replacement), reward=reward)
-    try:
-        harness.env.reset(seed=90)
-
-        with pytest.raises(RuntimeError, match="reward calculate failed"):
-            harness.env.step(DrivingAction.KEEP)
-
-        assert failed.actions == [int(DrivingAction.STOP)]
-        assert failed.close_calls == 1
-        with pytest.raises(RuntimeError, match="reset"):
-            harness.env.step(DrivingAction.KEEP)
-
-        observation, info = harness.env.reset(seed=91)
-        assert harness.env_factory.created == [failed, replacement]
-        assert replacement.reset_seeds == [91]
-        assert harness.env.observation_space.contains(observation)
-        assert info["seed"] == 91
-        harness.env.step(DrivingAction.KEEP)
-        assert replacement.actions == [int(DrivingAction.STOP)]
-    finally:
-        harness.env.close()
-
-
-def test_reward_context_exception_after_simulator_advance_closes_and_recreates() -> None:
-    failed = FakeSimulator()
-    failed.config["decision_repeat"] = 0
-    replacement = FakeSimulator()
-    harness = make_env(simulators=(failed, replacement))
-    try:
-        harness.env.reset(seed=92)
-
-        with pytest.raises(ValueError, match="decision interval must be positive"):
-            harness.env.step(DrivingAction.KEEP)
-
-        assert failed.actions == [int(DrivingAction.STOP)]
-        assert failed.close_calls == 1
-        with pytest.raises(RuntimeError, match="reset"):
-            harness.env.step(DrivingAction.KEEP)
-
-        observation, _ = harness.env.reset(seed=93)
-        assert harness.env.observation_space.contains(observation)
-        assert replacement.reset_seeds == [93]
-        harness.env.step(DrivingAction.KEEP)
-        assert replacement.actions == [int(DrivingAction.STOP)]
-    finally:
-        harness.env.close()
-
-
-def test_trace_exception_after_simulator_advance_closes_and_recreates() -> None:
-    failed = FakeSimulator()
-    replacement = FakeSimulator()
-    reward = RecordingRewardCalculator(invalid_trace_calls=(1,))
-    harness = make_env(simulators=(failed, replacement), reward=reward)
-    try:
-        harness.env.reset(seed=94)
-
-        with pytest.raises(ValueError, match="reward_components must be finite"):
-            harness.env.step(DrivingAction.KEEP)
-
-        assert failed.actions == [int(DrivingAction.STOP)]
-        assert failed.close_calls == 1
-        with pytest.raises(RuntimeError, match="reset"):
-            harness.env.step(DrivingAction.KEEP)
-
-        observation, _ = harness.env.reset(seed=95)
-        assert harness.env.observation_space.contains(observation)
-        assert replacement.reset_seeds == [95]
-        harness.env.step(DrivingAction.KEEP)
-        assert replacement.actions == [int(DrivingAction.STOP)]
-    finally:
-        harness.env.close()
-
-
-def test_simulator_step_exception_truncates_closes_and_recreates_on_reset() -> None:
-    failed = FakeSimulator(fail_on_step=True)
-    replacement = FakeSimulator()
-    harness = make_env(simulators=(failed, replacement))
-    try:
-        harness.env.reset(seed=10)
-        observation, reward, terminated, truncated, info = harness.env.step(DrivingAction.KEEP)
-
-        assert harness.env.observation_space.contains(observation)
-        assert np.isfinite(observation).all()
-        assert reward == 0.0
-        assert terminated is False
-        assert truncated is True
-        assert info["simulator_error"] == "simulator step failed"
-        assert failed.close_calls == 1
-
-        reset_observation, reset_info = harness.env.reset(seed=11)
-        assert harness.env_factory.created == [failed, replacement]
-        assert replacement.reset_seeds == [11]
-        assert harness.env.observation_space.contains(reset_observation)
-        assert reset_info["seed"] == 11
-    finally:
-        harness.env.close()
+    with pytest.raises(RuntimeError, match="runtime factory failure"):
+        harness.env.reset(seed=99)
+    assert simulator.close_calls == 1
+    with pytest.raises(RuntimeError, match="fatally closed"):
+        harness.env.reset(seed=100)

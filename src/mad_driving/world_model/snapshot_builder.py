@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from math import cos, pi, sin
+from numbers import Integral
 from typing import TYPE_CHECKING, Any
+from uuid import UUID
 
 from mad_driving.interfaces import (
     ActorState,
@@ -178,7 +180,7 @@ class SceneSnapshotBuilder:
             )
             dx = position[0] - ego_position[0]
             dy = position[1] - ego_position[1]
-            actor_id = str(getattr(simulator_object, "name", object_key))
+            actor_id = self._actor_id(object_key, simulator_object)
             actor_lane = self._current_lane(simulator_object)
             actors.append(
                 ActorState(
@@ -206,6 +208,18 @@ class SceneSnapshotBuilder:
                 )
             )
         return tuple(sorted(actors, key=lambda actor: actor.actor_id))
+
+    @staticmethod
+    def _actor_id(object_key: object, simulator_object: Any) -> str:
+        actor_id = str(getattr(simulator_object, "name", object_key))
+        try:
+            UUID(actor_id)
+        except ValueError:
+            return actor_id
+        random_seed = getattr(simulator_object, "random_seed", None)
+        if isinstance(random_seed, bool) or not isinstance(random_seed, Integral):
+            return actor_id
+        return f"metadrive-{int(random_seed)}"
 
     @staticmethod
     def _normalized_heading(name: str, value: Any) -> float:

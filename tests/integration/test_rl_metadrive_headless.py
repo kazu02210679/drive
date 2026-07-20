@@ -61,7 +61,11 @@ def assert_valid_observation(
 
 
 def run_trace_prefix() -> tuple[NDArray[np.float32], tuple[DecisionTrace, ...]]:
-    env = MultiAgentSpeedEnv(load_config("configs/base.yaml"))
+    env = MultiAgentSpeedEnv(
+        load_config("configs/base.yaml"),
+        role="train",
+        worker_index=0,
+    )
     try:
         initial_observation, _ = env.reset(seed=SEED)
         traces = []
@@ -76,9 +80,43 @@ def run_trace_prefix() -> tuple[NDArray[np.float32], tuple[DecisionTrace, ...]]:
         env.close()
 
 
+def run_real_reset_sequence() -> tuple[tuple[int, int, int], ...]:
+    env = MultiAgentSpeedEnv(
+        load_config("configs/base.yaml"),
+        role="train",
+        worker_index=0,
+    )
+    try:
+        values = []
+        _, info = env.reset(seed=SEED)
+        values.append(
+            (
+                info["episode_rng_seed"],
+                info["metadrive_scenario_index"],
+                info["scenario_parameter_seed"],
+            )
+        )
+        for _ in range(2):
+            _, info = env.reset()
+            values.append(
+                (
+                    info["episode_rng_seed"],
+                    info["metadrive_scenario_index"],
+                    info["scenario_parameter_seed"],
+                )
+            )
+        return tuple(values)
+    finally:
+        env.close()
+
+
 @pytest.mark.integration
 def test_real_rl_environment_passes_gymnasium_checker() -> None:
-    env = MultiAgentSpeedEnv(load_config("configs/base.yaml"))
+    env = MultiAgentSpeedEnv(
+        load_config("configs/base.yaml"),
+        role="train",
+        worker_index=0,
+    )
     try:
         check_env(env, skip_render_check=True)
     finally:
@@ -109,7 +147,11 @@ def test_real_control_adapter_wraps_arbitrary_seeds_into_configured_scenario_ran
 
 @pytest.mark.integration
 def test_real_rl_environment_runs_100_finite_headless_steps() -> None:
-    env = MultiAgentSpeedEnv(load_config("configs/base.yaml"))
+    env = MultiAgentSpeedEnv(
+        load_config("configs/base.yaml"),
+        role="train",
+        worker_index=0,
+    )
     try:
         initial_observation, _ = env.reset(seed=SEED)
         assert_valid_observation(env, initial_observation)
@@ -142,6 +184,37 @@ def test_real_rl_environment_runs_100_finite_headless_steps() -> None:
         assert steps_completed == len(ACTION_SEQUENCE)
     finally:
         env.close()
+
+
+@pytest.mark.integration
+def test_real_rl_environment_reports_the_actual_allocated_scenario_identity() -> None:
+    env = MultiAgentSpeedEnv(
+        load_config("configs/base.yaml"),
+        role="train",
+        worker_index=4,
+    )
+    try:
+        _, info = env.reset(seed=SEED)
+        assert info["episode_rng_seed"] == SEED
+        assert info["simulator_seed"] == info["metadrive_scenario_index"]
+        assert 0 <= info["metadrive_scenario_index"] < 10_000
+        assert 0 <= info["scenario_parameter_seed"] < 10_000
+        assert info["scenario_seed"] == info["scenario_parameter_seed"]
+        assert info["role"] == "train"
+        assert info["worker_index"] == 4
+    finally:
+        env.close()
+
+
+@pytest.mark.integration
+def test_real_rl_implicit_reset_sequence_advances_and_is_reproducible() -> None:
+    first = run_real_reset_sequence()
+    second = run_real_reset_sequence()
+
+    assert first == second
+    assert len({episode_rng_seed for episode_rng_seed, _, _ in first}) == len(first)
+    assert all(0 <= simulator_seed < 10_000 for _, simulator_seed, _ in first)
+    assert all(0 <= scenario_seed < 10_000 for _, _, scenario_seed in first)
 
 
 @pytest.mark.integration

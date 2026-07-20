@@ -47,6 +47,7 @@ class FakeVehicle:
         last_velocity: tuple[float, float],
         heading_theta: float = 0.0,
         lane: FakeLane | None = None,
+        random_seed: int | None = None,
     ) -> None:
         self.name = name
         self.position = position
@@ -63,6 +64,8 @@ class FakeVehicle:
         self.crash_sidewalk = False
         self.crash_building = False
         self.on_lane = True
+        if random_seed is not None:
+            self.random_seed = random_seed
 
     @property
     def speed(self) -> float:
@@ -181,6 +184,43 @@ def test_identical_runtime_state_produces_identical_snapshot() -> None:
     second = build_frame(make_env())
 
     assert asdict(first) == asdict(second)
+
+
+def test_metadrive_random_seed_stabilizes_regenerated_actor_ids() -> None:
+    lane = FakeLane(("A", "B", 0))
+    first = make_env()
+    second = make_env()
+    first.engine = FakeEngine(
+        [
+            first.vehicle,
+            FakeVehicle(
+                "49d65b79-497d-43be-973e-3e72b4c4a2b9",
+                position=(12.0, 0.0),
+                velocity=(5.0, 0.0),
+                last_velocity=(5.0, 0.0),
+                lane=lane,
+                random_seed=1234,
+            ),
+        ]
+    )
+    second.engine = FakeEngine(
+        [
+            second.vehicle,
+            FakeVehicle(
+                "a30aca0f-ca69-4e16-a5d8-1f6b109d8be4",
+                position=(12.0, 0.0),
+                velocity=(5.0, 0.0),
+                last_velocity=(5.0, 0.0),
+                lane=lane,
+                random_seed=1234,
+            ),
+        ]
+    )
+
+    first_actor = build_frame(first).observation.visible_actors[0]
+    second_actor = build_frame(second).observation.visible_actors[0]
+
+    assert first_actor.actor_id == second_actor.actor_id == "metadrive-1234"
 
 
 def test_missing_navigation_uses_safe_finite_defaults() -> None:
