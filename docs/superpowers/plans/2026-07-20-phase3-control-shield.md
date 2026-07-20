@@ -70,7 +70,7 @@ tests/
 - Extends: `AppConfig.coordinator`, `AppConfig.shield`, and `AppConfig.control`, each with a default factory.
 - Later tasks consume only these frozen models; they do not read YAML or environment variables directly.
 
-- [ ] **Step 1: Write failing default and strictness tests**
+- [x] **Step 1: Write failing default and strictness tests**
 
 ```python
 import math
@@ -134,13 +134,13 @@ def test_control_config_rejects_wrong_acceleration_order() -> None:
         )
 ```
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run: `.venv\Scripts\python.exe -m pytest tests\unit\config\test_control_config.py -v`
 
 Expected: collection fails because the Phase 3 config classes do not exist.
 
-- [ ] **Step 3: Implement exact strict models**
+- [x] **Step 3: Implement exact strict models**
 
 Add these models before `AppConfig` and import `Literal`:
 
@@ -213,7 +213,7 @@ control: ControlConfig = Field(default_factory=ControlConfig)
 
 Add the exact three YAML sections from the approved design to `configs/base.yaml`.
 
-- [ ] **Step 4: Verify GREEN and existing loader compatibility**
+- [x] **Step 4: Verify GREEN and existing loader compatibility**
 
 Run: `.venv\Scripts\python.exe -m pytest tests\unit\config -v`
 

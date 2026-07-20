@@ -36,3 +36,33 @@ agents:
     recommendation_spread_mps: 5.0
     low_confidence_threshold: 0.5
     definitive_speed_fraction: 0.5
+coordinator:
+  conflict_min_action: 1
+  severe_min_action: 2
+  severe_threshold: 0.75
+shield:
+  mode: enforce
+  imminent_ttc_s: 1.0
+  caution_ttc_s: 3.0
+  emergency_margin_m: 0.0
+  caution_margin_m: 5.0
+  missing_agent_action: 2
+  multiple_missing_action: 3
+control:
+  speed:
+    kp: 0.50
+    ki: 0.05
+    kd: 0.10
+    integral_limit: 10.0
+    max_acceleration_mps2: 2.5
+    normal_deceleration_mps2: -3.0
+    emergency_deceleration_mps2: -6.0
+  steering:
+    heading_kp: 1.7
+    heading_ki: 0.01
+    heading_kd: 3.5
+    lateral_kp: 0.3
+    lateral_ki: 0.002
+    lateral_kd: 0.05
+    integral_limit: 5.0
+    lookahead_m: 1.0
