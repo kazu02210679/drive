@@ -9,6 +9,7 @@ from mad_driving.interfaces.actor_state import ActorState
 from mad_driving.interfaces.critic_review import CriticReview
 from mad_driving.interfaces.decision_trace import DecisionTrace
 from mad_driving.interfaces.risk_claim import RiskClaim
+from mad_driving.interfaces.scene_frame import OcclusionRegion, RoadContext
 from mad_driving.interfaces.scene_snapshot import EgoState, SceneSnapshot
 
 
@@ -250,4 +251,32 @@ def test_reward_components_must_be_finite() -> None:
             claims=(make_claim(),),
             review=make_review(),
             reward_components={"progress": math.nan},
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("region_id", ""),
+        ("boundary_points_xy_m", ((0.0, 0.0),)),
+        ("boundary_points_xy_m", ((0.0, 0.0), (math.nan, 1.0))),
+    ],
+)
+def test_occlusion_region_requires_a_valid_boundary(field: str, value: Any) -> None:
+    values: dict[str, Any] = {
+        "region_id": "building-corner",
+        "boundary_points_xy_m": ((0.0, 0.0), (1.0, 0.0)),
+    }
+    values[field] = value
+
+    with pytest.raises(ValueError, match=field):
+        OcclusionRegion(**values)
+
+
+def test_road_context_requires_a_finite_optional_conflict_distance() -> None:
+    with pytest.raises(ValueError, match="distance_to_conflict_point_m"):
+        RoadContext(
+            stop_required=False,
+            distance_to_conflict_point_m=math.inf,
+            intersection_entry_prohibited=False,
         )
