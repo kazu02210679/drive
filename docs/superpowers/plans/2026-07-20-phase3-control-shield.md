@@ -541,7 +541,7 @@ Run: `.venv\Scripts\python.exe -m pytest tests\unit\coordinator tests\unit\contr
 
 Expected: all Coordinator and action mapping tests pass.
 
-- [ ] **Step 5: Commit Coordinator independently**
+- [x] **Step 5: Commit Coordinator independently**
 
 ```powershell
 git add src\mad_driving\coordinator tests\unit\coordinator tests\unit\agents\factories.py
@@ -564,7 +564,7 @@ git commit -m "feat: add rule-based speed coordinator"
 - Produces: `SafetyShield(config).filter(requested_action, snapshot, claims) -> ShieldResult`.
 - Consumes only typed inputs and `ShieldConfig`; no MetaDrive access.
 
-- [ ] **Step 1: Write failing mode, reason, and monotonicity tests**
+- [x] **Step 1: Write failing mode, reason, and monotonicity tests**
 
 ```python
 import math
@@ -666,13 +666,13 @@ def test_invalid_claim_is_stopped_before_arithmetic() -> None:
 
 Also add parameterized tests for every individual reason, one missing versus two missing Agents, exact TTC boundaries, hard stop, collision/off-road, monitor mode, stricter claim caps, and repeated equality.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run: `.venv\Scripts\python.exe -m pytest tests\unit\safety\test_shield.py -v`
 
 Expected: imports fail because `ShieldResult` and `SafetyShield` do not exist.
 
-- [ ] **Step 3: Implement `ShieldResult` validation**
+- [x] **Step 3: Implement `ShieldResult` validation**
 
 ```python
 from dataclasses import dataclass
@@ -700,7 +700,7 @@ class ShieldResult:
             raise ValueError("reasons must be duplicate-free")
 ```
 
-- [ ] **Step 4: Implement defensive partitioning and fixed rules**
+- [x] **Step 4: Implement defensive partitioning and fixed rules**
 
 Implement `SafetyShield` with these private helpers and no arithmetic on invalid claims:
 
@@ -832,13 +832,13 @@ return ShieldResult(
 
 The mutually exclusive emergency/caution comparisons prevent duplicate TTC or margin reasons for the same minimum value. Use `<=` for TTC and `<` for margins exactly as shown.
 
-- [ ] **Step 5: Verify GREEN and interface regressions**
+- [x] **Step 5: Verify GREEN and interface regressions**
 
 Run: `.venv\Scripts\python.exe -m pytest tests\unit\safety tests\unit\interfaces -v`
 
 Expected: all reason, mode, boundary, invalid-input, monotonicity, and existing interface tests pass.
 
-- [ ] **Step 6: Run a generated monotonicity matrix**
+- [x] **Step 6: Run a generated monotonicity matrix**
 
 Add and run a test that loops over all four requested actions, TTC values `(None, 5.0, 3.0, 1.0, 0.5)`, and margins `(None, 10.0, 5.0, 0.0, -0.1)`. Assert decreasing TTC or margin never lowers `executed_action` for a fixed requested action.
 
