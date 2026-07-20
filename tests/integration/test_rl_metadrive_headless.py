@@ -6,7 +6,7 @@ from gymnasium.utils.env_checker import check_env
 from numpy.typing import NDArray
 
 from mad_driving.config.loader import load_config
-from mad_driving.envs import MultiAgentSpeedEnv
+from mad_driving.envs import MultiAgentSpeedEnv, create_control_metadrive_env
 from mad_driving.interfaces import DecisionTrace
 
 SEED = 42
@@ -18,6 +18,18 @@ METADRIVE_INFO_KEYS = {
     "out_of_road",
     "max_step",
 }
+EXPECTED_REWARD_COMPONENT_KEYS = (
+    "progress_reward",
+    "arrival_reward",
+    "collision_penalty",
+    "near_miss_penalty",
+    "offroad_penalty",
+    "rule_violation_penalty",
+    "jerk_penalty",
+    "unnecessary_brake_penalty",
+    "standstill_penalty",
+    "shield_intervention_penalty",
+)
 
 
 def assert_valid_observation(
@@ -56,6 +68,28 @@ def test_real_rl_environment_passes_gymnasium_checker() -> None:
 
 
 @pytest.mark.integration
+def test_real_control_adapter_wraps_arbitrary_seeds_into_configured_scenario_range() -> None:
+    config = load_config("configs/base.yaml")
+    metadrive_config = config.metadrive_dict()
+    metadrive_config.update({"start_seed": 40, "num_scenarios": 3})
+    env = create_control_metadrive_env(metadrive_config, config.control)
+    expected_scenario_seeds = ((39, 42), (41, 41), (43, 40))
+    try:
+        first_observation = None
+        for requested_seed, expected_scenario_seed in expected_scenario_seeds:
+            observation, info = env.reset(seed=requested_seed)
+            assert info["env_seed"] == expected_scenario_seed
+            if requested_seed == 39:
+                first_observation = np.asarray(observation).copy()
+
+        repeated_observation, repeated_info = env.reset(seed=39)
+        assert repeated_info["env_seed"] == 42
+        np.testing.assert_array_equal(first_observation, repeated_observation)
+    finally:
+        env.close()
+
+
+@pytest.mark.integration
 def test_real_rl_environment_runs_100_finite_headless_steps() -> None:
     env = MultiAgentSpeedEnv(load_config("configs/base.yaml"))
     try:
@@ -73,6 +107,7 @@ def test_real_rl_environment_runs_100_finite_headless_steps() -> None:
 
             reward_components = info["reward_components"]
             assert isinstance(reward_components, dict)
+            assert tuple(reward_components) == EXPECTED_REWARD_COMPONENT_KEYS
             assert all(
                 isinstance(value, int | float) and math.isfinite(value)
                 for value in reward_components.values()
