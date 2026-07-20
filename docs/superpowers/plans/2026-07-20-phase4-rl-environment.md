@@ -745,7 +745,7 @@ git add README.md docs/phase4_implementation_log.md docs/superpowers/plans/2026-
 git commit -m "docs: record phase 4 verification"
 ```
 
-- [ ] **Step 8: Push and open a stacked Draft PR**
+- [x] **Step 8: Push and open a stacked Draft PR**
 
 ```powershell
 git push -u origin feat/phase4-rl-environment

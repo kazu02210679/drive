@@ -370,3 +370,7 @@ Results: `430 passed, 19 warnings in 33.35s`; total branch-aware coverage `95.76
 (`2002` statements, `57` missed, `428` branches, `46` partial); Ruff `All checks
 passed!`; Ruff format `78 files already formatted`; mypy found no issues in 46 source
 files; and the branch-range whitespace check exited 0 with no output.
+
+The branch was pushed as `feat/phase4-rl-environment`, and stacked Draft PR
+[#4](https://github.com/kazu02210679/drive/pull/4) was opened against
+`feat/phase3-control-shield`. It explicitly depends on Phase 3 Draft PR #3.
