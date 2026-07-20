@@ -282,6 +282,7 @@ git commit -m "feat: add finite driving kinematics"
 **Files:**
 - Create: `src/mad_driving/agents/protocol.py`
 - Create: `src/mad_driving/agents/claim_factory.py`
+- Create: `tests/unit/agents/factories.py`
 - Create: `tests/unit/agents/test_claim_factory.py`
 
 **Interfaces:**
@@ -289,7 +290,7 @@ git commit -m "feat: add finite driving kinematics"
 - Produces: `claim_id(agent_id, snapshot, event_type, target_actor_id) -> str`.
 - Produces: `neutral_claim(agent_id, snapshot, event_type="no_hazard") -> RiskClaim`.
 
-- [ ] **Step 1: Write failing identity and neutral-claim tests**
+- [x] **Step 1: Write failing identity and neutral-claim tests**
 
 ```python
 def test_claim_id_is_stable_and_contains_no_uuid() -> None:
@@ -309,23 +310,23 @@ def test_neutral_claim_is_finite_and_valid_for_current_step() -> None:
     assert claim.valid_until_step == snapshot.step_index
 ```
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run: `.venv\Scripts\python.exe -m pytest tests\unit\agents\test_claim_factory.py -v`
 
 Expected: import failure for the new modules.
 
-- [ ] **Step 3: Implement the exact approved ID and neutral values**
+- [x] **Step 3: Implement the exact approved ID and neutral values**
 
 Use `target_actor_id or "none"` in IDs. Neutral claims use probability `0.0`, confidence `1.0`, severity `0.0`, horizon `0.0`, no TTC or stopping margin, no hard stop, evidence `("no_applicable_hazard",)`, and an empty assumptions tuple.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 Run: `.venv\Scripts\python.exe -m pytest tests\unit\agents\test_claim_factory.py -v`
 
 Expected: stable equality and JSON serialization pass.
 
-- [ ] **Step 5: Commit contracts**
+- [x] **Step 5: Commit contracts**
 
 ```powershell
 git add src\mad_driving\agents tests\unit\agents\test_claim_factory.py
@@ -339,7 +340,7 @@ git commit -m "feat: define deterministic agent claims"
 **Files:**
 - Create: `src/mad_driving/agents/nominal.py`
 - Create: `tests/unit/agents/test_nominal.py`
-- Create: `tests/unit/agents/factories.py`
+- Modify: `tests/unit/agents/factories.py`
 
 **Interfaces:**
 - Consumes: `NominalAgentConfig`, `SceneSnapshot`, kinematic helpers, claim factory.
