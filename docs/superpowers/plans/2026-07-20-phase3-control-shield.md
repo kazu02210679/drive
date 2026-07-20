@@ -459,6 +459,15 @@ def test_hard_stop_overrides_every_other_candidate() -> None:
     assert action is DrivingAction.STOP
 
 
+def test_any_required_agent_missing_applies_prepare_stop_floor() -> None:
+    action = RuleBasedCoordinator(CoordinatorConfig()).decide(
+        make_snapshot(),
+        (make_claim("nominal"), make_claim("rule")),
+        review(),
+    )
+    assert action is DrivingAction.PREPARE_STOP
+
+
 def test_conflict_and_severity_apply_minimum_actions() -> None:
     coordinator = RuleBasedCoordinator(CoordinatorConfig())
     assert coordinator.decide(make_snapshot(), (), review(unresolved=True)) is DrivingAction.PREPARE_STOP
@@ -490,6 +499,8 @@ from mad_driving.interfaces import CriticReview, RiskClaim, SceneSnapshot
 
 
 class RuleBasedCoordinator:
+    _required_agent_ids = frozenset({"nominal", "hazard", "rule"})
+
     def __init__(self, config: CoordinatorConfig) -> None:
         self._config = config
 
@@ -499,7 +510,8 @@ class RuleBasedCoordinator:
         claims: Sequence[RiskClaim],
         review: CriticReview,
     ) -> DrivingAction:
-        if not claims:
+        present_agent_ids = {claim.agent_id for claim in claims}
+        if self._required_agent_ids - present_agent_ids:
             base = DrivingAction.PREPARE_STOP
         else:
             base = max(
