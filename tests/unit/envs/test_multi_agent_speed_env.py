@@ -174,9 +174,11 @@ class RecordingEnvironmentFactory:
         simulators: Sequence[FakeSimulator] = (),
         *,
         fail_on_calls: Sequence[int] = (),
+        runtime_config_overrides: Mapping[str, object] | None = None,
     ) -> None:
         self._simulators = list(simulators)
         self._fail_on_calls = set(fail_on_calls)
+        self._runtime_config_overrides = dict(runtime_config_overrides or {})
         self.created: list[FakeSimulator] = []
         self.calls: list[tuple[dict[str, object], ControlConfig]] = []
 
@@ -190,6 +192,7 @@ class RecordingEnvironmentFactory:
             raise RuntimeError("environment creation failure")
         simulator = self._simulators.pop(0) if self._simulators else FakeSimulator()
         simulator.config.update(options)
+        simulator.config.update(self._runtime_config_overrides)
         self.created.append(simulator)
         return simulator
 
@@ -887,15 +890,55 @@ def test_step_uses_analysis_result_observation_only_shield_and_frame_reward_cont
         harness.env.close()
 
 
-def test_runtime_timing_mismatch_is_fatal_before_reward() -> None:
-    simulator = FakeSimulator()
-    harness = make_env(simulators=(simulator,))
+def test_runtime_timing_mismatch_fails_reset_before_simulator_and_initial_frame() -> None:
+    events: list[str] = []
+    simulator = FakeSimulator(events=events, fail_on_close=True)
+    runtime = RecordingRuntime(events=events)
+    builder = RecordingSnapshotBuilder(events=events)
+    env_factory = RecordingEnvironmentFactory(
+        (simulator,),
+        runtime_config_overrides={"physics_world_step_size": 0.03},
+    )
+    harness = make_env(
+        env_factory=env_factory,
+        runtime=runtime,
+        snapshot_builder=builder,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="decision interval mismatch.*0.15.*0.1",
+    ) as captured:
+        harness.env.reset(seed=78)
+
+    assert simulator.reset_seeds == []
+    assert builder.calls == []
+    assert events == ["runtime.reset", "simulator.close"]
+    assert simulator.close_calls == 1
+    assert captured.value.__notes__ == ["simulator cleanup failed: simulator close failure"]
+
+
+def test_timing_change_after_reset_fails_before_transition_side_effects() -> None:
+    events: list[str] = []
+    simulator = FakeSimulator(events=events)
+    runtime = RecordingRuntime(events=events)
+    builder = RecordingSnapshotBuilder(events=events)
+    harness = make_env(
+        simulators=(simulator,),
+        runtime=runtime,
+        snapshot_builder=builder,
+    )
     harness.env.reset(seed=78)
+    events.clear()
     simulator.config["physics_world_step_size"] = 0.03
 
     with pytest.raises(RuntimeError, match="decision interval mismatch.*0.15.*0.1"):
         harness.env.step(DrivingAction.KEEP)
 
+    assert events == ["simulator.close"]
+    assert simulator.actions == []
+    assert runtime.after_step_calls == 0
+    assert len(builder.calls) == 1
     assert harness.reward.calculate_calls == 0
     assert simulator.close_calls == 1
 

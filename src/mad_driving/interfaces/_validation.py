@@ -43,3 +43,17 @@ def require_action(name: str, value: int) -> None:
 def require_non_empty(name: str, value: str) -> None:
     if not value:
         raise ValueError(f"{name} must not be empty")
+
+
+def canonical_string_tuple(name: str, values: object) -> tuple[str, ...]:
+    """Return an isolated immutable string sequence or reject malformed input."""
+
+    if isinstance(values, str | bytes):
+        raise ValueError(f"{name} must be a sequence of strings")
+    try:
+        items: tuple[object, ...] = tuple(values)  # type: ignore[arg-type]
+    except TypeError as error:
+        raise ValueError(f"{name} must be a sequence of strings") from error
+    if not all(isinstance(item, str) for item in items):
+        raise ValueError(f"{name} must contain only strings")
+    return tuple(item for item in items if isinstance(item, str))

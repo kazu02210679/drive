@@ -360,9 +360,7 @@ def test_hidden_actor_exists_only_in_privileged_state() -> None:
         visible_actor_ids=frozenset({"z-vehicle"}),
     )
 
-    assert tuple(actor.actor_id for actor in frame.observation.visible_actors) == (
-        "z-vehicle",
-    )
+    assert tuple(actor.actor_id for actor in frame.observation.visible_actors) == ("z-vehicle",)
     assert tuple(actor.actor_id for actor in frame.privileged.all_actors) == (
         "a-vehicle",
         "z-vehicle",
@@ -412,9 +410,7 @@ def test_same_lane_requires_lane_identity_and_lateral_position_inside_lane_width
     env = make_env()
     env.engine.get_objects()["z-vehicle"].position = (12.0, 2.0)
 
-    actors = {
-        actor.actor_id: actor for actor in build_frame(env).observation.visible_actors
-    }
+    actors = {actor.actor_id: actor for actor in build_frame(env).observation.visible_actors}
 
     assert actors["z-vehicle"].same_lane is False
     assert actors["a-vehicle"].same_lane is False
@@ -426,8 +422,6 @@ def test_same_lane_uses_configured_nested_lane_width_when_lane_width_is_not_expo
     env.vehicle.navigation.current_lane.width = None
     env.engine.get_objects()["z-vehicle"].position = (12.0, 1.9)
 
-    actors = {
-        actor.actor_id: actor for actor in build_frame(env).observation.visible_actors
-    }
+    actors = {actor.actor_id: actor for actor in build_frame(env).observation.visible_actors}
 
     assert actors["z-vehicle"].same_lane is True

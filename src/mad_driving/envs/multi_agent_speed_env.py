@@ -271,6 +271,7 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
             if not isinstance(scenario_state, ScenarioState):
                 raise TypeError("ScenarioRuntime.reset must return ScenarioState")
             self._validate_scenario_state(scenario_state, seeds)
+            self._validated_decision_interval(environment)
             _, raw_reset_info = environment.reset(seed=seeds.metadrive_scenario_index)
             reset_info = self._copy_info(raw_reset_info)
             actual_scenario_index = self._verified_actual_scenario_index(
@@ -340,6 +341,7 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
         actual_scenario_index = cast(int, self._actual_scenario_index)
 
         try:
+            runtime_decision_interval_s = self._validated_decision_interval(environment)
             shield_result = shield.filter(
                 requested,
                 frame.observation,
@@ -363,7 +365,6 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
             )
             if not isinstance(scenario_result, ScenarioStepResult):
                 raise TypeError("ScenarioRuntime.after_step must return ScenarioStepResult")
-            runtime_decision_interval_s = self._validated_decision_interval(environment)
             context = self._runtime_context(runtime, scenario_state)
             next_frame = self._build_frame(
                 builder,
@@ -627,9 +628,7 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
                 f"state {state.scenario_id!r}, returned {context.scenario_id!r}"
             )
         if context.scenario_id != self._config.scenario_id:
-            raise RuntimeError(
-                "observation context scenario_id does not match configured scenario"
-            )
+            raise RuntimeError("observation context scenario_id does not match configured scenario")
         return context
 
     @staticmethod

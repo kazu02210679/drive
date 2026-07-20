@@ -120,9 +120,7 @@ class DecisionTrace:
         object.__setattr__(self, "reward_components", components)
 
     @staticmethod
-    def _validate_error_mapping(
-        failed_agent_ids: tuple[str, ...], errors: tuple[str, ...]
-    ) -> None:
+    def _validate_error_mapping(failed_agent_ids: tuple[str, ...], errors: tuple[str, ...]) -> None:
         if len(failed_agent_ids) != len(errors) or len(errors) != len(set(errors)):
             raise ValueError("errors must map one-to-one to failed_agent_ids")
         for agent_id, error in zip(failed_agent_ids, errors, strict=True):

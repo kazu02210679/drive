@@ -83,8 +83,7 @@ class SceneSnapshotBuilder:
         visible_actors = tuple(
             actor
             for actor in all_actors
-            if context.visible_actor_ids is None
-            or actor.actor_id in context.visible_actor_ids
+            if context.visible_actor_ids is None or actor.actor_id in context.visible_actor_ids
         )
         observation = SceneObservation(
             step_index=step_index,
@@ -106,8 +105,7 @@ class SceneSnapshotBuilder:
             all_actors=all_actors,
             collision_occurred=self._collision_occurred(raw_info, ego_vehicle),
             collision_kind=self._collision_kind(raw_info, ego_vehicle),
-            off_road=bool(raw_info.get("out_of_road", False))
-            or self._off_road(ego_vehicle),
+            off_road=bool(raw_info.get("out_of_road", False)) or self._off_road(ego_vehicle),
             arrived=bool(raw_info.get("arrive_dest", False)),
             scenario_success=scenario_result.success,
             scenario_failure=scenario_result.failure,
@@ -128,9 +126,7 @@ class SceneSnapshotBuilder:
         )
 
     @staticmethod
-    def _collision_kind(
-        raw_info: Mapping[str, object], vehicle: Any
-    ) -> CollisionKind | None:
+    def _collision_kind(raw_info: Mapping[str, object], vehicle: Any) -> CollisionKind | None:
         kinds: tuple[tuple[str, CollisionKind], ...] = (
             ("crash_vehicle", "vehicle"),
             ("crash_human", "crossing_actor"),
@@ -139,9 +135,7 @@ class SceneSnapshotBuilder:
             ("crash_building", "building"),
         )
         for attribute, kind in kinds:
-            if bool(raw_info.get(attribute, False)) or bool(
-                getattr(vehicle, attribute, False)
-            ):
+            if bool(raw_info.get(attribute, False)) or bool(getattr(vehicle, attribute, False)):
                 return kind
         return None
 

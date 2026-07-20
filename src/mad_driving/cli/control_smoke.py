@@ -149,12 +149,7 @@ def run_control_smoke(
     finally:
         env.close()
 
-    if (
-        steps_completed == 0
-        or frame is None
-        or analysis is None
-        or final_trace is None
-    ):
+    if steps_completed == 0 or frame is None or analysis is None or final_trace is None:
         raise RuntimeError("Control smoke completed without a simulator step")
     return ControlSmokeResult(
         steps_completed=steps_completed,

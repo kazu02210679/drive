@@ -269,6 +269,73 @@ def test_decision_trace_freezes_and_validates_analysis_diagnostics() -> None:
         )
 
 
+def test_decision_trace_deeply_freezes_claim_and_review_sequences() -> None:
+    evidence = ["relative_position"]
+    assumptions = ["constant_velocity"]
+    supported_agent_ids = ["nominal"]
+    challenged_claim_ids = ["hazard-1"]
+    reasons = ["supported"]
+    trace = DecisionTrace(
+        step_index=1,
+        raw_action=0,
+        executed_action=0,
+        target_speed_mps=8.0,
+        shield_intervened=False,
+        shield_reasons=(),
+        claims=(
+            make_claim(
+                evidence=evidence,
+                assumptions=assumptions,
+            ),
+        ),
+        review=make_review(
+            supported_agent_ids=supported_agent_ids,
+            challenged_claim_ids=challenged_claim_ids,
+            reasons=reasons,
+        ),
+        reward_components={"progress": 0.1},
+    )
+
+    evidence.append("caller_mutation")
+    assumptions.clear()
+    supported_agent_ids.clear()
+    challenged_claim_ids.append("caller-mutation")
+    reasons[0] = "caller_mutation"
+
+    assert trace.claims[0].evidence == ("relative_position",)
+    assert trace.claims[0].assumptions == ("constant_velocity",)
+    assert trace.review.supported_agent_ids == ("nominal",)
+    assert trace.review.challenged_claim_ids == ("hazard-1",)
+    assert trace.review.reasons == ("supported",)
+    json.dumps(asdict(trace))
+
+
+@pytest.mark.parametrize(
+    ("claim_overrides", "review_overrides", "message"),
+    [
+        ({"evidence": ["valid", 1]}, {}, "evidence"),
+        ({}, {"reasons": "bare string"}, "reasons"),
+    ],
+)
+def test_decision_trace_rejects_invalid_nested_string_sequences(
+    claim_overrides: dict[str, Any],
+    review_overrides: dict[str, Any],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        DecisionTrace(
+            step_index=1,
+            raw_action=0,
+            executed_action=0,
+            target_speed_mps=8.0,
+            shield_intervened=False,
+            shield_reasons=(),
+            claims=(make_claim(**claim_overrides),),
+            review=make_review(**review_overrides),
+            reward_components={},
+        )
+
+
 @pytest.mark.parametrize("actor_type", ["pedestrian", "", "VEHICLE"])
 def test_actor_type_is_restricted(actor_type: str) -> None:
     with pytest.raises(ValueError, match="actor_type"):
