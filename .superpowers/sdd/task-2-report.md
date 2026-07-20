@@ -36,8 +36,18 @@
 - The allocator is deterministic for identical role, range, worker, and episode inputs.
 - Role codes and worker indices are included in the entropy, while both derived identities remain inside the configured half-open range.
 - Both result and allocator dataclasses are frozen, and no environment integration was added.
-- The focused tests cover reproducibility, bounds, worker identity separation, and required negative-input validation.
+- The current five focused tests cover reproducibility and bounds, independent worker and role identity separation, package-level exports, and required negative-input validation.
 
 ## Concerns
 
 - The full suite emitted 19 existing dependency/runtime warnings from matplotlib and Stable-Baselines3. They did not affect test outcomes and are unrelated to the new scenarios package.
+
+## Review-fix evidence
+
+- Added explicit public exports from `mad_driving.scenarios` for `EnvironmentRole`, `EpisodeSeedAllocator`, and `EpisodeSeeds`, following the repository's `__all__` convention.
+- Added `test_scenario_seed_api_is_exported`, which imports all three names from `mad_driving.scenarios` and verifies the role literal and seed value behavior.
+- Extended `test_role_or_worker_changes_derived_seed_identity` to retain the worker comparison and independently compare train versus validation using the same numeric range, isolating the role code effect.
+- RED: `.venv\\Scripts\\python.exe -m pytest tests/unit/scenarios/test_seeding.py -q` failed during collection with `ImportError: cannot import name 'EnvironmentRole' from 'mad_driving.scenarios'`.
+- GREEN: the same focused command passed with `5 passed in 0.18s`.
+- Ruff: `.venv\\Scripts\\ruff.exe check src/mad_driving/scenarios tests/unit/scenarios` — `All checks passed!`
+- Mypy: `.venv\\Scripts\\mypy.exe src/mad_driving/scenarios` — `Success: no issues found in 2 source files`.
