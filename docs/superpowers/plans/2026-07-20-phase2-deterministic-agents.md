@@ -777,7 +777,7 @@ git add README.md docs src tests configs
 git commit -m "test: verify phase 2 agent simulation"
 ```
 
-- [ ] **Step 9: Publish as a stacked Draft PR after user confirmation**
+- [x] **Step 9: Publish as a stacked Draft PR after user confirmation**
 
 ```powershell
 git push -u origin feat/phase2-deterministic-agents
