@@ -552,12 +552,12 @@ git commit -m "test: verify real phase 4 gym environment"
 - Produces `run_training(config, *, smoke, run_dir, resume_from=None, env_factory=...)`.
 - CLI supports `--config`, `--smoke`, `--run-dir`, and `--resume-from`.
 
-- [ ] **Step 1: Write failing callback tests**
+- [x] **Step 1: Write failing callback tests**
 
 Inject SB3 callback locals containing vector `infos`; prove every known Reward key is recorded under
 `reward/<key>` and missing/malformed info is ignored without breaking learning.
 
-- [ ] **Step 2: Write failing training orchestration tests with fake PPO and fake vector envs**
+- [x] **Step 2: Write failing training orchestration tests with fake PPO and fake vector envs**
 
 ```python
 def test_run_training_uses_only_configured_ppo_values_and_closes_envs(tmp_path) -> None:
@@ -576,18 +576,18 @@ scaled by number of envs, resume using `PPO.load(..., env=...)`, `reset_num_time
 subprocess construction success, Windows-style construction failure falling back to `DummyVecEnv`,
 and cleanup on `learn()`/save failure.
 
-- [ ] **Step 3: Write failing CLI tests**
+- [x] **Step 3: Write failing CLI tests**
 
 Prove `--help`, required config, smoke forwarding, resume path validation, JSON success output, and
 concise stderr/nonzero return without traceback.
 
-- [ ] **Step 4: Run Task 6 tests and verify RED**
+- [x] **Step 4: Run Task 6 tests and verify RED**
 
 Run: `.venv\Scripts\python.exe -m pytest tests/unit/training tests/unit/cli/test_train.py -v`
 
 Expected: import failure because training modules and CLI do not exist.
 
-- [ ] **Step 5: Implement callback and training lifecycle**
+- [x] **Step 5: Implement callback and training lifecycle**
 
 ```python
 model = PPO(
@@ -614,13 +614,13 @@ Use built-in `CheckpointCallback` and `EvalCallback`; save `final_model.zip` exp
 Use `SubprocVecEnv` only when `num_envs > 1`; catch construction failure, close partial resources,
 and rebuild an equal-count `DummyVecEnv`.
 
-- [ ] **Step 6: Run Task 6 tests and verify GREEN**
+- [x] **Step 6: Run Task 6 tests and verify GREEN**
 
 Run: `.venv\Scripts\python.exe -m pytest tests/unit/training tests/unit/cli/test_train.py -v`
 
 Expected: all callback, lifecycle, resume, fallback, serialization, and CLI tests pass.
 
-- [ ] **Step 7: Commit Task 6**
+- [x] **Step 7: Commit Task 6**
 
 ```powershell
 git add src/mad_driving/training src/mad_driving/cli/train.py tests/unit/training tests/unit/cli/test_train.py
