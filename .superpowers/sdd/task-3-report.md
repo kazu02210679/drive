@@ -86,3 +86,47 @@ Matplotlib deprecations and Stable-Baselines integration warnings; no test failu
 
 No blocking concerns. The full test run emits unrelated dependency and integration warnings as
 noted above. Runtime-to-environment wiring remains intentionally deferred to Task 8.
+
+## Independent review fix (2026-07-21)
+
+### Scope
+
+Hardened `ScenarioObservationContext` validation only. No environment integration or Task 4
+surface was changed.
+
+### RED evidence
+
+After writing three focused regressions, the command below failed as expected:
+
+```powershell
+.venv\Scripts\python.exe -m pytest tests/unit/scenarios/test_runtime.py -q
+```
+
+Result: 3 failed, 4 passed. Each new test failed with `DID NOT RAISE ValueError`:
+
+- a non-`OcclusionRegion` object with a `region_id` attribute was accepted;
+- a numeric visible actor ID was accepted; and
+- a bare string visibility input was split into character IDs and accepted.
+
+### GREEN and verification evidence
+
+Minimal validation now rejects non-`OcclusionRegion` entries, bare string visibility inputs,
+and any non-string visibility ID while retaining tuple/frozenset defensive copies.
+
+```powershell
+.venv\Scripts\python.exe -m pytest tests/unit/scenarios/test_runtime.py -q
+.venv\Scripts\python.exe -m pytest tests/unit/scenarios tests/unit/interfaces/test_models.py -q
+.venv\Scripts\ruff.exe check src/mad_driving/scenarios tests/unit/scenarios
+.venv\Scripts\mypy.exe src/mad_driving/scenarios src/mad_driving/interfaces/scene_frame.py
+.venv\Scripts\python.exe -m pytest -q
+```
+
+Results: 7 runtime tests passed; 53 focused tests passed; Ruff reported `All checks passed!`;
+mypy reported `Success: no issues found in 4 source files`; full suite passed with 450 tests and
+19 pre-existing warnings in 27.66 seconds.
+
+### Review-fix files changed
+
+- `src/mad_driving/scenarios/runtime.py`
+- `tests/unit/scenarios/test_runtime.py`
+- `.superpowers/sdd/task-3-report.md`

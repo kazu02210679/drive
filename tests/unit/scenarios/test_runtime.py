@@ -83,3 +83,31 @@ def test_scenario_state_copies_and_freezes_parameters() -> None:
     assert state.parameters == {"crossing_speed_mps": 3.0}
     with pytest.raises(TypeError):
         state.parameters["crossing_speed_mps"] = 5.0
+
+
+def test_observation_context_rejects_malformed_occlusion_regions() -> None:
+    class MalformedRegion:
+        region_id = "unvalidated"
+
+    with pytest.raises(ValueError, match="occlusion_regions"):
+        ScenarioObservationContext(
+            scenario_id="occluded",
+            occlusion_regions=(MalformedRegion(),),  # type: ignore[arg-type]
+            visible_actor_ids=(),
+        )
+
+
+def test_observation_context_rejects_non_string_visible_actor_ids() -> None:
+    with pytest.raises(ValueError, match="visible_actor_ids"):
+        ScenarioObservationContext(
+            scenario_id="clear",
+            visible_actor_ids=("vehicle-1", 2),  # type: ignore[arg-type]
+        )
+
+
+def test_observation_context_rejects_bare_string_visible_actor_ids() -> None:
+    with pytest.raises(ValueError, match="visible_actor_ids"):
+        ScenarioObservationContext(
+            scenario_id="clear",
+            visible_actor_ids="vehicle-1",  # type: ignore[arg-type]
+        )

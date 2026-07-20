@@ -50,6 +50,8 @@ class ScenarioObservationContext:
     def __post_init__(self) -> None:
         require_non_empty("scenario_id", self.scenario_id)
         regions = tuple(self.occlusion_regions)
+        if not all(isinstance(region, OcclusionRegion) for region in regions):
+            raise ValueError("occlusion_regions must contain only OcclusionRegion values")
         region_ids = tuple(region.region_id for region in regions)
         if len(region_ids) != len(set(region_ids)):
             raise ValueError("occlusion region_id values must be unique")
@@ -59,11 +61,13 @@ class ScenarioObservationContext:
             )
         if regions and self.visible_actor_ids is None:
             raise ValueError("visible_actor_ids are required when occlusion_regions are active")
-        visible_actor_ids = (
-            None
-            if self.visible_actor_ids is None
-            else frozenset(self.visible_actor_ids)
-        )
+        if isinstance(self.visible_actor_ids, str):
+            raise ValueError("visible_actor_ids must not be a bare string")
+        visible_actor_ids = None
+        if self.visible_actor_ids is not None:
+            visible_actor_ids = frozenset(self.visible_actor_ids)
+            if not all(isinstance(actor_id, str) for actor_id in visible_actor_ids):
+                raise ValueError("visible_actor_ids must contain only strings")
         object.__setattr__(self, "occlusion_regions", regions)
         object.__setattr__(self, "visible_actor_ids", visible_actor_ids)
 
