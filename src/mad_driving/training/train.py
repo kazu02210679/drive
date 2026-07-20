@@ -30,6 +30,10 @@ class _VectorEnvCleanupError(RuntimeError):
     """Raised when failed subprocess workers cannot be proven stopped."""
 
 
+class _CheckpointPromotionRollbackError(RuntimeError):
+    """Raised when canonical checkpoints could not be fully restored."""
+
+
 FactoryResult = TypeVar("FactoryResult")
 VecEnvFactory = Callable[[list[Callable[[], gym.Env[Any, Any]]]], Any]
 GenericFactory = Callable[..., FactoryResult]
@@ -228,8 +232,41 @@ def _promote_checkpoint_artifacts(staging_dir: Path, checkpoints_dir: Path) -> N
             artifact.name,
         )
     )
+    backup_dir = Path(tempfile.mkdtemp(prefix=".promotion-backups-", dir=staging_root))
+    backups: dict[Path, Path] = {}
+    new_destinations: list[Path] = []
     for artifact in artifacts:
-        os.replace(artifact, checkpoints_dir / artifact.name)
+        destination = checkpoints_dir / artifact.name
+        if destination.exists():
+            if not destination.is_file():
+                raise RuntimeError(f"Checkpoint destination is not a file: {destination}")
+            backup = backup_dir / artifact.name
+            shutil.copy2(destination, backup)
+            backups[destination] = backup
+        else:
+            new_destinations.append(destination)
+
+    try:
+        for artifact in artifacts:
+            os.replace(artifact, checkpoints_dir / artifact.name)
+    except Exception as promotion_error:
+        rollback_errors: list[Exception] = []
+        for destination, backup in backups.items():
+            try:
+                os.replace(backup, destination)
+            except Exception as rollback_error:
+                rollback_errors.append(rollback_error)
+        for destination in new_destinations:
+            try:
+                destination.unlink(missing_ok=True)
+            except Exception as rollback_error:
+                rollback_errors.append(rollback_error)
+        if rollback_errors:
+            raise _CheckpointPromotionRollbackError(
+                "Checkpoint promotion failed and rollback could not be completed; "
+                f"recoverable backups remain in {backup_dir}"
+            ) from promotion_error
+        raise
 
 
 def _cleanup_checkpoint_staging(staging_dir: Path, checkpoints_dir: Path) -> None:
@@ -275,6 +312,7 @@ def run_training(
     final_checkpoint = checkpoints_dir / "final_model.zip"
     best_checkpoint = checkpoints_dir / "best_model.zip"
     staging_dir = _create_checkpoint_staging(checkpoints_dir)
+    cleanup_staging = True
     staged_final_checkpoint = staging_dir / final_checkpoint.name
     staged_best_checkpoint = staging_dir / best_checkpoint.name
 
@@ -362,9 +400,13 @@ def run_training(
             best_checkpoint=best_checkpoint,
             timesteps=timesteps,
         )
+    except _CheckpointPromotionRollbackError:
+        cleanup_staging = False
+        raise
     finally:
         _safe_close(eval_env)
         _safe_close(train_env)
         eval_owner.close()
         train_owner.close()
-        _cleanup_checkpoint_staging(staging_dir, checkpoints_dir)
+        if cleanup_staging:
+            _cleanup_checkpoint_staging(staging_dir, checkpoints_dir)

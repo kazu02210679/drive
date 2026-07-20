@@ -9,6 +9,7 @@ import pytest
 import yaml
 
 from mad_driving.config.models import AppConfig
+from mad_driving.training import train as train_module
 from mad_driving.training.train import TrainingResult, run_training
 
 
@@ -72,15 +73,20 @@ class CallbackFactory:
 
 class FakeCheckpointCallback:
     def __init__(self, **kwargs: Any) -> None:
+        self.save_freq = kwargs["save_freq"]
         self.save_path = Path(kwargs["save_path"])
         self.name_prefix = kwargs["name_prefix"]
 
     def on_fake_training(self, model: "FakePPO", produced_timesteps: int) -> None:
-        del produced_timesteps
-        model.write_checkpoint(
-            self.save_path / f"{self.name_prefix}_{model.num_timesteps}_steps.zip",
-            "periodic",
-        )
+        train_env = model.init_kwargs["env"]
+        callback_calls = math.ceil(produced_timesteps / train_env.num_envs)
+        start_timesteps = model.num_timesteps - produced_timesteps
+        for call in range(self.save_freq, callback_calls + 1, self.save_freq):
+            checkpoint_timesteps = start_timesteps + call * train_env.num_envs
+            model.write_checkpoint(
+                self.save_path / f"{self.name_prefix}_{checkpoint_timesteps}_steps.zip",
+                "periodic",
+            )
 
 
 class CheckpointCallbackFactory:
@@ -547,7 +553,7 @@ def test_success_stages_then_promotes_best_final_and_periodic_checkpoints(
     evaluation = EvalCallbackFactory()
 
     result, *_ = run_with_fakes(
-        make_config(),
+        make_config(checkpoint_interval_steps=2_500),
         run_dir,
         checkpoint_factory=checkpoint,
         eval_factory=evaluation,
@@ -559,12 +565,58 @@ def test_success_stages_then_promotes_best_final_and_periodic_checkpoints(
     assert staging_dir.name.startswith(".training-")
     assert FakePPO.instances[0].saved_path == staging_dir / "final_model.zip"
     assert not staging_dir.exists()
-    periodic_checkpoint = run_dir / "checkpoints" / "ppo_checkpoint_5000_steps.zip"
+    periodic_checkpoints = sorted((run_dir / "checkpoints").glob("ppo_checkpoint_*_steps.zip"))
     assert result.final_checkpoint == run_dir / "checkpoints" / "final_model.zip"
     assert result.best_checkpoint == run_dir / "checkpoints" / "best_model.zip"
-    assert zipfile.is_zipfile(periodic_checkpoint)
-    with zipfile.ZipFile(periodic_checkpoint) as checkpoint_file:
-        assert checkpoint_file.read("marker.txt") == b"periodic"
+    assert [checkpoint.name for checkpoint in periodic_checkpoints] == [
+        "ppo_checkpoint_2500_steps.zip",
+        "ppo_checkpoint_5000_steps.zip",
+    ]
+    for periodic_checkpoint in periodic_checkpoints:
+        assert zipfile.is_zipfile(periodic_checkpoint)
+        with zipfile.ZipFile(periodic_checkpoint) as checkpoint_file:
+            assert checkpoint_file.read("marker.txt") == b"periodic"
+
+
+@pytest.mark.parametrize("failure_at", [2, 3])
+def test_promotion_failure_restores_all_originals_and_removes_new_destinations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_at: int,
+) -> None:
+    run_dir = tmp_path / f"replace-{failure_at}"
+    checkpoints_dir = run_dir / "checkpoints"
+    checkpoints_dir.mkdir(parents=True)
+    original_paths = [
+        checkpoints_dir / "ppo_checkpoint_2500_steps.zip",
+        checkpoints_dir / "best_model.zip",
+        checkpoints_dir / "final_model.zip",
+    ]
+    for index, path in enumerate(original_paths):
+        path.write_bytes(f"original-{index}".encode())
+    originals = {path: path.read_bytes() for path in original_paths}
+    new_periodic = checkpoints_dir / "ppo_checkpoint_5000_steps.zip"
+    real_replace = train_module.os.replace
+    replace_calls = 0
+
+    def fail_selected_replace(source: Path, destination: Path) -> None:
+        nonlocal replace_calls
+        replace_calls += 1
+        if replace_calls == failure_at:
+            raise OSError(f"replacement {failure_at} failed")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(train_module.os, "replace", fail_selected_replace)
+
+    with pytest.raises(OSError, match=f"replacement {failure_at} failed"):
+        run_with_fakes(
+            make_config(checkpoint_interval_steps=2_500),
+            run_dir,
+        )
+
+    assert {path: path.read_bytes() for path in original_paths} == originals
+    assert not new_periodic.exists()
+    assert_no_invocation_staging(run_dir)
 
 
 @pytest.mark.parametrize("resume_name", ["final_model.zip", "best_model.zip"])
