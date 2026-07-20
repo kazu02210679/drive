@@ -693,7 +693,7 @@ Run: `.venv\Scripts\python.exe -m pytest tests\unit\agents tests\unit\cli -v`
 
 Expected: suite, smoke output, fixed action, deterministic result, and error closure tests pass.
 
-- [ ] **Step 6: Commit orchestration**
+- [x] **Step 6: Commit orchestration**
 
 ```powershell
 git add src\mad_driving\agents src\mad_driving\envs src\mad_driving\cli tests\unit
@@ -716,11 +716,11 @@ git commit -m "feat: analyze smoke steps with agent suite"
 - Verifies real reset/step/snapshot/three claims/review/close under headless execution.
 - Documents exact commands, API observations, deviations, and verification evidence.
 
-- [ ] **Step 1: Inspect installed MetaDrive state properties read-only**
+- [x] **Step 1: Inspect installed MetaDrive state properties read-only**
 
 Run focused `rg` against `.venv/Lib/site-packages/metadrive` for `crash_vehicle`, `crash_object`, `crash_sidewalk`, `on_lane`, and off-road termination logic. Record the exact observed semantics in `docs/phase2_implementation_log.md` before changing the builder.
 
-- [ ] **Step 2: Add a failing fake and real integration assertion**
+- [x] **Step 2: Add a failing fake and real integration assertion**
 
 The fake ego exposes the inspected flags; assert collision is true when any collision flag is true and off-road is true only when the inspected lane property says the ego is outside the drivable lane. Extend the real integration test:
 
@@ -732,17 +732,17 @@ assert_finite_tree([asdict(claim) for claim in claims])
 assert_finite_tree(asdict(review))
 ```
 
-- [ ] **Step 3: Run and verify RED**
+- [x] **Step 3: Run and verify RED**
 
 Run: `.venv\Scripts\python.exe -m pytest tests\unit\world_model tests\integration\test_metadrive_headless.py -v`
 
 Expected: the new fake assertion fails because the builder still emits neutral collision/off-road values.
 
-- [ ] **Step 4: Apply only the documented API-compatible mapping**
+- [x] **Step 4: Apply only the documented API-compatible mapping**
 
 Use the inspected 0.4.3 property names with conservative `getattr(..., False)` fallbacks. Do not infer off-road from lane offset without lane width. If the concrete API cannot provide a property, retain `False`, document the limitation and exact reason, and keep its scenario keyword boundary available.
 
-- [ ] **Step 5: Run targeted tests and the real 100-step smoke**
+- [x] **Step 5: Run targeted tests and the real 100-step smoke**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest tests\unit\world_model tests\integration\test_metadrive_headless.py -v
@@ -752,11 +752,11 @@ Use the inspected 0.4.3 property names with conservative `getattr(..., False)` f
 
 Expected: integration exits zero; smoke completes 100 decision steps unless terminated/truncated, opens no window, and outputs exactly three final claims plus one review.
 
-- [ ] **Step 6: Update README and implementation evidence**
+- [x] **Step 6: Update README and implementation evidence**
 
 Add the Phase 2 passive-analysis scope, output shape, smoke command, and explicit Phase 3 exclusions. Record dependency versions, test count, coverage, static checks, simulated seconds, upstream warnings, and every MetaDrive mismatch in `docs/phase2_implementation_log.md`.
 
-- [ ] **Step 7: Run the complete quality gate**
+- [x] **Step 7: Run the complete quality gate**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest --cov=mad_driving --cov-report=term-missing -q
@@ -768,7 +768,7 @@ git diff --check feat/phase1-foundation...HEAD
 
 Expected: all tests pass, branch coverage is at least 80%, Ruff and formatting pass, mypy reports no issues, and diff check exits zero. The only accepted warning is the already documented upstream Matplotlib/pyparsing deprecation set.
 
-- [ ] **Step 8: Review scope and commit Phase 2 evidence**
+- [x] **Step 8: Review scope and commit Phase 2 evidence**
 
 Search for placeholders and forbidden Phase 3+ code. Confirm `env.step` still receives only `config.fixed_action` and no agent recommendation controls the vehicle.
 

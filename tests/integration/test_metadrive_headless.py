@@ -4,6 +4,7 @@ from typing import Any
 
 import pytest
 
+from mad_driving.agents import AgentSuite
 from mad_driving.config.loader import load_config
 from mad_driving.envs.multi_agent_speed_env import create_metadrive_env
 from mad_driving.world_model import SceneSnapshotBuilder
@@ -44,6 +45,14 @@ def test_real_metadrive_headless_step_builds_finite_snapshot() -> None:
         )
         assert snapshot.step_index == 1
         assert snapshot.ego.speed_mps >= 0.0
+        claims, review = AgentSuite.from_config(config.agents).analyze(snapshot)
+        assert tuple(claim.agent_id for claim in claims) == (
+            "nominal",
+            "hazard",
+            "rule",
+        )
         assert_finite_tree(asdict(snapshot))
+        assert_finite_tree([asdict(claim) for claim in claims])
+        assert_finite_tree(asdict(review))
     finally:
         env.close()
