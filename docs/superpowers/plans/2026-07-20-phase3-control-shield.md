@@ -1545,7 +1545,7 @@ git add README.md docs src tests configs
 git commit -m "test: verify phase 3 shielded control"
 ```
 
-- [ ] **Step 7: Push and open a stacked Draft PR**
+- [x] **Step 7: Push and open a stacked Draft PR**
 
 After confirming a clean worktree and the fresh quality evidence:
 
