@@ -23,6 +23,10 @@ class EnvironmentFactory(Protocol):
     def __call__(self, config: AppConfig) -> gym.Env[Any, Any]: ...
 
 
+class _VectorEnvCleanupError(RuntimeError):
+    """Raised when failed subprocess workers cannot be proven stopped."""
+
+
 FactoryResult = TypeVar("FactoryResult")
 VecEnvFactory = Callable[[list[Callable[[], gym.Env[Any, Any]]]], Any]
 GenericFactory = Callable[..., FactoryResult]
@@ -60,8 +64,15 @@ class _OwnedEnvironments:
     def thunks(self, count: int) -> list[Callable[[], gym.Env[Any, Any]]]:
         return [partial(self.new) for _ in range(count)]
 
+    def transfer(self) -> None:
+        """Transfer underlying environment ownership to a constructed vector env."""
+
+        self.created.clear()
+
     def close(self) -> None:
-        for environment in self.created:
+        environments = self.created
+        self.created = []
+        for environment in environments:
             _safe_close(environment)
 
 
@@ -76,28 +87,63 @@ def _safe_close(resource: object | None) -> None:
             pass
 
 
-def _cleanup_partial_vector_env(vector_env: object) -> None:
+def _cleanup_partial_vector_env(
+    vector_env: object,
+    owner: _OwnedEnvironments,
+) -> None:
     """Release a vector env retained from a failed class constructor."""
 
     processes = getattr(vector_env, "processes", None)
     if isinstance(processes, list):
+        cleanup_errors: list[Exception] = []
         for remote_group_name in ("remotes", "work_remotes"):
             for remote in getattr(vector_env, remote_group_name, ()):
-                _safe_close(remote)
+                try:
+                    remote.close()
+                except Exception as exc:
+                    cleanup_errors.append(exc)
         for process in processes:
             try:
                 if process.is_alive():
                     process.terminate()
                 process.join(timeout=1.0)
-            except Exception:
-                pass
+                if process.is_alive():
+                    kill = getattr(process, "kill", None)
+                    if callable(kill):
+                        kill()
+                        process.join(timeout=1.0)
+            except Exception as exc:
+                cleanup_errors.append(exc)
+        workers_alive = False
+        for process in processes:
+            try:
+                workers_alive = process.is_alive() or workers_alive
+            except Exception as exc:
+                cleanup_errors.append(exc)
+                workers_alive = True
+        owner.close()
+        if cleanup_errors or workers_alive:
+            raise _VectorEnvCleanupError("Subprocess worker cleanup could not be confirmed")
         return
-    _safe_close(vector_env)
+
+    close = getattr(vector_env, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception as exc:
+            owner.close()
+            raise _VectorEnvCleanupError(
+                "Partial vector environment cleanup could not be confirmed"
+            ) from exc
+        owner.transfer()
+        return
+    owner.close()
 
 
 def _construct_vector_env(
     factory: VecEnvFactory,
     env_fns: list[Callable[[], gym.Env[Any, Any]]],
+    owner: _OwnedEnvironments,
 ) -> Any:
     """Construct while retaining class instances long enough to clean failed initialization."""
 
@@ -107,10 +153,13 @@ def _construct_vector_env(
         try:
             factory_class.__init__(instance, env_fns)
         except Exception:
-            _cleanup_partial_vector_env(instance)
+            _cleanup_partial_vector_env(instance, owner)
             raise
+        owner.transfer()
         return instance
-    return factory(env_fns)
+    vector_env = factory(env_fns)
+    owner.transfer()
+    return vector_env
 
 
 def _build_train_env(
@@ -122,13 +171,14 @@ def _build_train_env(
 ) -> Any:
     count = config.training.num_envs
     if count == 1:
-        return _construct_vector_env(dummy_vec_env_factory, owner.thunks(1))
+        return _construct_vector_env(dummy_vec_env_factory, owner.thunks(1), owner)
     try:
-        return _construct_vector_env(subproc_vec_env_factory, owner.thunks(count))
+        return _construct_vector_env(subproc_vec_env_factory, owner.thunks(count), owner)
+    except _VectorEnvCleanupError:
+        raise
     except Exception:
         owner.close()
-        owner.created.clear()
-        return _construct_vector_env(dummy_vec_env_factory, owner.thunks(count))
+        return _construct_vector_env(dummy_vec_env_factory, owner.thunks(count), owner)
 
 
 def _scaled_frequency(interval_steps: int, num_envs: int) -> int:
@@ -174,6 +224,13 @@ def run_training(
     tensorboard_dir.mkdir(parents=True, exist_ok=True)
     evaluation_dir.mkdir(parents=True, exist_ok=True)
     _write_resolved_config(config, destination / "config_resolved.yaml")
+    requested_timesteps = (
+        config.training.smoke_timesteps if smoke else config.training.total_timesteps
+    )
+    final_checkpoint = checkpoints_dir / "final_model.zip"
+    best_checkpoint = checkpoints_dir / "best_model.zip"
+    final_checkpoint.unlink(missing_ok=True)
+    best_checkpoint.unlink(missing_ok=True)
 
     train_owner = _OwnedEnvironments.create(config, env_factory)
     eval_owner = _OwnedEnvironments.create(config, env_factory)
@@ -186,7 +243,11 @@ def run_training(
             dummy_vec_env_factory=dummy_vec_env_factory,
             subproc_vec_env_factory=subproc_vec_env_factory,
         )
-        eval_env = _construct_vector_env(dummy_vec_env_factory, eval_owner.thunks(1))
+        eval_env = _construct_vector_env(
+            dummy_vec_env_factory,
+            eval_owner.thunks(1),
+            eval_owner,
+        )
 
         checkpoint_callback = checkpoint_callback_factory(
             save_freq=_scaled_frequency(
@@ -201,7 +262,7 @@ def run_training(
             best_model_save_path=str(checkpoints_dir),
             log_path=str(evaluation_dir),
             eval_freq=_scaled_frequency(
-                config.training.eval_interval_steps,
+                min(config.training.eval_interval_steps, requested_timesteps),
                 config.training.num_envs,
             ),
             n_eval_episodes=config.training.eval_episodes,
@@ -229,20 +290,29 @@ def run_training(
                 device="cpu",
             )
         else:
-            model = ppo_factory.load(resume_path, env=train_env, device="cpu")  # type: ignore[attr-defined]
+            model = ppo_factory.load(  # type: ignore[attr-defined]
+                resume_path,
+                env=train_env,
+                device="cpu",
+                tensorboard_log=str(tensorboard_dir),
+            )
 
-        timesteps = config.training.smoke_timesteps if smoke else config.training.total_timesteps
+        start_timesteps = int(model.num_timesteps)
         model.learn(
-            total_timesteps=timesteps,
+            total_timesteps=requested_timesteps,
             callback=[reward_callback, checkpoint_callback, eval_callback],
             reset_num_timesteps=resume_path is None,
         )
-        final_checkpoint = checkpoints_dir / "final_model.zip"
         model.save(final_checkpoint)
+        if not best_checkpoint.is_file():
+            raise FileNotFoundError(f"Best checkpoint was not produced: {best_checkpoint}")
+        if not final_checkpoint.is_file():
+            raise FileNotFoundError(f"Final checkpoint was not produced: {final_checkpoint}")
+        timesteps = int(model.num_timesteps) - start_timesteps
         return TrainingResult(
             run_dir=destination,
             final_checkpoint=final_checkpoint,
-            best_checkpoint=checkpoints_dir / "best_model.zip",
+            best_checkpoint=best_checkpoint,
             timesteps=timesteps,
         )
     finally:

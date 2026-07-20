@@ -1,7 +1,10 @@
+import math
+import zipfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, ClassVar
 
+import cloudpickle
 import pytest
 import yaml
 
@@ -67,6 +70,31 @@ class CallbackFactory:
         return callback
 
 
+class FakeEvalCallback:
+    def __init__(self, **kwargs: Any) -> None:
+        self.eval_env = kwargs["eval_env"]
+        self.eval_freq = kwargs["eval_freq"]
+        self.best_model_save_path = Path(kwargs["best_model_save_path"])
+
+    def on_fake_training(self, model: "FakePPO", produced_timesteps: int) -> None:
+        train_env = model.init_kwargs["env"]
+        callback_calls = math.ceil(produced_timesteps / train_env.num_envs)
+        if callback_calls >= self.eval_freq:
+            model.write_checkpoint(self.best_model_save_path / "best_model.zip", "best")
+
+
+class EvalCallbackFactory:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.instances: list[FakeEvalCallback] = []
+
+    def __call__(self, **kwargs: Any) -> FakeEvalCallback:
+        self.calls.append(kwargs)
+        callback = FakeEvalCallback(**kwargs)
+        self.instances.append(callback)
+        return callback
+
+
 class RewardCallbackFactory:
     def __init__(self) -> None:
         self.instances: list[object] = []
@@ -82,11 +110,18 @@ class FakePPO:
     load_calls: ClassVar[list[dict[str, Any]]] = []
     fail_learn: ClassVar[bool] = False
     fail_save: ClassVar[bool] = False
+    fail_init: ClassVar[bool] = False
+    skip_save: ClassVar[bool] = False
+    rollout_overshoot: ClassVar[int] = 0
+    resume_num_timesteps: ClassVar[int] = 12_500
 
     def __init__(self, policy: str, env: FakeVecEnv, **kwargs: Any) -> None:
+        if type(self).fail_init:
+            raise RuntimeError("PPO construction failed")
         self.init_kwargs = {"policy": policy, "env": env, **kwargs}
         self.learn_kwargs: dict[str, Any] | None = None
         self.saved_path: Path | None = None
+        self.num_timesteps = 0
         type(self).instances.append(self)
 
     @classmethod
@@ -95,14 +130,38 @@ class FakePPO:
         cls.load_calls = []
         cls.fail_learn = False
         cls.fail_save = False
+        cls.fail_init = False
+        cls.skip_save = False
+        cls.rollout_overshoot = 0
+        cls.resume_num_timesteps = 12_500
 
     @classmethod
-    def load(cls, path: Path, *, env: FakeVecEnv, device: str) -> "FakePPO":
-        cls.load_calls.append({"path": path, "env": env, "device": device})
+    def load(
+        cls,
+        path: Path,
+        env: FakeVecEnv | None = None,
+        device: str = "auto",
+        custom_objects: dict[str, Any] | None = None,
+        print_system_info: bool = False,
+        force_reset: bool = True,
+        **kwargs: Any,
+    ) -> "FakePPO":
+        cls.load_calls.append(
+            {
+                "path": path,
+                "env": env,
+                "device": device,
+                "custom_objects": custom_objects,
+                "print_system_info": print_system_info,
+                "force_reset": force_reset,
+                **kwargs,
+            }
+        )
         model = cls.__new__(cls)
         model.init_kwargs = {"env": env}
         model.learn_kwargs = None
         model.saved_path = None
+        model.num_timesteps = cls.resume_num_timesteps
         cls.instances.append(model)
         return model
 
@@ -110,13 +169,25 @@ class FakePPO:
         self.learn_kwargs = kwargs
         if type(self).fail_learn:
             raise RuntimeError("learn failed")
+        produced_timesteps = kwargs["total_timesteps"] + type(self).rollout_overshoot
+        self.num_timesteps += produced_timesteps
+        for callback in kwargs["callback"]:
+            on_fake_training = getattr(callback, "on_fake_training", None)
+            if callable(on_fake_training):
+                on_fake_training(self, produced_timesteps)
         return self
 
     def save(self, path: Path) -> None:
         self.saved_path = Path(path)
         if type(self).fail_save:
             raise RuntimeError("save failed")
-        self.saved_path.write_bytes(b"fake checkpoint")
+        if not type(self).skip_save:
+            self.write_checkpoint(self.saved_path, "final")
+
+    @staticmethod
+    def write_checkpoint(path: Path, marker: str) -> None:
+        with zipfile.ZipFile(path, "w") as checkpoint:
+            checkpoint.writestr("marker.txt", marker)
 
 
 @pytest.fixture(autouse=True)
@@ -153,13 +224,19 @@ def run_with_fakes(
     dummy_factory: VecFactory | None = None,
     subproc_factory: Any = None,
     checkpoint_factory: CallbackFactory | None = None,
-    eval_factory: CallbackFactory | None = None,
+    eval_factory: EvalCallbackFactory | CallbackFactory | None = None,
     reward_factory: RewardCallbackFactory | None = None,
-) -> tuple[TrainingResult, EnvFactory, VecFactory, CallbackFactory, CallbackFactory]:
+) -> tuple[
+    TrainingResult,
+    EnvFactory,
+    VecFactory,
+    CallbackFactory,
+    EvalCallbackFactory | CallbackFactory,
+]:
     environments = env_factory or EnvFactory()
     dummy = dummy_factory or VecFactory()
     checkpoint = checkpoint_factory or CallbackFactory()
-    evaluation = eval_factory or CallbackFactory()
+    evaluation = eval_factory or EvalCallbackFactory()
     reward = reward_factory or RewardCallbackFactory()
     subproc = subproc_factory or VecFactory()
     result = run_training(
@@ -220,6 +297,7 @@ def test_run_training_uses_only_configured_ppo_values_and_closes_envs(tmp_path: 
     assert train_env is not eval_env
     assert environments.created[0] is not environments.created[1]
     assert all(env.closed for env in environments.created)
+    assert all(env.close_calls == 1 for env in environments.created)
     assert all(vec.closed for vec in dummy.created)
     assert result == TrainingResult(
         run_dir=run_dir,
@@ -228,6 +306,9 @@ def test_run_training_uses_only_configured_ppo_values_and_closes_envs(tmp_path: 
         timesteps=5_000,
     )
     assert result.final_checkpoint.is_file()
+    assert result.best_checkpoint.is_file()
+    assert zipfile.is_zipfile(result.final_checkpoint)
+    assert zipfile.is_zipfile(result.best_checkpoint)
 
 
 def test_normal_training_uses_500_000_timesteps(tmp_path: Path) -> None:
@@ -236,6 +317,15 @@ def test_normal_training_uses_500_000_timesteps(tmp_path: Path) -> None:
     assert FakePPO.instances[0].learn_kwargs is not None
     assert FakePPO.instances[0].learn_kwargs["total_timesteps"] == 500_000
     assert result.timesteps == 500_000
+
+
+def test_reports_actual_rollout_transitions_when_ppo_overshoots(tmp_path: Path) -> None:
+    FakePPO.rollout_overshoot = 1_144
+
+    result, *_ = run_with_fakes(make_config(), tmp_path / "overshoot")
+
+    assert FakePPO.instances[0].num_timesteps == 6_144
+    assert result.timesteps == 6_144
 
 
 def test_writes_exact_stably_ordered_resolved_yaml(tmp_path: Path) -> None:
@@ -254,7 +344,7 @@ def test_writes_exact_stably_ordered_resolved_yaml(tmp_path: Path) -> None:
 
 def test_callback_frequencies_are_scaled_by_num_envs(tmp_path: Path) -> None:
     checkpoint = CallbackFactory()
-    evaluation = CallbackFactory()
+    evaluation = EvalCallbackFactory()
     config = make_config(
         num_envs=4,
         checkpoint_interval_steps=10_003,
@@ -270,12 +360,12 @@ def test_callback_frequencies_are_scaled_by_num_envs(tmp_path: Path) -> None:
     )
 
     assert checkpoint.calls[0]["save_freq"] == 2_500
-    assert evaluation.calls[0]["eval_freq"] == 2_000
+    assert evaluation.calls[0]["eval_freq"] == 1_250
 
 
 def test_callback_frequencies_have_a_minimum_of_one(tmp_path: Path) -> None:
     checkpoint = CallbackFactory()
-    evaluation = CallbackFactory()
+    evaluation = EvalCallbackFactory()
     config = make_config(
         num_envs=4,
         checkpoint_interval_steps=1,
@@ -292,6 +382,58 @@ def test_callback_frequencies_have_a_minimum_of_one(tmp_path: Path) -> None:
 
     assert checkpoint.calls[0]["save_freq"] == 1
     assert evaluation.calls[0]["eval_freq"] == 1
+
+
+def test_stale_best_checkpoint_is_not_accepted_without_an_actual_evaluation(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "stale-best"
+    best_checkpoint = run_dir / "checkpoints" / "best_model.zip"
+    best_checkpoint.parent.mkdir(parents=True)
+    best_checkpoint.write_bytes(b"stale")
+    environments = EnvFactory()
+
+    with pytest.raises(FileNotFoundError, match="Best checkpoint"):
+        run_with_fakes(
+            make_config(),
+            run_dir,
+            env_factory=environments,
+            eval_factory=CallbackFactory(),
+        )
+
+    assert not best_checkpoint.exists()
+    assert all(env.close_calls == 1 for env in environments.created)
+
+
+def test_scheduled_evaluation_overwrites_stale_best_checkpoint(tmp_path: Path) -> None:
+    run_dir = tmp_path / "fresh-best"
+    best_checkpoint = run_dir / "checkpoints" / "best_model.zip"
+    best_checkpoint.parent.mkdir(parents=True)
+    best_checkpoint.write_bytes(b"stale")
+
+    result, *_ = run_with_fakes(make_config(), run_dir)
+
+    assert result.best_checkpoint == best_checkpoint
+    assert zipfile.is_zipfile(best_checkpoint)
+    with zipfile.ZipFile(best_checkpoint) as checkpoint:
+        assert checkpoint.read("marker.txt") == b"best"
+
+
+def test_stale_final_checkpoint_is_not_accepted_when_save_produces_no_file(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "stale-final"
+    final_checkpoint = run_dir / "checkpoints" / "final_model.zip"
+    final_checkpoint.parent.mkdir(parents=True)
+    final_checkpoint.write_bytes(b"stale")
+    FakePPO.skip_save = True
+    environments = EnvFactory()
+
+    with pytest.raises(FileNotFoundError, match="Final checkpoint"):
+        run_with_fakes(make_config(), run_dir, env_factory=environments)
+
+    assert not final_checkpoint.exists()
+    assert all(env.close_calls == 1 for env in environments.created)
 
 
 def test_num_envs_above_one_uses_subprocess_train_env_and_separate_dummy_eval(
@@ -315,6 +457,7 @@ def test_num_envs_above_one_uses_subprocess_train_env_and_separate_dummy_eval(
     assert dummy.created[0].num_envs == 1
     assert len({env.identifier for env in environments.created}) == 4
     assert all(env.closed for env in environments.created)
+    assert all(env.close_calls == 1 for env in environments.created)
 
 
 class FailingSubprocVecEnv:
@@ -349,16 +492,170 @@ def test_subprocess_failure_closes_partial_resources_and_rebuilds_equal_dummy_co
     assert FailingSubprocVecEnv.latest is not None
     assert FailingSubprocVecEnv.latest.closed is True
     assert FailingSubprocVecEnv.latest.envs[0].closed is True
+    assert FailingSubprocVecEnv.latest.envs[0].close_calls == 1
     assert [vec.num_envs for vec in dummy.created] == [3, 1]
     assert len(environments.created) == 5
     assert all(env.closed for env in environments.created)
+    assert all(env.close_calls == 1 for env in environments.created)
+
+
+class FakeRemote:
+    def __init__(self) -> None:
+        self.close_calls = 0
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
+class FakeProcess:
+    def __init__(
+        self,
+        *,
+        exits_on_terminate: bool,
+        exits_on_kill: bool,
+        initially_alive: bool = True,
+    ) -> None:
+        self.alive = initially_alive
+        self.exits_on_terminate = exits_on_terminate
+        self.exits_on_kill = exits_on_kill
+        self.terminate_calls = 0
+        self.kill_calls = 0
+        self.join_calls: list[float | None] = []
+        self.is_alive_calls = 0
+
+    def is_alive(self) -> bool:
+        self.is_alive_calls += 1
+        return self.alive
+
+    def terminate(self) -> None:
+        self.terminate_calls += 1
+        if self.exits_on_terminate:
+            self.alive = False
+
+    def kill(self) -> None:
+        self.kill_calls += 1
+        if self.exits_on_kill:
+            self.alive = False
+
+    def join(self, timeout: float | None = None) -> None:
+        self.join_calls.append(timeout)
+
+
+class ProcessFailingSubprocVecEnv:
+    latest: ClassVar["ProcessFailingSubprocVecEnv | None"] = None
+
+    def __init__(self, env_fns: list[Callable[[], FakeEnv]]) -> None:
+        del env_fns
+        self.remotes = (FakeRemote(), FakeRemote())
+        self.work_remotes = (FakeRemote(), FakeRemote())
+        self.processes = [
+            FakeProcess(exits_on_terminate=True, exits_on_kill=True),
+            FakeProcess(exits_on_terminate=False, exits_on_kill=True),
+            FakeProcess(
+                exits_on_terminate=True,
+                exits_on_kill=True,
+                initially_alive=False,
+            ),
+        ]
+        type(self).latest = self
+        raise OSError("subprocess handshake failed")
+
+
+class UnsafeProcessFailingSubprocVecEnv:
+    latest: ClassVar["UnsafeProcessFailingSubprocVecEnv | None"] = None
+
+    def __init__(self, env_fns: list[Callable[[], FakeEnv]]) -> None:
+        del env_fns
+        self.remotes = (FakeRemote(),)
+        self.work_remotes = (FakeRemote(),)
+        self.processes = [FakeProcess(exits_on_terminate=False, exits_on_kill=False)]
+        type(self).latest = self
+        raise OSError("subprocess handshake failed")
+
+
+def test_subprocess_cleanup_confirms_workers_dead_before_dummy_fallback(tmp_path: Path) -> None:
+    dummy = VecFactory()
+
+    run_with_fakes(
+        make_config(num_envs=3),
+        tmp_path / "process-fallback",
+        dummy_factory=dummy,
+        subproc_factory=ProcessFailingSubprocVecEnv,
+    )
+
+    partial = ProcessFailingSubprocVecEnv.latest
+    assert partial is not None
+    assert all(remote.close_calls == 1 for remote in (*partial.remotes, *partial.work_remotes))
+    terminated, killed, already_dead = partial.processes
+    assert terminated.terminate_calls == 1
+    assert terminated.kill_calls == 0
+    assert terminated.join_calls == [1.0]
+    assert killed.terminate_calls == 1
+    assert killed.kill_calls == 1
+    assert killed.join_calls == [1.0, 1.0]
+    assert already_dead.terminate_calls == 0
+    assert already_dead.kill_calls == 0
+    assert already_dead.join_calls == [1.0]
+    assert all(process.is_alive() is False for process in partial.processes)
+    assert all(process.is_alive_calls >= 2 for process in partial.processes)
+    assert [vec.num_envs for vec in dummy.created] == [3, 1]
+
+
+def test_subprocess_cleanup_refuses_fallback_when_worker_survives(tmp_path: Path) -> None:
+    dummy = VecFactory()
+
+    with pytest.raises(RuntimeError, match="worker cleanup could not be confirmed"):
+        run_with_fakes(
+            make_config(num_envs=3),
+            tmp_path / "unsafe-process",
+            dummy_factory=dummy,
+            subproc_factory=UnsafeProcessFailingSubprocVecEnv,
+        )
+
+    partial = UnsafeProcessFailingSubprocVecEnv.latest
+    assert partial is not None
+    assert all(remote.close_calls == 1 for remote in (*partial.remotes, *partial.work_remotes))
+    process = partial.processes[0]
+    assert process.terminate_calls == 1
+    assert process.kill_calls == 1
+    assert process.join_calls == [1.0, 1.0]
+    assert process.is_alive() is True
+    assert dummy.created == []
+
+
+class SerializingVecFactory(VecFactory):
+    def __init__(self) -> None:
+        super().__init__()
+        self.serialized_thunks = 0
+
+    def __call__(self, env_fns: list[Callable[[], FakeEnv]]) -> FakeVecEnv:
+        for env_fn in env_fns:
+            assert cloudpickle.loads(cloudpickle.dumps(env_fn)) is not None
+            self.serialized_thunks += 1
+        return super().__call__(env_fns)
+
+
+def test_every_train_and_eval_env_thunk_is_cloudpickle_serializable(tmp_path: Path) -> None:
+    subproc = SerializingVecFactory()
+    dummy = SerializingVecFactory()
+
+    run_with_fakes(
+        make_config(num_envs=3),
+        tmp_path / "cloudpickle",
+        dummy_factory=dummy,
+        subproc_factory=subproc,
+    )
+
+    assert subproc.serialized_thunks == 3
+    assert dummy.serialized_thunks == 1
 
 
 def test_resume_loads_ppo_with_train_env_and_keeps_timesteps(tmp_path: Path) -> None:
     resume_from = tmp_path / "source.zip"
     resume_from.write_bytes(b"checkpoint")
 
-    run_with_fakes(
+    FakePPO.rollout_overshoot = 96
+    result, *_ = run_with_fakes(
         make_config(),
         tmp_path / "resume",
         resume_from=resume_from,
@@ -371,9 +668,31 @@ def test_resume_loads_ppo_with_train_env_and_keeps_timesteps(tmp_path: Path) -> 
         "path": resume_from,
         "env": model.init_kwargs["env"],
         "device": "cpu",
+        "custom_objects": None,
+        "print_system_info": False,
+        "force_reset": True,
+        "tensorboard_log": str(tmp_path / "resume" / "tensorboard"),
     }
     assert model.learn_kwargs is not None
     assert model.learn_kwargs["reset_num_timesteps"] is False
+    assert model.num_timesteps == 17_596
+    assert result.timesteps == 5_096
+
+
+def test_ppo_construction_failure_closes_each_environment_once(tmp_path: Path) -> None:
+    FakePPO.fail_init = True
+    environments = EnvFactory()
+
+    with pytest.raises(RuntimeError, match="PPO construction failed"):
+        run_with_fakes(
+            make_config(num_envs=2),
+            tmp_path / "init-failure",
+            env_factory=environments,
+            subproc_factory=VecFactory(),
+        )
+
+    assert environments.created
+    assert all(env.close_calls == 1 for env in environments.created)
 
 
 @pytest.mark.parametrize(
@@ -401,6 +720,7 @@ def test_training_failure_still_closes_every_environment(
 
     assert environments.created
     assert all(env.closed for env in environments.created)
+    assert all(env.close_calls == 1 for env in environments.created)
 
 
 class FailingEvalVecFactory:
@@ -433,3 +753,4 @@ def test_eval_construction_failure_closes_train_and_partial_eval_env(tmp_path: P
     assert dummy.partial is not None
     assert dummy.partial.closed is True
     assert all(env.closed for env in environments.created)
+    assert all(env.close_calls == 1 for env in environments.created)
