@@ -198,7 +198,7 @@ git commit -m "feat: add phase 4 rl configuration"
 - Produces `ObservationBuilder.build(snapshot, claims, review) -> NDArray[np.float32]`.
 - Uses `target_speed_mps` for index 1 and exact index meanings from the design.
 
-- [ ] **Step 1: Write the failing exact-layout test**
+- [x] **Step 1: Write the failing exact-layout test**
 
 ```python
 def test_observation_has_exact_layout_dtype_and_bounds() -> None:
@@ -217,7 +217,7 @@ def test_observation_has_exact_layout_dtype_and_bounds() -> None:
 Add focused tests for each normalization boundary, `None` TTC=`1.0`, clipped huge values,
 duplicate agent IDs, invalid defensive input, and deterministic repeated output.
 
-- [ ] **Step 2: Write the failing conservative-missing-claim test**
+- [x] **Step 2: Write the failing conservative-missing-claim test**
 
 ```python
 def test_missing_claims_become_finite_safe_side_features() -> None:
@@ -228,13 +228,13 @@ def test_missing_claims_become_finite_safe_side_features() -> None:
     assert np.isfinite(obs).all()
 ```
 
-- [ ] **Step 3: Run the Observation tests and verify RED**
+- [x] **Step 3: Run the Observation tests and verify RED**
 
 Run: `.venv\Scripts\python.exe -m pytest tests/unit/coordinator/test_observation.py -v`
 
 Expected: import failure because `ObservationBuilder` does not exist.
 
-- [ ] **Step 4: Implement minimal normalization and exact index assembly**
+- [x] **Step 4: Implement minimal normalization and exact index assembly**
 
 ```python
 class ObservationBuilder:
@@ -257,13 +257,13 @@ class ObservationBuilder:
 Use small `_unit`, `_signed`, `_ttc`, `_speed`, and `_claim_index` helpers; do not expose a
 generic normalization framework.
 
-- [ ] **Step 5: Run Observation and property-loop tests and verify GREEN**
+- [x] **Step 5: Run Observation and property-loop tests and verify GREEN**
 
 Run: `.venv\Scripts\python.exe -m pytest tests/unit/coordinator/test_observation.py -v`
 
 Expected: all tests pass for exact values, 1,000 finite randomized boundary inputs, and determinism.
 
-- [ ] **Step 6: Commit Task 2**
+- [x] **Step 6: Commit Task 2**
 
 ```powershell
 git add src/mad_driving/coordinator tests/unit/coordinator/test_observation.py
