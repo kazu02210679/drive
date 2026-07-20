@@ -428,7 +428,7 @@ git commit -m "feat: add nominal motion agent"
 - Consumes: `HazardAgentConfig`, snapshot actors/conflict flags, stopping helpers.
 - Produces: `HazardAgent(config).analyze(snapshot) -> RiskClaim` with finite worst-case TTC and margin when geometry exists.
 
-- [ ] **Step 1: Write failing lead, crossing, and occlusion tests**
+- [x] **Step 1: Write failing lead, crossing, and occlusion tests**
 
 ```python
 def test_hazard_reports_negative_margin_for_close_braking_lead() -> None:
@@ -462,17 +462,17 @@ def test_occlusion_without_conflict_distance_uses_crawl_speed() -> None:
 
 Also test positive margin, crossing earliest-arrival eligibility, observed crossing speed above configured maximum, candidate tie-break, no hazard neutral result, no hard stop, and repeated equality.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run: `.venv\Scripts\python.exe -m pytest tests\unit\agents\test_hazard.py -v`
 
 Expected: import failure for `HazardAgent`.
 
-- [ ] **Step 3: Implement the approved worst-case formulas**
+- [x] **Step 3: Implement the approved worst-case formulas**
 
 Implement bumper gap, lead stopping distance, reaction plus ego braking distance, quadratic safe speed, logistic severity `1/(1+exp(margin/scale))`, crossing arrival test, and virtual occlusion. Select by descending severity, lower finite TTC, then target actor ID. Keep `hard_stop_required=False` in all Hazard claims.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 Run: `.venv\Scripts\python.exe -m pytest tests\unit\agents\test_hazard.py tests\unit\agents\test_kinematics.py -v`
 
