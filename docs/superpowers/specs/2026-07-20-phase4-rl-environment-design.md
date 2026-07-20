@@ -296,4 +296,3 @@ stderrへ明示し、非0終了する。
 - 小さいPPO integrationでcheckpoint保存・読込とTensorBoard event生成を確認する。
 - canonical 5,000 timestep headless CPU smoke trainingを実行する。
 - pytest coverage 80%以上、Ruff、format、mypy strictを通す。
-

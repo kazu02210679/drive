@@ -1,4 +1,6 @@
 import math
+import zipfile
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -6,8 +8,10 @@ from gymnasium.utils.env_checker import check_env
 from numpy.typing import NDArray
 
 from mad_driving.config.loader import load_config
+from mad_driving.config.models import AppConfig
 from mad_driving.envs import MultiAgentSpeedEnv, create_control_metadrive_env
 from mad_driving.interfaces import DecisionTrace
+from mad_driving.training import run_training
 
 SEED = 42
 ACTION_SEQUENCE = tuple(index % 4 for index in range(100))
@@ -133,3 +137,27 @@ def test_real_rl_environment_repeats_same_seed_initial_observation_and_traces() 
 
     np.testing.assert_array_equal(first_observation, second_observation)
     assert first_traces == second_traces
+
+
+@pytest.mark.integration
+def test_real_single_metadrive_training_isolates_evaluation_engine(tmp_path: Path) -> None:
+    payload = load_config("configs/train.yaml").model_dump(mode="python")
+    payload["metadrive"]["horizon"] = 8
+    payload["training"].update(
+        {
+            "n_steps": 8,
+            "batch_size": 8,
+            "n_epochs": 1,
+            "smoke_timesteps": 8,
+            "checkpoint_interval_steps": 8,
+            "eval_interval_steps": 8,
+            "eval_episodes": 1,
+        }
+    )
+    config = AppConfig.model_validate(payload)
+
+    result = run_training(config, smoke=True, run_dir=tmp_path / "real-training")
+
+    assert result.timesteps == 8
+    assert zipfile.is_zipfile(result.best_checkpoint)
+    assert zipfile.is_zipfile(result.final_checkpoint)

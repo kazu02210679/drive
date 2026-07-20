@@ -151,7 +151,7 @@ def test_real_ppo_writes_artifacts_and_resumes_transactionally(tmp_path: Path) -
         "checkpoint_interval_steps": 8,
         "eval_interval_steps": 8,
     }
-    assert len(environments) == 2
+    assert len(environments) == 1
     assert all(environment.closed for environment in environments)
 
     resumed_result = run_training(
@@ -193,5 +193,5 @@ def test_real_ppo_writes_artifacts_and_resumes_transactionally(tmp_path: Path) -
     assert resumed_final.num_timesteps == 32
     assert checkpoint_hash(resumed_result.final_checkpoint) != initial_final_hash
     assert not list(checkpoints_dir.glob(".training-*"))
-    assert len(environments) == 4
+    assert len(environments) == 2
     assert all(environment.closed for environment in environments)

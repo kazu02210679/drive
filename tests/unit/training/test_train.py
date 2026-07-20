@@ -306,11 +306,11 @@ def test_run_training_uses_only_configured_ppo_values_and_closes_envs(tmp_path: 
     )
     run_dir = tmp_path / "run"
 
-    result, environments, dummy, _, _ = run_with_fakes(config, run_dir)
+    result, environments, dummy, _, evaluation = run_with_fakes(config, run_dir)
 
     model = FakePPO.instances[0]
     train_env = dummy.created[0]
-    eval_env = dummy.created[1]
+    eval_env = evaluation.instances[0].eval_env
     assert model.init_kwargs == {
         "policy": "MlpPolicy",
         "env": train_env,
@@ -335,7 +335,7 @@ def test_run_training_uses_only_configured_ppo_values_and_closes_envs(tmp_path: 
     assert environments.created[0] is not environments.created[1]
     assert all(env.closed for env in environments.created)
     assert all(env.close_calls == 1 for env in environments.created)
-    assert all(vec.closed for vec in dummy.created)
+    assert all(vec.closed for vec in [*dummy.created, eval_env])
     assert result == TrainingResult(
         run_dir=run_dir,
         final_checkpoint=run_dir / "checkpoints" / "final_model.zip",

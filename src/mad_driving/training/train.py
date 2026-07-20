@@ -327,8 +327,11 @@ def run_training(
             dummy_vec_env_factory=dummy_vec_env_factory,
             subproc_vec_env_factory=subproc_vec_env_factory,
         )
+        eval_vec_env_factory = (
+            subproc_vec_env_factory if config.training.num_envs == 1 else dummy_vec_env_factory
+        )
         eval_env = _construct_vector_env(
-            dummy_vec_env_factory,
+            eval_vec_env_factory,
             eval_owner.thunks(1),
             eval_owner,
         )
