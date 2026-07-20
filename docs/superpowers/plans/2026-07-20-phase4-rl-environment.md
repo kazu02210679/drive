@@ -711,7 +711,9 @@ Run:
 ```
 
 Expected: at least 5,000 timesteps complete headlessly on CPU; `best_model.zip`,
-`final_model.zip`, periodic checkpoint(s), resolved config, and TensorBoard event(s) exist.
+`final_model.zip`, resolved config, and TensorBoard event(s) exist. Periodic checkpoints are
+required only when the configured 10,000-step interval is reached; their real SB3 save/load path is
+covered by Task 7's shorter-interval integration test.
 
 - [ ] **Step 3: Load the produced checkpoint and run a deterministic prediction episode**
 
