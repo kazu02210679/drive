@@ -62,9 +62,12 @@ metadrive:
   physics_dt_s: 0.02
   decision_repeat: 5
   decision_dt_s: 0.10
+  lane_width_m: 3.5
 ```
 
-All values are finite and positive; `decision_repeat` is a positive integer. Configuration
+All values are finite and positive; `decision_repeat` is a positive integer. `lane_width_m`
+is the fallback lane width for geometric same-lane checks and maps to MetaDrive's
+`lane_width`. Configuration
 validation requires, within floating-point tolerance:
 
 ```text

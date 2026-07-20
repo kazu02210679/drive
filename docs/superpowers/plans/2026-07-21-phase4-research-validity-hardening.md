@@ -34,6 +34,7 @@
 
 **Interfaces:**
 - Produces: `SeedRangeConfig`, `ScenarioSplitsConfig`, `MetaDriveConfig.physics_dt_s`, `MetaDriveConfig.decision_repeat`, `MetaDriveConfig.decision_dt_s`.
+- Produces: `MetaDriveConfig.lane_width_m=3.5`, mapped to MetaDrive's `lane_width`.
 - Produces: `AppConfig.scenarios: ScenarioSplitsConfig`.
 - Produces: `decision_interval_s(config) -> float` that validates runtime values against explicit configuration.
 
@@ -47,6 +48,7 @@ def test_simulation_timing_and_seed_split_defaults() -> None:
     assert config.metadrive.physics_dt_s == 0.02
     assert config.metadrive.decision_repeat == 5
     assert config.metadrive.decision_dt_s == 0.10
+    assert config.metadrive.lane_width_m == 3.5
     assert config.scenarios.train.range == range(0, 10_000)
     assert config.scenarios.validation.range == range(10_000, 11_000)
     assert config.scenarios.test.range == range(20_000, 21_000)
@@ -108,13 +110,18 @@ class MetaDriveConfig(StrictFrozenModel):
     physics_dt_s: FiniteFloat = Field(default=0.02, gt=0.0)
     decision_repeat: PositiveInt = 5
     decision_dt_s: FiniteFloat = Field(default=0.10, gt=0.0)
+    lane_width_m: FiniteFloat = Field(default=3.5, gt=0.0)
 ```
 
-`AppConfig.metadrive_dict()` must emit MetaDrive keys `physics_world_step_size` and `decision_repeat`, not the project-only keys `physics_dt_s` or `decision_dt_s`.
+`AppConfig.metadrive_dict()` must emit MetaDrive keys `physics_world_step_size`,
+`decision_repeat`, and `lane_width`, not the project-only keys `physics_dt_s`,
+`decision_dt_s`, or `lane_width_m`.
 
 - [ ] **Step 4: Update both YAML files with exact defaults and remove implicit MetaDrive timing**
 
-Add `physics_dt_s`, `decision_repeat`, `decision_dt_s`, and the three `scenarios` ranges from the design. Keep `start_seed` and `num_scenarios` only for non-training smoke compatibility; role-aware factories override them in Task 9.
+Add `physics_dt_s`, `decision_repeat`, `decision_dt_s`, `lane_width_m`, and the three
+`scenarios` ranges from the design. Keep `start_seed` and `num_scenarios` only for
+non-training smoke compatibility; role-aware factories override them in Task 9.
 
 - [ ] **Step 5: Run focused tests and static checks**
 
