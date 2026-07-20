@@ -346,7 +346,7 @@ git commit -m "feat: define deterministic agent claims"
 - Consumes: `NominalAgentConfig`, `SceneSnapshot`, kinematic helpers, claim factory.
 - Produces: `NominalMotionAgent(config).analyze(snapshot) -> RiskClaim` with `agent_id == "nominal"`.
 
-- [ ] **Step 1: Write failing behavior tests using real immutable snapshots**
+- [x] **Step 1: Write failing behavior tests using real immutable snapshots**
 
 Cover one behavior per test:
 
@@ -383,13 +383,13 @@ def test_nominal_is_exactly_deterministic() -> None:
 
 Also test crossing actor inclusion, actor behind exclusion, no-actor neutral claim, stable actor-ID tie-break, non-empty evidence, finite ranges, and configured five-second/0.25-second sampling.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run: `.venv\Scripts\python.exe -m pytest tests\unit\agents\test_nominal.py -v`
 
 Expected: import failure for `NominalMotionAgent`.
 
-- [ ] **Step 3: Implement approved constant-acceleration evaluation**
+- [x] **Step 3: Implement approved constant-acceleration evaluation**
 
 Project actor velocity and acceleration into ego heading, subtract ego longitudinal motion, sample the approved interval, calculate rectangular clearance/TTC, and calculate:
 
@@ -403,13 +403,13 @@ recommended = snapshot.ego.speed_limit_mps * (1.0 - 0.75 * probability)
 
 Select by descending severity, descending probability, ascending clearance, then actor ID. Emit one claim only.
 
-- [ ] **Step 4: Verify GREEN and focused regressions**
+- [x] **Step 4: Verify GREEN and focused regressions**
 
 Run: `.venv\Scripts\python.exe -m pytest tests\unit\agents\test_nominal.py tests\unit\agents\test_kinematics.py -v`
 
 Expected: all Nominal and physics tests pass.
 
-- [ ] **Step 5: Commit Nominal independently**
+- [x] **Step 5: Commit Nominal independently**
 
 ```powershell
 git add src\mad_driving\agents tests\unit\agents
