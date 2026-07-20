@@ -1287,7 +1287,7 @@ git commit -m "feat: add lane keeping speed policy"
 - Produces: `run_control_smoke(config, env_factory, suite_factory, coordinator_factory, shield_factory) -> ControlSmokeResult`.
 - Produces CLI: `python -m mad_driving.cli.control_smoke --config configs/base.yaml`.
 
-- [ ] **Step 1: Write failing lifecycle and action-count tests**
+- [x] **Step 1: Write failing lifecycle and action-count tests**
 
 Use a fake environment that records integer actions and exposes the same finite vehicle boundary used by existing smoke tests. Inject small fake suite, Coordinator, and Shield implementations.
 
@@ -1327,13 +1327,13 @@ def test_step_failure_always_closes() -> None:
 
 Also test monitor-mode counts no actual intervention, target speed in `DecisionTrace`, previous action/intervention propagation, termination and truncation, deterministic repeated fake runs, and finite CLI JSON.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run: `.venv\Scripts\python.exe -m pytest tests\unit\cli\test_control_smoke.py -v`
 
 Expected: import failure for `mad_driving.cli.control_smoke` or missing `ControlSmokeResult`.
 
-- [ ] **Step 3: Implement typed result and fallback review**
+- [x] **Step 3: Implement typed result and fallback review**
 
 Add:
 
@@ -1377,7 +1377,7 @@ def _analyze_safely(
 
 The broad catch exists only at this deliberate fail-safe boundary. It must not wrap MetaDrive reset, step, snapshot construction, Coordinator, or Shield defects.
 
-- [ ] **Step 4: Implement the exact pre-step decision loop**
+- [x] **Step 4: Implement the exact pre-step decision loop**
 
 Create the environment and all deterministic components once. Build step-0 snapshot and analysis after reset. For each decision:
 
@@ -1415,11 +1415,11 @@ claims, review = _analyze_safely(suite, snapshot)
 
 Increment the selected action count and actual intervention count exactly once per completed `env.step`. Keep environment closure in `finally`. Refuse to return if no decision step completed.
 
-- [ ] **Step 5: Implement finite JSON CLI output**
+- [x] **Step 5: Implement finite JSON CLI output**
 
 Reuse the Phase 2 CLI pattern: strict `--config`, traceback-free operational error with exit code 2, and `json.dumps(asdict(result), ensure_ascii=False, sort_keys=True)`. Unit-test JSON using `parse_constant` that raises on NaN/Infinity.
 
-- [ ] **Step 6: Verify GREEN and fixed-smoke regression**
+- [x] **Step 6: Verify GREEN and fixed-smoke regression**
 
 Run: `.venv\Scripts\python.exe -m pytest tests\unit\cli\test_control_smoke.py tests\unit\cli\test_smoke.py -v`
 

@@ -5,7 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Protocol, cast
 
-from mad_driving.interfaces import CriticReview, RiskClaim, SceneSnapshot
+from mad_driving.interfaces import (
+    CriticReview,
+    DecisionTrace,
+    RiskClaim,
+    SceneSnapshot,
+)
 
 
 class DrivingEnvironment(Protocol):
@@ -40,6 +45,21 @@ class SmokeResult:
     final_snapshot: SceneSnapshot
     final_claims: tuple[RiskClaim, ...]
     final_review: CriticReview
+
+
+@dataclass(frozen=True)
+class ControlSmokeResult:
+    """Finite summary of one shielded four-action control episode."""
+
+    steps_completed: int
+    terminated: bool
+    truncated: bool
+    final_snapshot: SceneSnapshot
+    final_claims: tuple[RiskClaim, ...]
+    final_review: CriticReview
+    final_trace: DecisionTrace
+    action_counts: tuple[int, int, int, int]
+    shield_intervention_count: int
 
 
 def create_metadrive_env(config: dict[str, object]) -> DrivingEnvironment:
