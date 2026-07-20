@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from math import cos, pi, sin
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from mad_driving.interfaces import (
     ActorState,
@@ -16,13 +16,19 @@ from mad_driving.interfaces import (
     SceneObservation,
 )
 from mad_driving.interfaces.actor_state import ActorType
-from mad_driving.scenarios import EpisodeSeeds, ScenarioObservationContext, ScenarioStepResult
+from mad_driving.scenarios.seeding import EpisodeSeeds
 from mad_driving.world_model.validation import (
     ConfigReader,
     decision_interval_s,
     finite_float,
     xy_pair,
 )
+
+if TYPE_CHECKING:
+    from mad_driving.scenarios.runtime import (
+        ScenarioObservationContext,
+        ScenarioStepResult,
+    )
 
 
 class SceneSnapshotBuilder:
@@ -96,7 +102,7 @@ class SceneSnapshotBuilder:
         )
         privileged = PrivilegedWorldState(
             all_actors=all_actors,
-            collision_occurred=self._collision_occurred(ego_vehicle),
+            collision_occurred=self._collision_occurred(raw_info, ego_vehicle),
             collision_kind=self._collision_kind(raw_info, ego_vehicle),
             off_road=bool(raw_info.get("out_of_road", False))
             or self._off_road(ego_vehicle),
@@ -107,9 +113,9 @@ class SceneSnapshotBuilder:
         return SceneFrame(observation=observation, privileged=privileged)
 
     @staticmethod
-    def _collision_occurred(vehicle: Any) -> bool:
+    def _collision_occurred(raw_info: Mapping[str, object], vehicle: Any) -> bool:
         return any(
-            bool(getattr(vehicle, attribute, False))
+            bool(raw_info.get(attribute, False)) or bool(getattr(vehicle, attribute, False))
             for attribute in (
                 "crash_vehicle",
                 "crash_human",

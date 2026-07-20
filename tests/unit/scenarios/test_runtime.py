@@ -1,3 +1,8 @@
+import os
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 
 from mad_driving.interfaces import OcclusionRegion
@@ -12,6 +17,26 @@ from mad_driving.scenarios import (
 
 class FakeEnvironment:
     pass
+
+
+def test_scenarios_package_imports_in_a_fresh_process() -> None:
+    source_root = Path(__file__).parents[3] / "src"
+    environment = os.environ | {
+        "PYTHONPATH": os.pathsep.join(
+            filter(None, (str(source_root), os.environ.get("PYTHONPATH")))
+        )
+    }
+
+    result = subprocess.run(
+        [sys.executable, "-c", "import mad_driving.scenarios"],
+        cwd=source_root.parent,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_noop_runtime_has_stable_lifecycle_outputs() -> None:

@@ -315,6 +315,13 @@ def test_privileged_outcomes_combine_raw_info_and_vehicle_state() -> None:
     assert frame.privileged.arrived is True
 
 
+def test_raw_collision_info_sets_privileged_occurrence_and_kind() -> None:
+    frame = build_frame(make_env(), raw_info={"crash_vehicle": True})
+
+    assert frame.privileged.collision_occurred is True
+    assert frame.privileged.collision_kind == "vehicle"
+
+
 def test_builder_normalizes_heading_and_uses_ego_left_lateral_coordinates() -> None:
     env = make_env()
     env.vehicle.heading_theta = math.pi / 2.0
@@ -346,3 +353,16 @@ def test_same_lane_requires_lane_identity_and_lateral_position_inside_lane_width
 
     assert actors["z-vehicle"].same_lane is False
     assert actors["a-vehicle"].same_lane is False
+
+
+def test_same_lane_uses_configured_nested_lane_width_when_lane_width_is_not_exposed() -> None:
+    env = make_env()
+    env.config["map_config"]["lane_width"] = 4.0
+    env.vehicle.navigation.current_lane.width = None
+    env.engine.get_objects()["z-vehicle"].position = (12.0, 1.9)
+
+    actors = {
+        actor.actor_id: actor for actor in build_frame(env).observation.visible_actors
+    }
+
+    assert actors["z-vehicle"].same_lane is True

@@ -4,7 +4,7 @@ from collections.abc import Sequence
 
 from mad_driving.config.models import ShieldConfig
 from mad_driving.control import DrivingAction, action_for_speed_cap
-from mad_driving.interfaces import RiskClaim, SceneSnapshot, ShieldResult
+from mad_driving.interfaces import RiskClaim, SceneFrame, ShieldResult
 from mad_driving.interfaces.defensive_validation import (
     valid_claim,
     valid_snapshot,
@@ -22,7 +22,7 @@ class SafetyShield:
     def filter(
         self,
         requested_action: DrivingAction | int,
-        snapshot: SceneSnapshot,
+        frame: SceneFrame,
         claims: Sequence[RiskClaim],
     ) -> ShieldResult:
         """Diagnose risk and optionally enforce the safest candidate action."""
@@ -32,17 +32,18 @@ class SafetyShield:
             return ShieldResult(requested, requested, requested, False, False, ())
 
         valid_claims = tuple(claim for claim in claims if valid_claim(claim))
-        snapshot_is_valid = valid_snapshot(snapshot)
+        observation = frame.observation
+        observation_is_valid = valid_snapshot(observation)
         reasons: list[str] = []
         candidates = [DrivingAction.KEEP]
 
-        if len(valid_claims) != len(claims) or not snapshot_is_valid:
+        if len(valid_claims) != len(claims) or not observation_is_valid:
             reasons.append("invalid_input")
             candidates.append(DrivingAction.STOP)
-        if snapshot_is_valid and snapshot.collision_occurred:
+        if observation_is_valid and frame.privileged.collision_occurred:
             reasons.append("collision_occurred")
             candidates.append(DrivingAction.STOP)
-        if snapshot_is_valid and snapshot.off_road:
+        if observation_is_valid and frame.privileged.off_road:
             reasons.append("off_road")
             candidates.append(DrivingAction.STOP)
         if any(claim.hard_stop_required for claim in valid_claims):
@@ -88,12 +89,12 @@ class SafetyShield:
             reasons.append("low_stopping_margin")
             candidates.append(DrivingAction.PREPARE_STOP)
 
-        if snapshot_is_valid:
+        if observation_is_valid:
             claim_action = max(
                 (
                     action_for_speed_cap(
                         claim.recommended_max_speed_mps,
-                        snapshot.ego.speed_limit_mps,
+                        observation.ego.speed_limit_mps,
                     )
                     for claim in valid_claims
                 ),

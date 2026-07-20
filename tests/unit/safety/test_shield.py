@@ -6,7 +6,7 @@ from mad_driving.config.models import ShieldConfig
 from mad_driving.control import DrivingAction
 from mad_driving.interfaces import RiskClaim, ShieldResult
 from mad_driving.safety import SafetyShield
-from tests.unit.agents.factories import make_claim, make_snapshot
+from tests.unit.agents.factories import make_claim, make_ego, make_frame, make_snapshot
 
 
 def complete_claims(**hazard_overrides: object) -> tuple[RiskClaim, ...]:
@@ -17,21 +17,33 @@ def complete_claims(**hazard_overrides: object) -> tuple[RiskClaim, ...]:
     )
 
 
+def make_shield_frame(**overrides: object):
+    values = dict(overrides)
+    collision_occurred = bool(values.pop("collision_occurred", False))
+    off_road = bool(values.pop("off_road", False))
+    speed_limit_mps = float(values.pop("speed_limit_mps", 15.0))
+    return make_frame(
+        observation=make_snapshot(ego=make_ego(speed_limit_mps=speed_limit_mps), **values),
+        collision_occurred=collision_occurred,
+        off_road=off_road,
+    )
+
+
 def test_enforce_never_relaxes_requested_action() -> None:
     shield = SafetyShield(ShieldConfig(mode="enforce"))
     for requested in DrivingAction:
-        result = shield.filter(requested, make_snapshot(), complete_claims())
+        result = shield.filter(requested, make_frame(), complete_claims())
         assert result.executed_action >= requested
 
 
 def test_modes_distinguish_candidate_from_real_intervention() -> None:
     claims = complete_claims(min_ttc_s=0.5)
-    off = SafetyShield(ShieldConfig(mode="off")).filter(DrivingAction.KEEP, make_snapshot(), claims)
+    off = SafetyShield(ShieldConfig(mode="off")).filter(DrivingAction.KEEP, make_frame(), claims)
     monitor = SafetyShield(ShieldConfig(mode="monitor")).filter(
-        DrivingAction.KEEP, make_snapshot(), claims
+        DrivingAction.KEEP, make_frame(), claims
     )
     enforce = SafetyShield(ShieldConfig(mode="enforce")).filter(
-        DrivingAction.KEEP, make_snapshot(), claims
+        DrivingAction.KEEP, make_frame(), claims
     )
     assert off.required_action is DrivingAction.KEEP
     assert off.executed_action is DrivingAction.KEEP
@@ -41,6 +53,17 @@ def test_modes_distinguish_candidate_from_real_intervention() -> None:
     assert monitor.intervened is False
     assert enforce.executed_action is DrivingAction.STOP
     assert enforce.intervened is True
+
+
+def test_privileged_collision_and_offroad_stop_without_observation_aliases() -> None:
+    result = SafetyShield(ShieldConfig()).filter(
+        DrivingAction.KEEP,
+        make_frame(collision_occurred=True, off_road=True),
+        complete_claims(),
+    )
+
+    assert result.required_action is DrivingAction.STOP
+    assert result.reasons == ("collision_occurred", "off_road")
 
 
 def test_all_reasons_have_fixed_duplicate_free_order() -> None:
@@ -54,7 +77,7 @@ def test_all_reasons_have_fixed_duplicate_free_order() -> None:
     )
     result = SafetyShield(ShieldConfig()).filter(
         DrivingAction.KEEP,
-        make_snapshot(collision_occurred=True, off_road=True),
+        make_frame(collision_occurred=True, off_road=True),
         claims,
     )
     assert result.reasons == (
@@ -105,7 +128,7 @@ def test_individual_safety_reasons(
 ) -> None:
     result = SafetyShield(ShieldConfig()).filter(
         DrivingAction.KEEP,
-        make_snapshot(**snapshot_overrides),
+        make_shield_frame(**snapshot_overrides),
         claims,
     )
     assert reason in result.reasons
@@ -116,17 +139,17 @@ def test_margin_boundaries_are_explicit() -> None:
     shield = SafetyShield(ShieldConfig())
     zero = shield.filter(
         DrivingAction.KEEP,
-        make_snapshot(),
+        make_frame(),
         complete_claims(stopping_margin_m=0.0),
     )
     negative = shield.filter(
         DrivingAction.KEEP,
-        make_snapshot(),
+        make_frame(),
         complete_claims(stopping_margin_m=-0.001),
     )
     clear = shield.filter(
         DrivingAction.KEEP,
-        make_snapshot(),
+        make_frame(),
         complete_claims(stopping_margin_m=5.0),
     )
     assert "negative_stopping_margin" not in zero.reasons
@@ -138,9 +161,9 @@ def test_margin_boundaries_are_explicit() -> None:
 
 def test_ttc_boundaries_are_explicit() -> None:
     shield = SafetyShield(ShieldConfig())
-    imminent = shield.filter(DrivingAction.KEEP, make_snapshot(), complete_claims(min_ttc_s=1.0))
-    caution = shield.filter(DrivingAction.KEEP, make_snapshot(), complete_claims(min_ttc_s=3.0))
-    clear = shield.filter(DrivingAction.KEEP, make_snapshot(), complete_claims(min_ttc_s=3.001))
+    imminent = shield.filter(DrivingAction.KEEP, make_frame(), complete_claims(min_ttc_s=1.0))
+    caution = shield.filter(DrivingAction.KEEP, make_frame(), complete_claims(min_ttc_s=3.0))
+    clear = shield.filter(DrivingAction.KEEP, make_frame(), complete_claims(min_ttc_s=3.001))
     assert imminent.reasons == ("imminent_ttc",)
     assert caution.reasons == ("caution_ttc",)
     assert clear.reasons == ()
@@ -149,7 +172,7 @@ def test_ttc_boundaries_are_explicit() -> None:
 def test_invalid_claim_is_stopped_before_arithmetic() -> None:
     claim = make_claim()
     object.__setattr__(claim, "min_ttc_s", math.nan)
-    result = SafetyShield(ShieldConfig()).filter(DrivingAction.KEEP, make_snapshot(), (claim,))
+    result = SafetyShield(ShieldConfig()).filter(DrivingAction.KEEP, make_frame(), (claim,))
     assert result.executed_action is DrivingAction.STOP
     assert result.reasons == ("invalid_input", "multiple_agents_missing")
 
@@ -157,7 +180,9 @@ def test_invalid_claim_is_stopped_before_arithmetic() -> None:
 def test_invalid_snapshot_is_stopped_before_speed_mapping() -> None:
     snapshot = make_snapshot()
     object.__setattr__(snapshot.ego, "speed_limit_mps", math.nan)
-    result = SafetyShield(ShieldConfig()).filter(DrivingAction.KEEP, snapshot, complete_claims())
+    result = SafetyShield(ShieldConfig()).filter(
+        DrivingAction.KEEP, make_frame(observation=snapshot), complete_claims()
+    )
     assert result.executed_action is DrivingAction.STOP
     assert result.reasons == ("invalid_input",)
 
@@ -166,7 +191,7 @@ def test_repeated_input_is_exactly_deterministic() -> None:
     shield = SafetyShield(ShieldConfig())
     arguments = (
         DrivingAction.KEEP,
-        make_snapshot(),
+        make_frame(),
         complete_claims(min_ttc_s=2.0, stopping_margin_m=1.0),
     )
     assert shield.filter(*arguments) == shield.filter(*arguments)
@@ -183,7 +208,7 @@ def test_generated_ttc_and_margin_matrix_is_monotone() -> None:
             for ttc in ttc_values:
                 result = shield.filter(
                     requested,
-                    make_snapshot(),
+                    make_frame(),
                     complete_claims(min_ttc_s=ttc, stopping_margin_m=margin),
                 )
                 assert result.executed_action >= previous
@@ -194,7 +219,7 @@ def test_generated_ttc_and_margin_matrix_is_monotone() -> None:
             for margin in margin_values:
                 result = shield.filter(
                     requested,
-                    make_snapshot(),
+                    make_frame(),
                     complete_claims(min_ttc_s=ttc, stopping_margin_m=margin),
                 )
                 assert result.executed_action >= previous
@@ -215,15 +240,15 @@ def test_missing_agent_count_is_monotone_for_every_valid_config(
             multiple_missing_action=multiple_missing,
         )
     )
-    complete = shield.filter(DrivingAction.KEEP, make_snapshot(), complete_claims())
+    complete = shield.filter(DrivingAction.KEEP, make_frame(), complete_claims())
     one = shield.filter(
         DrivingAction.KEEP,
-        make_snapshot(),
+        make_frame(),
         (make_claim("nominal"), make_claim("rule")),
     )
     multiple = shield.filter(
         DrivingAction.KEEP,
-        make_snapshot(),
+        make_frame(),
         (make_claim("nominal"),),
     )
     assert multiple.executed_action >= one.executed_action >= complete.executed_action
