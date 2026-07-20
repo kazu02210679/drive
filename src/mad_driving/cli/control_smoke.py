@@ -13,34 +13,24 @@ from mad_driving.agents.suite import AgentSuite, SuiteFactory, analyze_safely
 from mad_driving.config.loader import load_config
 from mad_driving.config.models import (
     AppConfig,
-    ControlConfig,
     CoordinatorConfig,
-    ShieldConfig,
 )
 from mad_driving.control import DrivingAction, target_speed_mps
 from mad_driving.coordinator import RuleBasedCoordinator
 from mad_driving.envs.control_metadrive_env import create_control_metadrive_env
 from mad_driving.envs.multi_agent_speed_env import (
+    ControlEnvironmentFactory,
     ControlSmokeResult,
-    DrivingEnvironment,
+    ShieldFactory,
 )
 from mad_driving.interfaces import (
     CriticReview,
     DecisionTrace,
     RiskClaim,
     SceneSnapshot,
-    ShieldResult,
 )
 from mad_driving.safety import SafetyShield
 from mad_driving.world_model import SceneSnapshotBuilder
-
-
-class ControlEnvironmentFactory(Protocol):
-    def __call__(
-        self,
-        config: dict[str, object],
-        control_config: ControlConfig,
-    ) -> DrivingEnvironment: ...
 
 
 class Coordinator(Protocol):
@@ -54,19 +44,6 @@ class Coordinator(Protocol):
 
 class CoordinatorFactory(Protocol):
     def __call__(self, config: CoordinatorConfig) -> Coordinator: ...
-
-
-class Shield(Protocol):
-    def filter(
-        self,
-        requested_action: DrivingAction | int,
-        snapshot: SceneSnapshot,
-        claims: Sequence[RiskClaim],
-    ) -> ShieldResult: ...
-
-
-class ShieldFactory(Protocol):
-    def __call__(self, config: ShieldConfig) -> Shield: ...
 
 
 def run_control_smoke(

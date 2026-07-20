@@ -16,7 +16,6 @@ from mad_driving.agents.suite import (
     AnalysisSuite,
     SuiteFactory,
     analyze_safely,
-    fallback_analysis,
 )
 from mad_driving.config.models import (
     AppConfig,
@@ -194,7 +193,7 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
         self._builder_factory = builder_factory
         self._reward_factory = reward_factory
         self._observation_factory = observation_factory
-        self._environment: DrivingEnvironment | None = self._new_environment()
+        self._environment: DrivingEnvironment | None = None
         self._suite: AnalysisSuite | None = None
         self._shield: Shield | None = None
         self._builder: SnapshotBuilder | None = None
@@ -214,51 +213,56 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
     ) -> tuple[NDArray[np.float32], dict[str, object]]:
         """Reset simulator-owned state and return the initial fixed observation."""
 
-        super().reset(seed=seed)
-        del options
+        environment = self._environment
+        self._clear_episode()
         episode_seed = self._config.seed if seed is None else seed
-        if self._environment is None:
-            self._environment = self._new_environment()
-
-        self._suite = self._suite_factory(self._config.agents)
-        self._shield = self._shield_factory(self._config.shield)
-        self._builder = self._builder_factory()
-        self._reward = self._reward_factory(self._config.reward)
-        self._reward.reset()
-        self._observation = self._observation_factory(self._config.observation)
-
         try:
-            _, raw_info = self._environment.reset(seed=episode_seed)
-            snapshot = self._builder.build(
-                self._environment,
+            super().reset(seed=seed)
+            del options
+            if environment is None:
+                environment = self._new_environment()
+            self._environment = environment
+
+            suite = self._suite_factory(self._config.agents)
+            shield = self._shield_factory(self._config.shield)
+            builder = self._builder_factory()
+            reward = self._reward_factory(self._config.reward)
+            reward.reset()
+            observation_builder = self._observation_factory(self._config.observation)
+
+            _, raw_info = environment.reset(seed=episode_seed)
+            snapshot = builder.build(
+                environment,
                 step_index=0,
                 scenario_id=self._config.scenario_id,
                 seed=episode_seed,
                 previous_action=int(DrivingAction.KEEP),
                 previous_shield_intervention=False,
             )
+            claims, review = analyze_safely(suite, snapshot)
+            observation = self._build_observation(
+                observation_builder,
+                snapshot,
+                claims,
+                review,
+            )
+            info: dict[str, object] = dict(raw_info)
+            info["seed"] = episode_seed
         except Exception:
+            self._environment = environment
             self._close_simulator()
             raise
 
-        claims, review = analyze_safely(self._suite, snapshot)
-        observation, observation_error = self._build_observation_safely(
-            snapshot,
-            claims,
-            review,
-        )
-        if observation_error is not None:
-            claims, review = fallback_analysis()
-
+        self._suite = suite
+        self._shield = shield
+        self._builder = builder
+        self._reward = reward
+        self._observation = observation_builder
         self._snapshot = snapshot
         self._claims = claims
         self._review = review
         self._episode_seed = episode_seed
         self._episode_active = True
-        info: dict[str, object] = dict(raw_info)
-        info["seed"] = episode_seed
-        if observation_error is not None:
-            info["observation_error"] = observation_error
         return observation, info
 
     def step(
@@ -274,6 +278,7 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
         shield = cast(Shield, self._shield)
         builder = cast(SnapshotBuilder, self._builder)
         reward_calculator = cast(Reward, self._reward)
+        observation_builder = cast(Observation, self._observation)
         snapshot = cast(SceneSnapshot, self._snapshot)
         claims = cast(tuple[RiskClaim, ...], self._claims)
         review = cast(CriticReview, self._review)
@@ -337,6 +342,7 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
             )
         )
         observation, observation_error = self._build_observation_safely(
+            observation_builder,
             next_snapshot,
             next_claims,
             next_review,
@@ -420,18 +426,27 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
 
     def _build_observation_safely(
         self,
+        observation_builder: Observation,
         snapshot: SceneSnapshot,
         claims: tuple[RiskClaim, ...],
         review: CriticReview,
     ) -> tuple[NDArray[np.float32], str | None]:
-        observation_builder = cast(Observation, self._observation)
         try:
-            observation = observation_builder.build(snapshot, claims, review)
-            if not self.observation_space.contains(observation):
-                raise ValueError("observation is outside the declared observation space")
-            return observation, None
+            return self._build_observation(observation_builder, snapshot, claims, review), None
         except Exception as exc:
             return self._safe_observation(), str(exc)
+
+    def _build_observation(
+        self,
+        observation_builder: Observation,
+        snapshot: SceneSnapshot,
+        claims: tuple[RiskClaim, ...],
+        review: CriticReview,
+    ) -> NDArray[np.float32]:
+        observation = observation_builder.build(snapshot, claims, review)
+        if not self.observation_space.contains(observation):
+            raise ValueError("observation is outside the declared observation space")
+        return observation
 
     def _safe_observation(self) -> NDArray[np.float32]:
         return np.zeros((24,), dtype=np.float32)
