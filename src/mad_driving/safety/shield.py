@@ -1,38 +1,16 @@
 """Deterministic final safety filter for high-level driving actions."""
 
 from collections.abc import Sequence
-from dataclasses import asdict
 
 from mad_driving.config.models import ShieldConfig
 from mad_driving.control import DrivingAction, action_for_speed_cap
-from mad_driving.interfaces import (
-    ActorState,
-    EgoState,
-    RiskClaim,
-    SceneSnapshot,
-    ShieldResult,
+from mad_driving.interfaces import RiskClaim, SceneSnapshot, ShieldResult
+from mad_driving.interfaces.defensive_validation import (
+    valid_claim,
+    valid_snapshot,
 )
 
 _REQUIRED_AGENT_IDS = frozenset({"nominal", "hazard", "rule"})
-
-
-def _valid_claim(claim: RiskClaim) -> bool:
-    try:
-        RiskClaim(**asdict(claim))
-    except (TypeError, ValueError):
-        return False
-    return True
-
-
-def _valid_snapshot(snapshot: SceneSnapshot) -> bool:
-    try:
-        values = asdict(snapshot)
-        ego = EgoState(**values.pop("ego"))
-        actors = tuple(ActorState(**actor) for actor in values.pop("actors"))
-        SceneSnapshot(ego=ego, actors=actors, **values)
-    except (TypeError, ValueError):
-        return False
-    return True
 
 
 class SafetyShield:
@@ -53,8 +31,8 @@ class SafetyShield:
         if self._config.mode == "off":
             return ShieldResult(requested, requested, requested, False, False, ())
 
-        valid_claims = tuple(claim for claim in claims if _valid_claim(claim))
-        snapshot_is_valid = _valid_snapshot(snapshot)
+        valid_claims = tuple(claim for claim in claims if valid_claim(claim))
+        snapshot_is_valid = valid_snapshot(snapshot)
         reasons: list[str] = []
         candidates = [DrivingAction.KEEP]
 

@@ -201,6 +201,34 @@ def test_generated_ttc_and_margin_matrix_is_monotone() -> None:
                 previous = result.executed_action
 
 
+@pytest.mark.parametrize(
+    ("one_missing", "multiple_missing"),
+    [(one, multiple) for one in range(4) for multiple in range(one, 4)],
+)
+def test_missing_agent_count_is_monotone_for_every_valid_config(
+    one_missing: int,
+    multiple_missing: int,
+) -> None:
+    shield = SafetyShield(
+        ShieldConfig(
+            missing_agent_action=one_missing,
+            multiple_missing_action=multiple_missing,
+        )
+    )
+    complete = shield.filter(DrivingAction.KEEP, make_snapshot(), complete_claims())
+    one = shield.filter(
+        DrivingAction.KEEP,
+        make_snapshot(),
+        (make_claim("nominal"), make_claim("rule")),
+    )
+    multiple = shield.filter(
+        DrivingAction.KEEP,
+        make_snapshot(),
+        (make_claim("nominal"),),
+    )
+    assert multiple.executed_action >= one.executed_action >= complete.executed_action
+
+
 def test_shield_result_rejects_inconsistent_flags_and_duplicate_reasons() -> None:
     with pytest.raises(ValueError, match="intervention_required"):
         ShieldResult(

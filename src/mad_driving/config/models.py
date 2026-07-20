@@ -11,6 +11,12 @@ class StrictFrozenModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
+class StrictTypedFrozenModel(StrictFrozenModel):
+    """Frozen model that also rejects Pydantic scalar type coercion."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+
 class MetaDriveConfig(StrictFrozenModel):
     """MetaDrive options used by the Phase 1 headless environment."""
 
@@ -78,7 +84,7 @@ class AgentsConfig(StrictFrozenModel):
     critic: CriticAgentConfig = Field(default_factory=CriticAgentConfig)
 
 
-class CoordinatorConfig(StrictFrozenModel):
+class CoordinatorConfig(StrictTypedFrozenModel):
     """Thresholds for the deterministic Phase 3 baseline Coordinator."""
 
     conflict_min_action: int = Field(default=1, ge=0, le=3)
@@ -86,7 +92,7 @@ class CoordinatorConfig(StrictFrozenModel):
     severe_threshold: FiniteFloat = Field(default=0.75, ge=0.0, le=1.0)
 
 
-class ShieldConfig(StrictFrozenModel):
+class ShieldConfig(StrictTypedFrozenModel):
     """Modes and physical thresholds for the deterministic Safety Shield."""
 
     mode: Literal["off", "monitor", "enforce"] = "enforce"
@@ -103,10 +109,12 @@ class ShieldConfig(StrictFrozenModel):
             raise ValueError("imminent_ttc_s must not exceed caution_ttc_s")
         if self.emergency_margin_m > self.caution_margin_m:
             raise ValueError("emergency_margin_m must not exceed caution_margin_m")
+        if self.multiple_missing_action < self.missing_agent_action:
+            raise ValueError("multiple_missing_action must not be less than missing_agent_action")
         return self
 
 
-class SpeedPIDConfig(StrictFrozenModel):
+class SpeedPIDConfig(StrictTypedFrozenModel):
     """Longitudinal PID gains and acceleration command limits."""
 
     kp: FiniteFloat = Field(default=0.50, ge=0.0)
@@ -124,7 +132,7 @@ class SpeedPIDConfig(StrictFrozenModel):
         return self
 
 
-class SteeringPIDConfig(StrictFrozenModel):
+class SteeringPIDConfig(StrictTypedFrozenModel):
     """Heading and lateral lane-centering PID settings."""
 
     heading_kp: FiniteFloat = Field(default=1.7, ge=0.0)
@@ -137,7 +145,7 @@ class SteeringPIDConfig(StrictFrozenModel):
     lookahead_m: FiniteFloat = Field(default=1.0, gt=0.0)
 
 
-class ControlConfig(StrictFrozenModel):
+class ControlConfig(StrictTypedFrozenModel):
     """Complete low-level lane and speed control configuration."""
 
     speed: SpeedPIDConfig = Field(default_factory=SpeedPIDConfig)

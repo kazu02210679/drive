@@ -47,6 +47,25 @@ def test_phase3_models_are_strict_and_frozen() -> None:
 
 
 @pytest.mark.parametrize(
+    ("model", "payload"),
+    [
+        (CoordinatorConfig, {"conflict_min_action": "2"}),
+        (ShieldConfig, {"missing_agent_action": True}),
+        (SpeedPIDConfig, {"kp": "0.5"}),
+        (SteeringPIDConfig, {"lookahead_m": "1.0"}),
+    ],
+)
+def test_phase3_models_reject_type_coercion(model: type[Any], payload: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        model.model_validate(payload)
+
+
+def test_shield_config_requires_missing_agent_monotonicity() -> None:
+    with pytest.raises(ValidationError, match="multiple_missing_action"):
+        ShieldConfig(missing_agent_action=3, multiple_missing_action=2)
+
+
+@pytest.mark.parametrize(
     "payload",
     [
         {"imminent_ttc_s": 4.0, "caution_ttc_s": 3.0},

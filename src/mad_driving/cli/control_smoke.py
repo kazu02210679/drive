@@ -100,10 +100,6 @@ def run_control_smoke(
     """Run the complete deterministic decision and control pipeline."""
 
     env = env_factory(config.metadrive_dict(), config.control)
-    builder = SceneSnapshotBuilder()
-    suite = suite_factory(config.agents)
-    coordinator = coordinator_factory(config.coordinator)
-    shield = shield_factory(config.shield)
     action_counts = [0, 0, 0, 0]
     intervention_count = 0
     steps_completed = 0
@@ -115,6 +111,10 @@ def run_control_smoke(
     review: CriticReview | None = None
 
     try:
+        builder = SceneSnapshotBuilder()
+        suite = suite_factory(config.agents)
+        coordinator = coordinator_factory(config.coordinator)
+        shield = shield_factory(config.shield)
         env.reset(seed=config.seed)
         snapshot = builder.build(
             env,

@@ -183,6 +183,22 @@ def test_step_failure_always_closes() -> None:
     assert env.closed is True
 
 
+def test_suite_factory_failure_always_closes() -> None:
+    env = FakeControlEnv({})
+
+    def raising_suite_factory(config: object) -> object:
+        del config
+        raise RuntimeError("suite construction failed")
+
+    with pytest.raises(RuntimeError, match="suite construction failed"):
+        run_control_smoke(
+            make_config(),
+            env_factory=lambda options, control: env,
+            suite_factory=raising_suite_factory,  # type: ignore[arg-type]
+        )
+    assert env.closed is True
+
+
 def test_previous_action_and_intervention_are_propagated() -> None:
     suite = RecordingSuite(min_ttc_s=0.5)
     result = run_control_smoke(

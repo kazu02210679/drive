@@ -87,7 +87,7 @@ The canonical seed is 42 and one decision interval is 0.1 seconds.
 - The real Policy integration covers `Discrete(4)`, finite steering and
   throttle/brake, forced STOP deceleration, and 60 KEEP decisions without an
   out-of-road result.
-- The complete suite passed 247 tests with 96.90% branch coverage (reported as
+- The complete suite passed 267 tests with 97.02% branch coverage (reported as
   97% in the rounded table), above the required 80%.
 - Strict mypy and Ruff checks pass for the Phase 3 boundaries. The final fresh
   repository-wide gate is recorded by the Phase 3 plan checklist.
@@ -95,3 +95,15 @@ The canonical seed is 42 and one decision interval is 0.1 seconds.
 The only accepted warnings are 14 upstream Pyparsing deprecations imported by
 Matplotlib: one `oneOf`, six `parseString`, six `resetCache`, and one
 `enablePackrat` warning. No project warning is suppressed.
+
+## Pre-PR review hardening
+
+The final read-only review found five boundary gaps. Phase 3 configuration now
+uses a scalar-type-strict Pydantic base without changing the older YAML list to
+tuple compatibility. Shield configuration enforces
+`multiple_missing_action >= missing_agent_action`. Coordinator and Shield share
+defensive dataclass reconstruction checks, with corrupted Coordinator input
+returning PREPARE_STOP before arithmetic. The control smoke owns the environment
+with `try/finally` immediately after construction, including component-factory
+failures. A real 100-step complete-pipeline integration test makes the canonical
+manual evidence an automated regression.

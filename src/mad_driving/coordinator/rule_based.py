@@ -5,6 +5,11 @@ from collections.abc import Sequence
 from mad_driving.config.models import CoordinatorConfig
 from mad_driving.control import DrivingAction, action_for_speed_cap
 from mad_driving.interfaces import CriticReview, RiskClaim, SceneSnapshot
+from mad_driving.interfaces.defensive_validation import (
+    valid_claim,
+    valid_review,
+    valid_snapshot,
+)
 
 
 class RuleBasedCoordinator:
@@ -22,6 +27,13 @@ class RuleBasedCoordinator:
         review: CriticReview,
     ) -> DrivingAction:
         """Return the most restrictive configured candidate action."""
+
+        if (
+            not valid_snapshot(snapshot)
+            or not valid_review(review)
+            or any(not valid_claim(claim) for claim in claims)
+        ):
+            return DrivingAction.PREPARE_STOP
 
         present_agent_ids = {claim.agent_id for claim in claims}
         if self._required_agent_ids - present_agent_ids:

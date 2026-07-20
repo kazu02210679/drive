@@ -1,3 +1,5 @@
+import math
+
 from mad_driving.config.models import CoordinatorConfig
 from mad_driving.control import DrivingAction
 from mad_driving.coordinator import RuleBasedCoordinator
@@ -71,3 +73,38 @@ def test_identical_input_is_exactly_deterministic() -> None:
     coordinator = RuleBasedCoordinator(CoordinatorConfig())
     arguments = (make_snapshot(), (make_claim(),), review())
     assert coordinator.decide(*arguments) == coordinator.decide(*arguments)
+
+
+def test_corrupted_claim_returns_prepare_stop() -> None:
+    claims = [make_claim("nominal"), make_claim("hazard"), make_claim("rule")]
+    object.__setattr__(claims[1], "recommended_max_speed_mps", math.nan)
+    assert (
+        RuleBasedCoordinator(CoordinatorConfig()).decide(make_snapshot(), tuple(claims), review())
+        is DrivingAction.PREPARE_STOP
+    )
+
+
+def test_corrupted_snapshot_returns_prepare_stop() -> None:
+    snapshot = make_snapshot()
+    object.__setattr__(snapshot.ego, "speed_limit_mps", math.nan)
+    assert (
+        RuleBasedCoordinator(CoordinatorConfig()).decide(
+            snapshot,
+            (make_claim("nominal"), make_claim("hazard"), make_claim("rule")),
+            review(),
+        )
+        is DrivingAction.PREPARE_STOP
+    )
+
+
+def test_corrupted_review_returns_prepare_stop() -> None:
+    corrupted_review = review()
+    object.__setattr__(corrupted_review, "max_severity", math.nan)
+    assert (
+        RuleBasedCoordinator(CoordinatorConfig()).decide(
+            make_snapshot(),
+            (make_claim("nominal"), make_claim("hazard"), make_claim("rule")),
+            corrupted_review,
+        )
+        is DrivingAction.PREPARE_STOP
+    )
