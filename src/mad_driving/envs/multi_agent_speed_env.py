@@ -281,6 +281,7 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
             )
             runtime.after_simulator_reset(environment, scenario_state)
             context = self._runtime_context(runtime, scenario_state)
+            self._validated_decision_interval(environment)
             initial_result = ScenarioStepResult(success=False, failure=False)
             frame = self._build_frame(
                 builder,

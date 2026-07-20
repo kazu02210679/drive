@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import gymnasium as gym
 import numpy as np
@@ -103,6 +103,7 @@ class FakeSimulator:
         fail_on_reset_calls: Sequence[int] = (),
         fail_on_step: bool = False,
         fail_on_close: bool = False,
+        physics_dt_after_reset: float | None = None,
         events: list[str] | None = None,
     ) -> None:
         self.vehicle = FakeVehicle()
@@ -119,6 +120,7 @@ class FakeSimulator:
         self.fail_on_reset_calls = set(fail_on_reset_calls)
         self.fail_on_step = fail_on_step
         self.fail_on_close = fail_on_close
+        self.physics_dt_after_reset = physics_dt_after_reset
         self.events = events
         self.reset_seeds: list[int | None] = []
         self.actions: list[int] = []
@@ -142,6 +144,8 @@ class FakeSimulator:
         self.vehicle.crash_human = False
         info = dict(self.reset_info)
         info["env_seed"] = self.current_seed
+        if self.physics_dt_after_reset is not None:
+            self.config["physics_world_step_size"] = self.physics_dt_after_reset
         return {}, info
 
     def step(self, action: int) -> tuple[dict[str, object], float, bool, bool, dict[str, Any]]:
@@ -265,6 +269,7 @@ class RecordingRuntime:
         invalid_step_result: bool = False,
         invalid_context_result: bool = False,
         reset_state: ScenarioState | None = None,
+        physics_dt_after_simulator_reset: float | None = None,
     ) -> None:
         self.events = events
         self.context = context or ScenarioObservationContext(
@@ -275,6 +280,7 @@ class RecordingRuntime:
         self.invalid_step_result = invalid_step_result
         self.invalid_context_result = invalid_context_result
         self.reset_state = reset_state
+        self.physics_dt_after_simulator_reset = physics_dt_after_simulator_reset
         self.states: list[ScenarioState] = []
         self.after_step_calls = 0
 
@@ -289,9 +295,12 @@ class RecordingRuntime:
         return state
 
     def after_simulator_reset(self, environment: object, state: ScenarioState) -> None:
-        del environment, state
+        del state
         if self.events is not None:
             self.events.append("runtime.after_simulator_reset")
+        if self.physics_dt_after_simulator_reset is not None:
+            simulator = cast(FakeSimulator, environment)
+            simulator.config["physics_world_step_size"] = self.physics_dt_after_simulator_reset
 
     def before_step(
         self,
@@ -916,6 +925,66 @@ def test_runtime_timing_mismatch_fails_reset_before_simulator_and_initial_frame(
     assert events == ["runtime.reset", "simulator.close"]
     assert simulator.close_calls == 1
     assert captured.value.__notes__ == ["simulator cleanup failed: simulator close failure"]
+
+
+def test_simulator_reset_timing_mutation_fails_before_initial_frame() -> None:
+    events: list[str] = []
+    simulator = FakeSimulator(
+        events=events,
+        fail_on_close=True,
+        physics_dt_after_reset=0.03,
+    )
+    runtime = RecordingRuntime(events=events)
+    builder = RecordingSnapshotBuilder(events=events)
+    harness = make_env(
+        simulators=(simulator,),
+        runtime=runtime,
+        snapshot_builder=builder,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="decision interval mismatch.*0.15.*0.1",
+    ) as captured:
+        harness.env.reset(seed=78)
+
+    assert simulator.reset_seeds == [expected_seeds(78).metadrive_scenario_index]
+    assert builder.calls == []
+    assert events == [
+        "runtime.reset",
+        "simulator.reset",
+        "runtime.after_simulator_reset",
+        "simulator.close",
+    ]
+    assert simulator.close_calls == 1
+    assert captured.value.__notes__ == ["simulator cleanup failed: simulator close failure"]
+
+
+def test_after_simulator_reset_timing_mutation_fails_before_initial_frame() -> None:
+    events: list[str] = []
+    simulator = FakeSimulator(events=events)
+    runtime = RecordingRuntime(
+        events=events,
+        physics_dt_after_simulator_reset=0.03,
+    )
+    builder = RecordingSnapshotBuilder(events=events)
+    harness = make_env(
+        simulators=(simulator,),
+        runtime=runtime,
+        snapshot_builder=builder,
+    )
+
+    with pytest.raises(RuntimeError, match="decision interval mismatch.*0.15.*0.1"):
+        harness.env.reset(seed=78)
+
+    assert builder.calls == []
+    assert events == [
+        "runtime.reset",
+        "simulator.reset",
+        "runtime.after_simulator_reset",
+        "simulator.close",
+    ]
+    assert simulator.close_calls == 1
 
 
 def test_timing_change_after_reset_fails_before_transition_side_effects() -> None:
