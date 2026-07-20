@@ -67,7 +67,7 @@ metadrive:
 
 All values are finite and positive; `decision_repeat` is a positive integer. `lane_width_m`
 is the fallback lane width for geometric same-lane checks and maps to MetaDrive's
-`lane_width`. Configuration
+`map_config.lane_width`. Configuration
 validation requires, within floating-point tolerance:
 
 ```text

@@ -34,7 +34,8 @@
 
 **Interfaces:**
 - Produces: `SeedRangeConfig`, `ScenarioSplitsConfig`, `MetaDriveConfig.physics_dt_s`, `MetaDriveConfig.decision_repeat`, `MetaDriveConfig.decision_dt_s`.
-- Produces: `MetaDriveConfig.lane_width_m=3.5`, mapped to MetaDrive's `lane_width`.
+- Produces: `MetaDriveConfig.lane_width_m=3.5`, mapped to MetaDrive's
+  `map_config.lane_width`.
 - Produces: `AppConfig.scenarios: ScenarioSplitsConfig`.
 - Produces: `decision_interval_s(config) -> float` that validates runtime values against explicit configuration.
 
@@ -114,8 +115,8 @@ class MetaDriveConfig(StrictFrozenModel):
 ```
 
 `AppConfig.metadrive_dict()` must emit MetaDrive keys `physics_world_step_size`,
-`decision_repeat`, and `lane_width`, not the project-only keys `physics_dt_s`,
-`decision_dt_s`, or `lane_width_m`.
+`decision_repeat`, and `map_config.lane_width`, not the project-only keys
+`physics_dt_s`, `decision_dt_s`, or `lane_width_m`.
 
 - [ ] **Step 4: Update both YAML files with exact defaults and remove implicit MetaDrive timing**
 
