@@ -639,7 +639,7 @@ git commit -m "feat: train ppo coordinator with checkpoints"
 - Exercises real Stable-Baselines3 2.9.0/PyTorch 2.8.0 with a tiny deterministic Gym env.
 - Verifies project training orchestration without paying for a full MetaDrive smoke in normal tests.
 
-- [ ] **Step 1: Write a tiny real PPO integration test**
+- [x] **Step 1: Write a tiny real PPO integration test**
 
 Use a deterministic 24D/Discrete(4) test env and a Phase 4 config with `n_steps=8`, `batch_size=8`,
 `total_timesteps=16`, `checkpoint_interval_steps=8`, and `eval_interval_steps=8`.
@@ -653,24 +653,24 @@ Assert:
 - resolved config contains exact training values;
 - resumed training creates a loadable final checkpoint.
 
-- [ ] **Step 2: Run the integration test and verify RED**
+- [x] **Step 2: Run the integration test and verify RED**
 
 Run: `.venv\Scripts\python.exe -m pytest tests/integration/test_ppo_checkpoint.py -v`
 
 Expected: fail on the first real SB3 callback/path/signature mismatch until adapted.
 
-- [ ] **Step 3: Apply the smallest SB3 2.9.0 correction and document it**
+- [x] **Step 3: Apply the smallest SB3 2.9.0 correction and document it**
 
 Do not change PPO defaults. Record inspected constructor/callback/load signatures and the correction in
 `docs/phase4_implementation_log.md`.
 
-- [ ] **Step 4: Re-run and verify GREEN**
+- [x] **Step 4: Re-run and verify GREEN**
 
 Run: `.venv\Scripts\python.exe -m pytest tests/integration/test_ppo_checkpoint.py -v`
 
 Expected: checkpoint, best model, final model, reload/predict, resume, and TensorBoard tests pass.
 
-- [ ] **Step 5: Commit Task 7**
+- [x] **Step 5: Commit Task 7**
 
 ```powershell
 git add tests/integration/test_ppo_checkpoint.py docs/phase4_implementation_log.md src
