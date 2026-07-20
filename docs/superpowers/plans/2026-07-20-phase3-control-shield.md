@@ -956,7 +956,7 @@ Run: `.venv\Scripts\python.exe -m pytest tests\unit\control\test_pid.py -v`
 
 Expected: all PID state, saturation, anti-windup, reset, and invalid-input tests pass.
 
-- [ ] **Step 5: Commit PID independently**
+- [x] **Step 5: Commit PID independently**
 
 ```powershell
 git add src\mad_driving\control tests\unit\control\test_pid.py
@@ -981,7 +981,7 @@ git commit -m "feat: add bounded anti-windup pid"
 - Produces: `create_control_metadrive_env(config, control_config) -> DrivingEnvironment`.
 - Policy reads `control_config` from the MetaDrive global config added by a small `ControlMetaDriveEnv` subclass.
 
-- [ ] **Step 1: Inspect and record the installed API before binding it**
+- [x] **Step 1: Inspect and record the installed API before binding it**
 
 Read only:
 
@@ -992,7 +992,7 @@ rg -n "current_lane|heading_theta_at|local_coordinates|speed_km_h|max_speed_m_s"
 
 Record exact MetaDrive 0.4.3 constructor signatures, external action lookup, lane methods, speed units, and custom config handling in `docs/phase3_implementation_log.md` before production code. If the installed API differs from the design, document the mismatch and use the smallest compatible binding.
 
-- [ ] **Step 2: Write failing pure-policy tests with a fake vehicle and lane**
+- [x] **Step 2: Write failing pure-policy tests with a fake vehicle and lane**
 
 Test the computation through a MetaDrive-independent helper `_compute_action(vehicle, action, dt_s)` created on the Policy class, while a real integration test covers engine lookup.
 
@@ -1043,13 +1043,13 @@ def test_missing_lane_fails_safe(fake_policy, fake_vehicle) -> None:
 
 The fixture may construct the instance with `object.__new__`, assign validated config and three `BoundedPID` objects, and avoid creating the Panda3D engine. Also test reset, non-finite vehicle speed, invalid action, speed-limit fallback, and finite action_info.
 
-- [ ] **Step 3: Run and verify RED**
+- [x] **Step 3: Run and verify RED**
 
 Run: `.venv\Scripts\python.exe -m pytest tests\unit\control\test_lane_keeping_policy.py -v`
 
 Expected: import failure for `LaneKeepingLongitudinalPolicy`.
 
-- [ ] **Step 4: Implement Policy construction and normalized control**
+- [x] **Step 4: Implement Policy construction and normalized control**
 
 The public class must have these boundaries:
 
@@ -1212,7 +1212,7 @@ def _speed_limit_mps(vehicle: Any, lane: Any) -> float:
 
 Import `atan2`, `cos`, and `sin` from `math`. The BoundedPID and target-speed validators turn non-finite runtime values into the fail-safe path.
 
-- [ ] **Step 5: Bind the custom Policy through a MetaDrive subclass**
+- [x] **Step 5: Bind the custom Policy through a MetaDrive subclass**
 
 ```python
 def create_control_metadrive_env(
@@ -1239,7 +1239,7 @@ def create_control_metadrive_env(
 
 If MetaDrive 0.4.3 requires `default_config()` to return a copied Config or rejects closure-based class values, document the observed error and move the same two values into a module-level subclass constructor without broadening scope.
 
-- [ ] **Step 6: Add and run a real one-step integration test**
+- [x] **Step 6: Add and run a real one-step integration test**
 
 ```python
 @pytest.mark.integration
@@ -1262,7 +1262,7 @@ Run: `.venv\Scripts\python.exe -m pytest tests\unit\control\test_lane_keeping_po
 
 Expected: unit and real MetaDrive Policy tests pass; only the documented upstream Matplotlib/Pyparsing warnings remain.
 
-- [ ] **Step 7: Verify mypy and commit Policy boundary**
+- [x] **Step 7: Verify mypy and commit Policy boundary**
 
 Run: `.venv\Scripts\python.exe -m mypy --strict src\mad_driving\control src\mad_driving\envs`
 

@@ -14,11 +14,13 @@ class DrivingEnvironment(Protocol):
     config: dict[str, Any]
     vehicle: Any
     engine: Any
+    agent: Any
+    action_space: Any
 
     def reset(self, *, seed: int | None = None) -> tuple[Any, dict[str, Any]]: ...
 
     def step(
-        self, action: tuple[float, float]
+        self, action: tuple[float, float] | int
     ) -> tuple[Any, float, bool, bool, dict[str, Any]]: ...
 
     def close(self) -> None: ...
