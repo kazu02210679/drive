@@ -56,3 +56,37 @@ The broader environment/reward command
 also cannot collect because `tests/unit/envs/test_reward.py` constructs the removed
 `SceneObservation.off_road` field. That migration belongs to Task 7 and was intentionally
 not changed.
+
+## Review-fix: strict fixed-schema claim agent IDs
+
+### Decision
+
+- Added one shared Coordinator validator for the fixed specialist schema:
+  `nominal`, `hazard`, and `rule` only.
+- It rejects non-`str` values and unknown strings with `ValueError("invalid claim agent_id")`.
+- `ObservationBuilder` runs the validator before all aggregation, including direct
+  `aggregate_agent_claims` calls. `RuleBasedCoordinator` runs it before its defensive
+  fallback/action selection.
+- Absent valid specialists retain the existing finite observation slots and conservative
+  missing-agent behavior.
+
+### RED
+
+- Added adversarial parameterized regressions in both observation and rule-based tests for
+  `nan`, `inf`, `-inf`, `int`, `bool`, empty string, and unknown string.
+- The observation regression includes a valid Nominal claim before the malformed unrelated
+  claim, proving validation cannot be bypassed by aggregation filtering.
+- `.venv\\Scripts\\python.exe -m pytest tests/unit/coordinator -q`: **14 failed,
+  22 passed**. Non-empty malformed IDs were silently accepted; the empty string followed a
+  generic defensive fallback instead of the fixed-schema error.
+
+### GREEN
+
+- `.venv\\Scripts\\python.exe -m pytest tests/unit/coordinator -q`: **36 passed**
+  (14 third-party Matplotlib/Pyparsing deprecation warnings).
+- `.venv\\Scripts\\ruff.exe check src/mad_driving/coordinator tests/unit/coordinator`:
+  passed.
+- `.venv\\Scripts\\mypy.exe --follow-imports=skip src/mad_driving/coordinator`:
+  passed, 4 source files checked.
+- `.venv\\Scripts\\python.exe -m pytest tests/unit/agents tests/unit/coordinator tests/unit/safety -q`:
+  **137 passed** (same 14 third-party warnings).

@@ -336,6 +336,24 @@ def test_invalid_defensive_input_is_rejected(corrupt: str) -> None:
         ObservationBuilder(ObservationConfig()).build(snapshot, claims, review)
 
 
+@pytest.mark.parametrize(
+    "invalid_agent_id",
+    (math.nan, math.inf, -math.inf, 1, True, "", "unknown"),
+)
+def test_invalid_agent_id_is_rejected_before_unrelated_aggregation(
+    invalid_agent_id: object,
+) -> None:
+    malformed_claim = make_claim("hazard")
+    object.__setattr__(malformed_claim, "agent_id", invalid_agent_id)
+
+    with pytest.raises(ValueError, match="invalid claim agent_id"):
+        ObservationBuilder(ObservationConfig()).build(
+            make_snapshot(),
+            (make_claim("nominal"), malformed_claim),
+            make_review(),
+        )
+
+
 def test_randomized_valid_inputs_are_finite_bounded_and_deterministic() -> None:
     rng = random.Random(20260720)
     builder = ObservationBuilder(ObservationConfig())

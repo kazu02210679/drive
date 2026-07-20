@@ -1,5 +1,7 @@
 import math
 
+import pytest
+
 from mad_driving.config.models import CoordinatorConfig
 from mad_driving.control import DrivingAction
 from mad_driving.coordinator import RuleBasedCoordinator
@@ -132,3 +134,21 @@ def test_corrupted_review_returns_prepare_stop() -> None:
         )
         is DrivingAction.PREPARE_STOP
     )
+
+
+@pytest.mark.parametrize(
+    "invalid_agent_id",
+    (math.nan, math.inf, -math.inf, 1, True, "", "unknown"),
+)
+def test_invalid_agent_id_is_rejected_before_action_selection(
+    invalid_agent_id: object,
+) -> None:
+    malformed_claim = make_claim("hazard")
+    object.__setattr__(malformed_claim, "agent_id", invalid_agent_id)
+
+    with pytest.raises(ValueError, match="invalid claim agent_id"):
+        RuleBasedCoordinator(CoordinatorConfig()).decide(
+            make_snapshot(),
+            (make_claim("nominal"), make_claim("rule"), malformed_claim),
+            review(),
+        )

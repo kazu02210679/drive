@@ -4,6 +4,10 @@ from collections.abc import Sequence
 
 from mad_driving.config.models import CoordinatorConfig
 from mad_driving.control import DrivingAction, action_for_speed_cap
+from mad_driving.coordinator.claim_validation import (
+    SPECIALIST_AGENT_IDS,
+    validate_specialist_claim_agent_ids,
+)
 from mad_driving.interfaces import CriticReview, RiskClaim, SceneObservation
 from mad_driving.interfaces.defensive_validation import (
     valid_claim,
@@ -15,7 +19,7 @@ from mad_driving.interfaces.defensive_validation import (
 class RuleBasedCoordinator:
     """Aggregate claim recommendations without duplicating Shield physics."""
 
-    _required_agent_ids = frozenset({"nominal", "hazard", "rule"})
+    _required_agent_ids = SPECIALIST_AGENT_IDS
 
     def __init__(self, config: CoordinatorConfig) -> None:
         self._config = config
@@ -28,6 +32,7 @@ class RuleBasedCoordinator:
     ) -> DrivingAction:
         """Return the most restrictive configured candidate action."""
 
+        validate_specialist_claim_agent_ids(claims)
         if (
             not valid_snapshot(snapshot)
             or not valid_review(review)

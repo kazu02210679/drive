@@ -9,10 +9,12 @@ from numpy.typing import NDArray
 
 from mad_driving.config.models import ObservationConfig
 from mad_driving.control import target_speed_mps
+from mad_driving.coordinator.claim_validation import (
+    SPECIALIST_AGENT_IDS,
+    validate_specialist_claim_agent_ids,
+)
 from mad_driving.interfaces import CriticReview, RiskClaim, SceneObservation
 from mad_driving.interfaces.defensive_validation import valid_claim, valid_review, valid_snapshot
-
-_REQUIRED_AGENT_IDS = ("nominal", "hazard", "rule")
 
 
 @dataclass(frozen=True)
@@ -36,6 +38,7 @@ def aggregate_agent_claims(
 
     if not isinstance(agent_id, str) or not agent_id:
         raise ValueError("invalid agent_id")
+    validate_specialist_claim_agent_ids(claims)
     if any(not valid_claim(claim) for claim in claims):
         raise ValueError("invalid claim")
 
@@ -148,7 +151,7 @@ class ObservationBuilder:
                 ),
                 _unit(review.conflict_score, 1.0),
                 float(review.unresolved_conflict),
-                _unit(len(supported.intersection(_REQUIRED_AGENT_IDS)) / 3.0, 1.0),
+                _unit(len(supported.intersection(SPECIALIST_AGENT_IDS)) / 3.0, 1.0),
                 _unit(review.max_severity, 1.0),
                 _unit(float(snapshot.previous_executed_action), 3.0),
                 float(snapshot.previous_shield_intervention),
@@ -175,6 +178,7 @@ class ObservationBuilder:
             raise ValueError("invalid snapshot")
         if not valid_review(review):
             raise ValueError("invalid review")
+        validate_specialist_claim_agent_ids(claims)
         if any(not valid_claim(claim) for claim in claims):
             raise ValueError("invalid claim")
         supported_ids = review.supported_agent_ids
