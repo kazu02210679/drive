@@ -28,6 +28,35 @@ def test_phase4_defaults_match_specification() -> None:
     assert config.training.total_timesteps == 500_000
 
 
+def test_phase4_explicit_values_are_preserved_in_app_config() -> None:
+    payload = minimum_app_config()
+    payload.update(
+        {
+            "observation": {"max_speed_mps": 32.5, "max_ttc_s": 7.5},
+            "reward": {"progress_per_meter": 0.25, "shield_intervention": 4.0},
+            "training": {
+                "learning_rate": 0.001,
+                "n_steps": 128,
+                "batch_size": 32,
+                "num_envs": 2,
+                "run_root": "custom-runs",
+            },
+        }
+    )
+
+    config = AppConfig.model_validate(payload)
+
+    assert config.observation.max_speed_mps == 32.5
+    assert config.observation.max_ttc_s == 7.5
+    assert config.reward.progress_per_meter == 0.25
+    assert config.reward.shield_intervention == 4.0
+    assert config.training.learning_rate == 0.001
+    assert config.training.n_steps == 128
+    assert config.training.batch_size == 32
+    assert config.training.num_envs == 2
+    assert config.training.run_root == "custom-runs"
+
+
 @pytest.mark.parametrize(
     ("model", "payload"),
     [
