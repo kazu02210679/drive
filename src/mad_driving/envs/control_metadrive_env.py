@@ -28,4 +28,9 @@ def create_control_metadrive_env(
             )
             return defaults
 
+        def reset(self, seed: int | None = None) -> Any:
+            if seed is not None:
+                seed = ((seed - self.start_index) % self.num_scenarios) + self.start_index
+            return super().reset(seed=seed)
+
     return cast(DrivingEnvironment, ControlMetaDriveEnv(config))
