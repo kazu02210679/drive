@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import shutil
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
@@ -30,6 +33,7 @@ class _VectorEnvCleanupError(RuntimeError):
 FactoryResult = TypeVar("FactoryResult")
 VecEnvFactory = Callable[[list[Callable[[], gym.Env[Any, Any]]]], Any]
 GenericFactory = Callable[..., FactoryResult]
+_STAGING_PREFIX = ".training-"
 
 
 @dataclass(frozen=True)
@@ -194,6 +198,47 @@ def _write_resolved_config(config: AppConfig, destination: Path) -> None:
     destination.write_text(serialized, encoding="utf-8")
 
 
+def _validated_staging_path(staging_dir: Path, checkpoints_dir: Path) -> Path:
+    checkpoints_root = checkpoints_dir.resolve(strict=True)
+    staging_root = staging_dir.resolve(strict=True)
+    if staging_root.parent != checkpoints_root or not staging_root.name.startswith(_STAGING_PREFIX):
+        raise RuntimeError(f"Refusing checkpoint staging operation outside: {checkpoints_root}")
+    return staging_root
+
+
+def _create_checkpoint_staging(checkpoints_dir: Path) -> Path:
+    staging_dir = Path(
+        tempfile.mkdtemp(
+            prefix=_STAGING_PREFIX,
+            dir=checkpoints_dir,
+        )
+    )
+    _validated_staging_path(staging_dir, checkpoints_dir)
+    return staging_dir
+
+
+def _promote_checkpoint_artifacts(staging_dir: Path, checkpoints_dir: Path) -> None:
+    staging_root = _validated_staging_path(staging_dir, checkpoints_dir)
+    artifacts = list(staging_root.iterdir())
+    if any(not artifact.is_file() for artifact in artifacts):
+        raise RuntimeError(f"Checkpoint staging contains a non-file artifact: {staging_root}")
+    artifacts.sort(
+        key=lambda artifact: (
+            artifact.name in {"best_model.zip", "final_model.zip"},
+            artifact.name,
+        )
+    )
+    for artifact in artifacts:
+        os.replace(artifact, checkpoints_dir / artifact.name)
+
+
+def _cleanup_checkpoint_staging(staging_dir: Path, checkpoints_dir: Path) -> None:
+    if not staging_dir.exists():
+        return
+    staging_root = _validated_staging_path(staging_dir, checkpoints_dir)
+    shutil.rmtree(staging_root)
+
+
 def run_training(
     config: AppConfig,
     *,
@@ -229,8 +274,9 @@ def run_training(
     )
     final_checkpoint = checkpoints_dir / "final_model.zip"
     best_checkpoint = checkpoints_dir / "best_model.zip"
-    final_checkpoint.unlink(missing_ok=True)
-    best_checkpoint.unlink(missing_ok=True)
+    staging_dir = _create_checkpoint_staging(checkpoints_dir)
+    staged_final_checkpoint = staging_dir / final_checkpoint.name
+    staged_best_checkpoint = staging_dir / best_checkpoint.name
 
     train_owner = _OwnedEnvironments.create(config, env_factory)
     eval_owner = _OwnedEnvironments.create(config, env_factory)
@@ -254,12 +300,12 @@ def run_training(
                 config.training.checkpoint_interval_steps,
                 config.training.num_envs,
             ),
-            save_path=str(checkpoints_dir),
+            save_path=str(staging_dir),
             name_prefix="ppo_checkpoint",
         )
         eval_callback = eval_callback_factory(
             eval_env=eval_env,
-            best_model_save_path=str(checkpoints_dir),
+            best_model_save_path=str(staging_dir),
             log_path=str(evaluation_dir),
             eval_freq=_scaled_frequency(
                 min(config.training.eval_interval_steps, requested_timesteps),
@@ -303,11 +349,12 @@ def run_training(
             callback=[reward_callback, checkpoint_callback, eval_callback],
             reset_num_timesteps=resume_path is None,
         )
-        model.save(final_checkpoint)
-        if not best_checkpoint.is_file():
-            raise FileNotFoundError(f"Best checkpoint was not produced: {best_checkpoint}")
-        if not final_checkpoint.is_file():
-            raise FileNotFoundError(f"Final checkpoint was not produced: {final_checkpoint}")
+        model.save(staged_final_checkpoint)
+        if not staged_best_checkpoint.is_file():
+            raise FileNotFoundError(f"Best checkpoint was not produced: {staged_best_checkpoint}")
+        if not staged_final_checkpoint.is_file():
+            raise FileNotFoundError(f"Final checkpoint was not produced: {staged_final_checkpoint}")
+        _promote_checkpoint_artifacts(staging_dir, checkpoints_dir)
         timesteps = int(model.num_timesteps) - start_timesteps
         return TrainingResult(
             run_dir=destination,
@@ -320,3 +367,4 @@ def run_training(
         _safe_close(train_env)
         eval_owner.close()
         train_owner.close()
+        _cleanup_checkpoint_staging(staging_dir, checkpoints_dir)

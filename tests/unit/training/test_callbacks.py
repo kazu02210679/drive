@@ -1,4 +1,7 @@
 import math
+from pathlib import Path
+
+import gymnasium as gym
 
 from mad_driving.training.callbacks import RewardComponentsCallback
 
@@ -79,3 +82,46 @@ def test_ignores_non_sequence_infos() -> None:
 
     assert callback._on_step() is True
     assert model.logger.values == {}
+
+
+def test_real_sb3_callback_list_attaches_model_logger_and_saves(
+    tmp_path: Path,
+) -> None:
+    from stable_baselines3 import PPO
+    from stable_baselines3.common.callbacks import CallbackList, EvalCallback
+    from stable_baselines3.common.logger import configure
+    from stable_baselines3.common.vec_env import DummyVecEnv
+
+    train_env = DummyVecEnv([lambda: gym.make("CartPole-v1")])
+    eval_env = DummyVecEnv([lambda: gym.make("CartPole-v1")])
+    try:
+        model = PPO(
+            "MlpPolicy",
+            train_env,
+            n_steps=8,
+            batch_size=8,
+            n_epochs=1,
+            device="cpu",
+        )
+        model.set_logger(configure(str(tmp_path / "logger"), []))
+        reward_callback = RewardComponentsCallback()
+        eval_callback = EvalCallback(
+            eval_env,
+            best_model_save_path=str(tmp_path / "best"),
+            eval_freq=1,
+            n_eval_episodes=1,
+        )
+        callbacks = CallbackList([reward_callback, eval_callback])
+
+        callbacks.init_callback(model)
+        model_path = tmp_path / "callback_model.zip"
+        model.save(model_path)
+
+        assert reward_callback.model is model
+        assert reward_callback.logger is model.logger
+        assert eval_callback.model is model
+        assert eval_callback.logger is model.logger
+        assert model_path.is_file()
+    finally:
+        eval_env.close()
+        train_env.close()

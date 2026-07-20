@@ -70,6 +70,31 @@ class CallbackFactory:
         return callback
 
 
+class FakeCheckpointCallback:
+    def __init__(self, **kwargs: Any) -> None:
+        self.save_path = Path(kwargs["save_path"])
+        self.name_prefix = kwargs["name_prefix"]
+
+    def on_fake_training(self, model: "FakePPO", produced_timesteps: int) -> None:
+        del produced_timesteps
+        model.write_checkpoint(
+            self.save_path / f"{self.name_prefix}_{model.num_timesteps}_steps.zip",
+            "periodic",
+        )
+
+
+class CheckpointCallbackFactory:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.instances: list[FakeCheckpointCallback] = []
+
+    def __call__(self, **kwargs: Any) -> FakeCheckpointCallback:
+        self.calls.append(kwargs)
+        callback = FakeCheckpointCallback(**kwargs)
+        self.instances.append(callback)
+        return callback
+
+
 class FakeEvalCallback:
     def __init__(self, **kwargs: Any) -> None:
         self.eval_env = kwargs["eval_env"]
@@ -111,6 +136,7 @@ class FakePPO:
     fail_learn: ClassVar[bool] = False
     fail_save: ClassVar[bool] = False
     fail_init: ClassVar[bool] = False
+    fail_load: ClassVar[bool] = False
     skip_save: ClassVar[bool] = False
     rollout_overshoot: ClassVar[int] = 0
     resume_num_timesteps: ClassVar[int] = 12_500
@@ -131,6 +157,7 @@ class FakePPO:
         cls.fail_learn = False
         cls.fail_save = False
         cls.fail_init = False
+        cls.fail_load = False
         cls.skip_save = False
         cls.rollout_overshoot = 0
         cls.resume_num_timesteps = 12_500
@@ -146,9 +173,11 @@ class FakePPO:
         force_reset: bool = True,
         **kwargs: Any,
     ) -> "FakePPO":
+        source_bytes = Path(path).read_bytes()
         cls.load_calls.append(
             {
                 "path": path,
+                "source_bytes": source_bytes,
                 "env": env,
                 "device": device,
                 "custom_objects": custom_objects,
@@ -157,6 +186,8 @@ class FakePPO:
                 **kwargs,
             }
         )
+        if cls.fail_load:
+            raise RuntimeError("PPO load failed")
         model = cls.__new__(cls)
         model.init_kwargs = {"env": env}
         model.learn_kwargs = None
@@ -223,19 +254,19 @@ def run_with_fakes(
     env_factory: EnvFactory | None = None,
     dummy_factory: VecFactory | None = None,
     subproc_factory: Any = None,
-    checkpoint_factory: CallbackFactory | None = None,
+    checkpoint_factory: CheckpointCallbackFactory | CallbackFactory | None = None,
     eval_factory: EvalCallbackFactory | CallbackFactory | None = None,
     reward_factory: RewardCallbackFactory | None = None,
 ) -> tuple[
     TrainingResult,
     EnvFactory,
     VecFactory,
-    CallbackFactory,
+    CheckpointCallbackFactory | CallbackFactory,
     EvalCallbackFactory | CallbackFactory,
 ]:
     environments = env_factory or EnvFactory()
     dummy = dummy_factory or VecFactory()
-    checkpoint = checkpoint_factory or CallbackFactory()
+    checkpoint = checkpoint_factory or CheckpointCallbackFactory()
     evaluation = eval_factory or EvalCallbackFactory()
     reward = reward_factory or RewardCallbackFactory()
     subproc = subproc_factory or VecFactory()
@@ -384,7 +415,7 @@ def test_callback_frequencies_have_a_minimum_of_one(tmp_path: Path) -> None:
     assert evaluation.calls[0]["eval_freq"] == 1
 
 
-def test_stale_best_checkpoint_is_not_accepted_without_an_actual_evaluation(
+def test_failed_best_validation_preserves_existing_best_checkpoint(
     tmp_path: Path,
 ) -> None:
     run_dir = tmp_path / "stale-best"
@@ -401,7 +432,7 @@ def test_stale_best_checkpoint_is_not_accepted_without_an_actual_evaluation(
             eval_factory=CallbackFactory(),
         )
 
-    assert not best_checkpoint.exists()
+    assert best_checkpoint.read_bytes() == b"stale"
     assert all(env.close_calls == 1 for env in environments.created)
 
 
@@ -419,7 +450,7 @@ def test_scheduled_evaluation_overwrites_stale_best_checkpoint(tmp_path: Path) -
         assert checkpoint.read("marker.txt") == b"best"
 
 
-def test_stale_final_checkpoint_is_not_accepted_when_save_produces_no_file(
+def test_failed_final_validation_preserves_existing_final_checkpoint(
     tmp_path: Path,
 ) -> None:
     run_dir = tmp_path / "stale-final"
@@ -432,8 +463,132 @@ def test_stale_final_checkpoint_is_not_accepted_when_save_produces_no_file(
     with pytest.raises(FileNotFoundError, match="Final checkpoint"):
         run_with_fakes(make_config(), run_dir, env_factory=environments)
 
-    assert not final_checkpoint.exists()
+    assert final_checkpoint.read_bytes() == b"stale"
     assert all(env.close_calls == 1 for env in environments.created)
+
+
+def seed_existing_checkpoints(run_dir: Path) -> dict[Path, bytes]:
+    checkpoints_dir = run_dir / "checkpoints"
+    checkpoints_dir.mkdir(parents=True, exist_ok=True)
+    paths = {
+        "final": checkpoints_dir / "final_model.zip",
+        "best": checkpoints_dir / "best_model.zip",
+        "periodic": checkpoints_dir / "ppo_checkpoint_17500_steps.zip",
+    }
+    for marker, path in paths.items():
+        FakePPO.write_checkpoint(path, f"old-{marker}")
+    return {path: path.read_bytes() for path in paths.values()}
+
+
+def assert_no_invocation_staging(run_dir: Path) -> None:
+    checkpoints_dir = run_dir / "checkpoints"
+    assert [path for path in checkpoints_dir.iterdir() if path.name.startswith(".training-")] == []
+
+
+class FailingEnvFactory:
+    def __call__(self, config: AppConfig) -> FakeEnv:
+        del config
+        raise RuntimeError("environment construction failed")
+
+
+@pytest.mark.parametrize(
+    ("failure", "message"),
+    [
+        ("environment", "environment construction failed"),
+        ("ppo", "PPO load failed"),
+        ("learn", "learn failed"),
+        ("save", "save failed"),
+        ("best_validation", "Best checkpoint"),
+        ("final_validation", "Final checkpoint"),
+    ],
+)
+def test_failed_run_preserves_all_existing_checkpoint_artifacts(
+    tmp_path: Path,
+    failure: str,
+    message: str,
+) -> None:
+    run_dir = tmp_path / failure
+    original_artifacts = seed_existing_checkpoints(run_dir)
+    resume_from = run_dir / "checkpoints" / "final_model.zip"
+    env_factory: Any = EnvFactory()
+    eval_factory: EvalCallbackFactory | CallbackFactory = EvalCallbackFactory()
+    if failure == "environment":
+        env_factory = FailingEnvFactory()
+    elif failure == "ppo":
+        FakePPO.fail_load = True
+    elif failure == "learn":
+        FakePPO.fail_learn = True
+    elif failure == "save":
+        FakePPO.fail_save = True
+    elif failure == "best_validation":
+        eval_factory = CallbackFactory()
+    elif failure == "final_validation":
+        FakePPO.skip_save = True
+
+    with pytest.raises((RuntimeError, FileNotFoundError), match=message):
+        run_with_fakes(
+            make_config(),
+            run_dir,
+            resume_from=resume_from,
+            env_factory=env_factory,
+            dummy_factory=VecFactory(),
+            eval_factory=eval_factory,
+        )
+
+    assert {path: path.read_bytes() for path in original_artifacts} == original_artifacts
+    assert_no_invocation_staging(run_dir)
+
+
+def test_success_stages_then_promotes_best_final_and_periodic_checkpoints(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "transaction"
+    checkpoint = CheckpointCallbackFactory()
+    evaluation = EvalCallbackFactory()
+
+    result, *_ = run_with_fakes(
+        make_config(),
+        run_dir,
+        checkpoint_factory=checkpoint,
+        eval_factory=evaluation,
+    )
+
+    staging_dir = Path(checkpoint.calls[0]["save_path"])
+    assert staging_dir == Path(evaluation.calls[0]["best_model_save_path"])
+    assert staging_dir.parent == run_dir / "checkpoints"
+    assert staging_dir.name.startswith(".training-")
+    assert FakePPO.instances[0].saved_path == staging_dir / "final_model.zip"
+    assert not staging_dir.exists()
+    periodic_checkpoint = run_dir / "checkpoints" / "ppo_checkpoint_5000_steps.zip"
+    assert result.final_checkpoint == run_dir / "checkpoints" / "final_model.zip"
+    assert result.best_checkpoint == run_dir / "checkpoints" / "best_model.zip"
+    assert zipfile.is_zipfile(periodic_checkpoint)
+    with zipfile.ZipFile(periodic_checkpoint) as checkpoint_file:
+        assert checkpoint_file.read("marker.txt") == b"periodic"
+
+
+@pytest.mark.parametrize("resume_name", ["final_model.zip", "best_model.zip"])
+def test_same_run_checkpoint_remains_readable_through_ppo_load(
+    tmp_path: Path,
+    resume_name: str,
+) -> None:
+    run_dir = tmp_path / resume_name.removesuffix(".zip")
+    resume_path = run_dir / "checkpoints" / resume_name
+    resume_path.parent.mkdir(parents=True)
+    FakePPO.write_checkpoint(resume_path, "resume-source")
+    source_bytes = resume_path.read_bytes()
+
+    result, *_ = run_with_fakes(
+        make_config(),
+        run_dir,
+        resume_from=resume_path,
+    )
+
+    assert FakePPO.load_calls[0]["path"] == resume_path
+    assert FakePPO.load_calls[0]["source_bytes"] == source_bytes
+    assert result.final_checkpoint.is_file()
+    assert result.best_checkpoint.is_file()
+    assert_no_invocation_staging(run_dir)
 
 
 def test_num_envs_above_one_uses_subprocess_train_env_and_separate_dummy_eval(
@@ -666,6 +821,7 @@ def test_resume_loads_ppo_with_train_env_and_keeps_timesteps(tmp_path: Path) -> 
     model = FakePPO.instances[0]
     assert FakePPO.load_calls[0] == {
         "path": resume_from,
+        "source_bytes": b"checkpoint",
         "env": model.init_kwargs["env"],
         "device": "cpu",
         "custom_objects": None,
