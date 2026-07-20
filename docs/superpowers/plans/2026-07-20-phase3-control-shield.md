@@ -219,7 +219,7 @@ Run: `.venv\Scripts\python.exe -m pytest tests\unit\config -v`
 
 Expected: all new and existing config tests pass; old payloads without Phase 3 sections use defaults.
 
-- [ ] **Step 5: Commit configuration independently**
+- [x] **Step 5: Commit configuration independently**
 
 ```powershell
 git add src\mad_driving\config\models.py configs\base.yaml tests\unit\config\test_control_config.py
@@ -241,7 +241,7 @@ git commit -m "feat: add phase 3 control configuration"
 - Produces: `target_speed_mps(action, current_speed_mps, speed_limit_mps) -> float`.
 - Produces: `action_for_speed_cap(recommended_max_speed_mps, speed_limit_mps) -> DrivingAction`.
 
-- [ ] **Step 1: Write failing mapping and boundary tests**
+- [x] **Step 1: Write failing mapping and boundary tests**
 
 ```python
 import math
@@ -292,13 +292,13 @@ def test_mapping_rejects_invalid_speeds(value: float) -> None:
         target_speed_mps(DrivingAction.KEEP, value, 10.0)
 ```
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run: `.venv\Scripts\python.exe -m pytest tests\unit\control\test_action_mapper.py -v`
 
 Expected: import failure for `mad_driving.control`.
 
-- [ ] **Step 3: Implement the pure action boundary**
+- [x] **Step 3: Implement the pure action boundary**
 
 `actions.py`:
 
@@ -361,7 +361,7 @@ def action_for_speed_cap(
 
 Export all three public names from `control/__init__.py`.
 
-- [ ] **Step 4: Verify GREEN and exact determinism**
+- [x] **Step 4: Verify GREEN and exact determinism**
 
 Run: `.venv\Scripts\python.exe -m pytest tests\unit\control\test_action_mapper.py -v`
 
