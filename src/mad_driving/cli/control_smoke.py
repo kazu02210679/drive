@@ -9,7 +9,7 @@ from collections.abc import Sequence
 from dataclasses import asdict
 from typing import Protocol
 
-from mad_driving.agents.suite import AgentSuite, AnalysisSuite, SuiteFactory
+from mad_driving.agents.suite import AgentSuite, SuiteFactory, analyze_safely
 from mad_driving.config.loader import load_config
 from mad_driving.config.models import (
     AppConfig,
@@ -69,27 +69,6 @@ class ShieldFactory(Protocol):
     def __call__(self, config: ShieldConfig) -> Shield: ...
 
 
-def _fallback_analysis() -> tuple[tuple[RiskClaim, ...], CriticReview]:
-    return (), CriticReview(
-        conflict_score=1.0,
-        unresolved_conflict=True,
-        max_severity=1.0,
-        supported_agent_ids=(),
-        challenged_claim_ids=(),
-        reasons=("agent_analysis_failed",),
-    )
-
-
-def _analyze_safely(
-    suite: AnalysisSuite,
-    snapshot: SceneSnapshot,
-) -> tuple[tuple[RiskClaim, ...], CriticReview]:
-    try:
-        return suite.analyze(snapshot)
-    except Exception:
-        return _fallback_analysis()
-
-
 def run_control_smoke(
     config: AppConfig,
     env_factory: ControlEnvironmentFactory = create_control_metadrive_env,
@@ -124,7 +103,7 @@ def run_control_smoke(
             previous_action=int(DrivingAction.KEEP),
             previous_shield_intervention=False,
         )
-        claims, review = _analyze_safely(suite, snapshot)
+        claims, review = analyze_safely(suite, snapshot)
 
         for step_index in range(1, config.decision_steps + 1):
             requested = coordinator.decide(snapshot, claims, review)
@@ -160,7 +139,7 @@ def run_control_smoke(
                 previous_action=int(executed),
                 previous_shield_intervention=shield_result.intervened,
             )
-            claims, review = _analyze_safely(suite, snapshot)
+            claims, review = analyze_safely(suite, snapshot)
             if terminated or truncated:
                 break
     finally:

@@ -31,6 +31,31 @@ class SuiteFactory(Protocol):
     def __call__(self, config: AgentsConfig) -> AnalysisSuite: ...
 
 
+def fallback_analysis() -> tuple[tuple[RiskClaim, ...], CriticReview]:
+    """Return the conservative result shared by simulator-facing pipelines."""
+
+    return (), CriticReview(
+        conflict_score=1.0,
+        unresolved_conflict=True,
+        max_severity=1.0,
+        supported_agent_ids=(),
+        challenged_claim_ids=(),
+        reasons=("agent_analysis_failed",),
+    )
+
+
+def analyze_safely(
+    suite: AnalysisSuite,
+    snapshot: SceneSnapshot,
+) -> tuple[tuple[RiskClaim, ...], CriticReview]:
+    """Convert an Agent failure into a conservative, rollout-safe result."""
+
+    try:
+        return suite.analyze(snapshot)
+    except Exception:
+        return fallback_analysis()
+
+
 @dataclass(frozen=True)
 class AgentSuite:
     """Call Nominal, Hazard, Rule, and Critic exactly once in fixed order."""
