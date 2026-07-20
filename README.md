@@ -6,7 +6,7 @@ MetaDrive上の1台の自車内部に、複数の決定論的な専門Agentと�
 
 ## Current status
 
-Phase 3（決定論的な速度判断・安全制御）まで実装済みです。Phase 1の厳密な設定検証とMetaDrive境界、Phase 2の専門Agentに加え、次を含みます。
+Phase 4（Gymnasium学習環境とPPO学習）まで実装済みです。Phase 1の厳密な設定検証とMetaDrive境界、Phase 2の専門Agent、Phase 3の安全制御に加え、次を含みます。
 
 - Nominal Agentによる等加速度運動予測
 - Hazard Agentによる先行車急制動・横断Actor・遮蔽の最悪ケース評価
@@ -17,10 +17,13 @@ Phase 3（決定論的な速度判断・安全制御）まで実装済みです�
 - `SafetyShield`によるTTC、停止余裕、Agent欠落、hard stopの最終判定
 - anti-windup付きPIDによる車線追従と高レベル速度Actionの実車両入力への変換
 - `SceneSnapshot → AgentSuite → Coordinator → SafetyShield → MetaDrive`のheadless control smoke
+- 有限な24次元`float32` Observationと10成分のReward
+- Gymnasium準拠の`MultiAgentSpeedEnv`とseed再現性
+- CPU上のPPO学習・再開、best/final/periodic checkpoint、resolved config、TensorBoard出力
 
 速度Actionは安全側へ単調な`KEEP=0`、`SLOW=1`、`PREPARE_STOP=2`、`STOP=3`です。Safety Shieldには診断も介入もしない`off`、診断だけ行う`monitor`、要求より安全側のActionを強制する`enforce`があります。既定値は`enforce`です。
 
-24次元Observation、報酬、Gymnasium学習環境、PPO、専用シナリオ生成、Ablationと比較実験はPhase 4以降です。LLM/VLM、画像認識、学習による操舵、車線変更、実車接続はMVP対象外です。
+専用シナリオ生成とcurriculumはPhase 5、評価artifact・baseline・ablation・可視化はPhase 6です。LLM/VLM、画像認識、学習による操舵、車線変更、実車接続はMVP対象外です。
 
 ## Setup
 
@@ -31,7 +34,7 @@ Python 3.11を使用します。Windowsの非ASCIIパスでも再現できるよ
 ```powershell
 py -3.11 -m venv .venv
 .venv\Scripts\python.exe -m pip install uv==0.8.0
-.venv\Scripts\uv.exe sync --no-editable --group dev
+.venv\Scripts\uv.exe sync --no-editable --group dev --extra training
 ```
 
 ### Linux
@@ -39,7 +42,7 @@ py -3.11 -m venv .venv
 ```bash
 python3.11 -m venv .venv
 .venv/bin/python -m pip install uv==0.8.0
-.venv/bin/uv sync --no-editable --group dev
+.venv/bin/uv sync --no-editable --group dev --extra training
 ```
 
 ## Run
@@ -66,6 +69,52 @@ JSONには最終Snapshot・Claims・Reviewに加え、`final_trace`、4 Action�
 
 初回だけMetaDrive 0.4.3の公式assetsをダウンロードします。
 
+### PPO training
+
+Windows PowerShell:
+
+```powershell
+# Canonical headless CPU smoke (5,000 requested timesteps)
+.venv\Scripts\python.exe -m mad_driving.cli.train --config configs/train.yaml --smoke --run-dir runs/phase4_smoke_seed42
+
+# Standard 500,000-timestep run
+.venv\Scripts\python.exe -m mad_driving.cli.train --config configs/train.yaml --run-dir runs/phase4_standard_seed42
+
+# Resume the same run transactionally from its canonical final checkpoint
+.venv\Scripts\python.exe -m mad_driving.cli.train --config configs/train.yaml --run-dir runs/phase4_standard_seed42 --resume-from runs/phase4_standard_seed42/checkpoints/final_model.zip
+```
+
+Linux:
+
+```bash
+# Canonical headless CPU smoke (5,000 requested timesteps)
+.venv/bin/python -m mad_driving.cli.train --config configs/train.yaml --smoke --run-dir runs/phase4_smoke_seed42
+
+# Standard 500,000-timestep run
+.venv/bin/python -m mad_driving.cli.train --config configs/train.yaml --run-dir runs/phase4_standard_seed42
+
+# Resume the same run transactionally from its canonical final checkpoint
+.venv/bin/python -m mad_driving.cli.train --config configs/train.yaml --run-dir runs/phase4_standard_seed42 --resume-from runs/phase4_standard_seed42/checkpoints/final_model.zip
+```
+
+`n_steps * num_envs`単位でrolloutを完了するため、実step数は要求値を超える場合があります。出力構造は次のとおりです。periodic checkpointは設定したintervalに到達した場合だけ生成されます。
+
+```text
+<run-dir>/
+├── config_resolved.yaml
+├── checkpoints/
+│   ├── best_model.zip
+│   ├── final_model.zip
+│   └── ppo_checkpoint_<steps>_steps.zip  # interval到達時のみ
+├── evaluation/
+│   └── evaluations.npz
+└── tensorboard/
+    └── PPO_<n>/
+        └── events.out.tfevents.*
+```
+
+Phase 4の実測では、最初のrun directoryを失敗証跡として保持したため、成功runは`runs/phase4_smoke_seed42_retry1`です。5,000 requested / 6,144 actual training stepsを38.6秒で実行し、1,000 evaluation steps（5 episodes × 200、全てhorizon truncation）、best step 5,000、final step 6,144を確認しました。final checkpointのfresh環境への再読込後、決定論的100 stepsでObservationとRewardは全て有限、`terminated=false`、`truncated=false`でした。詳細は [`docs/phase4_implementation_log.md`](docs/phase4_implementation_log.md) にあります。
+
 ## Verify
 
 ```powershell
@@ -75,4 +124,4 @@ JSONには最終Snapshot・Claims・Reviewに加え、`final_trace`、4 Action�
 .venv\Scripts\mypy.exe src
 ```
 
-Phase 1の実装判断は [`docs/implementation_plan.md`](docs/implementation_plan.md)、Phase 2の検証結果は [`docs/phase2_implementation_log.md`](docs/phase2_implementation_log.md)、Phase 3のMetaDrive API差異と実測結果は [`docs/phase3_implementation_log.md`](docs/phase3_implementation_log.md) にあります。
+Phase 1の実装判断は [`docs/implementation_plan.md`](docs/implementation_plan.md)、Phase 2の検証結果は [`docs/phase2_implementation_log.md`](docs/phase2_implementation_log.md)、Phase 3のMetaDrive API差異と実測結果は [`docs/phase3_implementation_log.md`](docs/phase3_implementation_log.md)、Phase 4の学習・checkpoint検証は [`docs/phase4_implementation_log.md`](docs/phase4_implementation_log.md) にあります。

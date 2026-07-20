@@ -112,8 +112,10 @@ in `[0, 3]`, a TensorBoard event file, and full equality between the serialized 
 in-memory resolved configuration. It then resumes from the same run's canonical final
 checkpoint for another 16 timesteps, loads and predicts from the promoted final model,
 checks every promoted checkpoint is still a ZIP, confirms invocation staging is gone,
-and confirms all four real train/evaluation environments were closed. All run artifacts
-are confined to pytest's `tmp_path`.
+and confirms each parent-process training environment was closed. The process-isolated
+evaluation environments are closed and joined by `SubprocVecEnv`; worker cleanup is
+covered by the training lifecycle unit tests. All run artifacts are confined to
+pytest's `tmp_path`.
 
 Verification results:
 
@@ -125,3 +127,140 @@ Verification results:
 - mypy: `Success: no issues found in 46 source files`;
 - `git diff --check`: no whitespace errors (Git emitted only its Windows
   LF-to-CRLF working-copy notice for this Markdown file).
+
+## Task 8: Canonical real smoke and Phase 4 verification
+
+### Reproducible setup and exact versions
+
+The documented install uses a normal, non-editable wheel and the training extra:
+
+```powershell
+.venv\Scripts\uv.exe sync --no-editable --group dev --extra training
+```
+
+The existing environment initially retained an older `mad-driving==0.1.0` wheel even
+though `uv sync` reported it audited; `python -m mad_driving.cli.train` was therefore
+absent. Rebuilding only the project wheel fixed the existing environment without
+`PYTHONPATH`:
+
+```powershell
+.venv\Scripts\uv.exe sync --no-editable --group dev --extra training --reinstall-package mad-driving
+```
+
+The installed CLI and training module SHA-256 values then exactly matched their `src/`
+files. Exact versions were Python `3.11.9`, uv `0.8.0`, mad-driving `0.1.0`, Gymnasium
+`1.3.0`, MetaDrive `0.4.3`, NumPy `1.26.4`, Pydantic `2.11.7`, PyYAML `6.0.2`,
+Stable-Baselines3 `2.9.0`, TensorBoard `2.19.0`, PyTorch `2.8.0` (CPU), pytest `8.4.1`,
+pytest-cov `6.2.1`, Ruff `0.12.4`, and mypy `1.16.1`.
+
+### Quality gate
+
+The initial branch-range whitespace check found one committed extra blank line at EOF
+in the Phase 4 design. That documentation-only defect was removed in the targeted
+runtime-fix commit. The complete fresh gate after the correction was:
+
+```powershell
+.venv\Scripts\python.exe -m pytest --cov=mad_driving --cov-report=term-missing -q
+.venv\Scripts\ruff.exe check .
+.venv\Scripts\ruff.exe format --check .
+.venv\Scripts\mypy.exe src
+git diff --check feat/phase3-control-shield...HEAD
+```
+
+Results: `421 passed, 19 warnings in 38.13s`; branch-aware total coverage `95.99%`
+(`1949` statements, `56` missed, `396` branches, `38` partial); Ruff `All checks
+passed!`; Ruff format `78 files already formatted`; mypy `Success: no issues found in
+46 source files`; and the exact branch-range diff check exited 0 with no output.
+
+### Canonical attempt, real defect, and minimal correction
+
+`runs/phase4_smoke_seed42` did not exist before the canonical command. The non-editable
+wheel was synchronized and the exact command was run without `PYTHONPATH`:
+
+```powershell
+.venv\Scripts\python.exe -m mad_driving.cli.train --config configs/train.yaml --smoke --run-dir runs/phase4_smoke_seed42
+```
+
+After 22.7 seconds it reached the step-5,000 evaluation boundary but exited 2 with
+`training failed: Can not call this API after engine initialization!`. MetaDrive 0.4.3
+supports at most one active `BaseEngine` per process; the single training `DummyVecEnv`
+and separate evaluation `DummyVecEnv` attempted to initialize two engines in the parent
+process. The failed directory was preserved and was not deleted or overwritten.
+
+A focused real MetaDrive/PPO regression reproduced the exact assertion before the fix:
+`1 failed, 15 warnings in 5.58s`. The minimal correction retains the documented
+single-environment training `DummyVecEnv` but runs its evaluation environment in a
+one-worker `SubprocVecEnv`, giving each real MetaDrive engine a separate process. The
+same regression then passed: `1 passed, 16 warnings in 9.74s`; the focused training,
+CLI, checkpoint, and MetaDrive regression set passed with `44 passed, 19 warnings in
+19.22s`. The correction is commit `02ca645` (`fix: isolate metadrive evaluation
+engine`). No PPO hyperparameter, reward, observation, scenario, or safety behavior
+changed.
+
+### Successful real smoke evidence
+
+Because the first run directory now existed as failed evidence, the retry target was
+checked absent and clearly named `runs/phase4_smoke_seed42_retry1`:
+
+```powershell
+.venv\Scripts\python.exe -m mad_driving.cli.train --config configs/train.yaml --smoke --run-dir runs/phase4_smoke_seed42_retry1
+```
+
+The headless CPU run exited 0 in `38.6s`. PPO requested `5,000` transitions and
+completed `6,144` actual training transitions because `n_steps=2048` requires a whole
+rollout. Evaluation ran at step `5,000`: five deterministic episodes of `200` steps
+each, all ending by MetaDrive's `max_step` horizon truncation, with reward
+`-24.707699465755887` for every episode. The successful verification therefore covered
+`7,244` real simulator steps: `6,144` training + `1,000` evaluation + `100` checkpoint
+reload steps. The reload itself did not terminate or truncate within its 100-step cap.
+
+Artifacts:
+
+```text
+runs/phase4_smoke_seed42_retry1/
+├── config_resolved.yaml                                      2,683 bytes
+├── checkpoints/
+│   ├── best_model.zip                                      169,749 bytes (step 5,000)
+│   └── final_model.zip                                     169,749 bytes (step 6,144)
+├── evaluation/
+│   └── evaluations.npz                                         834 bytes
+└── tensorboard/PPO_1/
+    └── events.out.tfevents.1784560154.kaji.59412.0             3,938 bytes
+```
+
+The resolved YAML exactly records `smoke_timesteps: 5000`, `n_steps: 2048`, seed 42,
+headless rendering, and the configured `checkpoint_interval_steps: 10000`.
+`PPO.load` reported `num_timesteps=5000` for best and `6144` for final. No periodic
+checkpoint was expected or produced because the successful run did not reach 10,000;
+Task 7's real short-interval integration already proves periodic checkpoint save,
+load, retention, and resume behavior.
+
+### Fresh final-checkpoint prediction
+
+The produced final checkpoint was loaded with `PPO.load(..., env=fresh_env,
+device="cpu")` into a fresh `MultiAgentSpeedEnv` built from the resolved config. The
+episode used `model.predict(observation, deterministic=True)`, checked every initial
+and subsequent observation plus every reward with `numpy.isfinite`, stopped at
+termination/truncation or 100 steps, and closed the environment in `finally`.
+
+Result:
+
+```json
+{"checkpoint_num_timesteps": 6144, "finite_observations": true, "finite_rewards": true, "steps": 100, "terminated": false, "truncated": false, "last_metadrive_flags": {"arrive_dest": false, "crash_human": false, "crash_vehicle": false, "max_step": false, "out_of_road": false}}
+```
+
+### Warnings and phase boundary
+
+- Existing Matplotlib/PyParsing deprecation warnings account for 14 collected warnings.
+- SB3 advises that evaluation is not Monitor-wrapped. No reward- or episode-modifying
+  wrapper is present, so recorded real lengths and rewards are unmodified.
+- SB3 also advises that the single training and evaluation vector wrappers have
+  different classes (`DummyVecEnv` and `SubprocVecEnv`). This is the intentional,
+  tested process boundary required by MetaDrive's engine singleton.
+- Git may warn that the user-global ignore file is sandbox-inaccessible or that LF will
+  become CRLF in the Windows working copy; neither warning changes tracked content or
+  gate results.
+- Specialized scenarios and curriculum remain Phase 5. Evaluation artifacts,
+  baselines, ablations, and visualization remain Phase 6. Task 8 Steps 5, 6, and 8
+  remain controller-owned and were not performed here; no broad review, push, or PR was
+  attempted.

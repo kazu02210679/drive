@@ -690,7 +690,7 @@ git commit -m "test: verify ppo artifacts and resume"
 - Produces exact Windows/Linux training and resume commands.
 - Produces a canonical real MetaDrive Phase 4 smoke record and a stacked Draft PR.
 
-- [ ] **Step 1: Run the complete quality gate**
+- [x] **Step 1: Run the complete quality gate**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest --cov=mad_driving --cov-report=term-missing -q
@@ -702,7 +702,7 @@ git diff --check feat/phase3-control-shield...HEAD
 
 Expected: all tests pass, branch coverage is at least 80%, no lint/format/type/diff failures.
 
-- [ ] **Step 2: Run canonical real MetaDrive smoke training**
+- [x] **Step 2: Run canonical real MetaDrive smoke training**
 
 Run:
 
@@ -715,12 +715,12 @@ Expected: at least 5,000 timesteps complete headlessly on CPU; `best_model.zip`,
 required only when the configured 10,000-step interval is reached; their real SB3 save/load path is
 covered by Task 7's shorter-interval integration test.
 
-- [ ] **Step 3: Load the produced checkpoint and run a deterministic prediction episode**
+- [x] **Step 3: Load the produced checkpoint and run a deterministic prediction episode**
 
 Use `PPO.load` with a fresh `MultiAgentSpeedEnv`, run until termination/truncation or 100 steps,
 verify every Observation and Reward is finite, then close in `finally`.
 
-- [ ] **Step 4: Update README and implementation log**
+- [x] **Step 4: Update README and implementation log**
 
 Document setup with `--extra training`, smoke/standard/resume commands, output tree, exact dependency
 versions, test/coverage evidence, real simulated/training steps, wall time, termination statistics,
@@ -736,7 +736,7 @@ reproducibility, and SB3 artifact correctness. Re-run covering tests after each 
 
 Repeat Step 1 and the real Gym/checkpoint integration tests. Expected: same clean results.
 
-- [ ] **Step 7: Commit documentation and verification evidence**
+- [x] **Step 7: Commit documentation and verification evidence**
 
 ```powershell
 git add README.md docs/phase4_implementation_log.md docs/superpowers/plans/2026-07-20-phase4-rl-environment.md
