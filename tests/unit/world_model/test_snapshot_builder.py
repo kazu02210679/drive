@@ -5,6 +5,7 @@ from typing import Any
 import pytest
 
 from mad_driving.world_model.snapshot_builder import SceneSnapshotBuilder
+from mad_driving.world_model.validation import decision_interval_s
 
 
 class FakeLane:
@@ -180,6 +181,14 @@ def test_accepts_metadrive_config_object_with_get_method() -> None:
     env.config = MetaDriveStyleConfig()  # type: ignore[assignment]
 
     assert build(env).sim_time_s == pytest.approx(0.2)
+
+
+def test_decision_interval_requires_explicit_runtime_timing() -> None:
+    with pytest.raises(ValueError, match="physics_world_step_size"):
+        decision_interval_s({"decision_repeat": 5})
+
+    with pytest.raises(ValueError, match="decision_repeat"):
+        decision_interval_s({"physics_world_step_size": 0.02})
 
 
 def test_prefers_current_agent_api_without_accessing_deprecated_vehicle() -> None:

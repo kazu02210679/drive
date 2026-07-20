@@ -1,5 +1,6 @@
 """Validated configuration models."""
 
+from math import isclose
 from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, PositiveInt, model_validator
@@ -17,6 +18,38 @@ class StrictTypedFrozenModel(StrictFrozenModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
 
+class SeedRangeConfig(StrictTypedFrozenModel):
+    """One non-empty half-open range of scenario seeds."""
+
+    seed_start: int = Field(ge=0)
+    seed_count: PositiveInt
+
+    @property
+    def range(self) -> range:
+        """Return the configured half-open seed range."""
+
+        return range(self.seed_start, self.seed_start + self.seed_count)
+
+
+class ScenarioSplitsConfig(StrictTypedFrozenModel):
+    """Disjoint scenario seed ranges for training and evaluation roles."""
+
+    train: SeedRangeConfig = SeedRangeConfig(seed_start=0, seed_count=10_000)
+    validation: SeedRangeConfig = SeedRangeConfig(seed_start=10_000, seed_count=1_000)
+    test: SeedRangeConfig = SeedRangeConfig(seed_start=20_000, seed_count=1_000)
+
+    @model_validator(mode="after")
+    def validate_disjoint_ranges(self) -> Self:
+        ranges = (self.train.range, self.validation.range, self.test.range)
+        if any(
+            first.start < second.stop and second.start < first.stop
+            for index, first in enumerate(ranges)
+            for second in ranges[index + 1 :]
+        ):
+            raise ValueError("scenario seed ranges must not overlap")
+        return self
+
+
 class MetaDriveConfig(StrictFrozenModel):
     """MetaDrive options used by the Phase 1 headless environment."""
 
@@ -26,6 +59,16 @@ class MetaDriveConfig(StrictFrozenModel):
     start_seed: int = 0
     traffic_density: FiniteFloat = Field(default=0.1, ge=0.0, le=1.0)
     horizon: PositiveInt = 200
+    physics_dt_s: FiniteFloat = Field(default=0.02, gt=0.0)
+    decision_repeat: PositiveInt = 5
+    decision_dt_s: FiniteFloat = Field(default=0.10, gt=0.0)
+    lane_width_m: FiniteFloat = Field(default=3.5, gt=0.0)
+
+    @model_validator(mode="after")
+    def validate_decision_timing(self) -> Self:
+        if not isclose(self.decision_dt_s, self.physics_dt_s * self.decision_repeat):
+            raise ValueError("decision_dt_s must equal physics_dt_s * decision_repeat")
+        return self
 
 
 class NominalAgentConfig(StrictFrozenModel):
@@ -222,6 +265,7 @@ class AppConfig(StrictFrozenModel):
     decision_steps: PositiveInt
     fixed_action: tuple[FiniteFloat, FiniteFloat]
     metadrive: MetaDriveConfig
+    scenarios: ScenarioSplitsConfig = Field(default_factory=ScenarioSplitsConfig)
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     coordinator: CoordinatorConfig = Field(default_factory=CoordinatorConfig)
     shield: ShieldConfig = Field(default_factory=ShieldConfig)
@@ -233,4 +277,9 @@ class AppConfig(StrictFrozenModel):
     def metadrive_dict(self) -> dict[str, Any]:
         """Return a plain dictionary accepted by MetaDrive."""
 
-        return self.metadrive.model_dump()
+        metadrive = self.metadrive.model_dump(
+            exclude={"physics_dt_s", "decision_dt_s", "lane_width_m"}
+        )
+        metadrive["physics_world_step_size"] = self.metadrive.physics_dt_s
+        metadrive["map_config"] = {"lane_width": self.metadrive.lane_width_m}
+        return metadrive

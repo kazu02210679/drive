@@ -9,6 +9,20 @@ metadrive:
   start_seed: 42
   traffic_density: 0.1
   horizon: 200
+  physics_dt_s: 0.02
+  decision_repeat: 5
+  decision_dt_s: 0.10
+  lane_width_m: 3.5
+scenarios:
+  train:
+    seed_start: 0
+    seed_count: 10000
+  validation:
+    seed_start: 10000
+    seed_count: 1000
+  test:
+    seed_start: 20000
+    seed_count: 1000
 agents:
   nominal:
     horizon_s: 5.0

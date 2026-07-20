@@ -28,6 +28,53 @@ def test_phase4_defaults_match_specification() -> None:
     assert config.training.total_timesteps == 500_000
 
 
+def test_simulation_timing_and_seed_split_defaults() -> None:
+    config = AppConfig.model_validate(minimum_app_config())
+
+    assert config.metadrive.physics_dt_s == 0.02
+    assert config.metadrive.decision_repeat == 5
+    assert config.metadrive.decision_dt_s == 0.10
+    assert config.metadrive.lane_width_m == 3.5
+    assert config.scenarios.train.range == range(0, 10_000)
+    assert config.scenarios.validation.range == range(10_000, 11_000)
+    assert config.scenarios.test.range == range(20_000, 21_000)
+    assert config.metadrive_dict() == {
+        "use_render": False,
+        "image_observation": False,
+        "num_scenarios": 1,
+        "start_seed": 0,
+        "traffic_density": 0.1,
+        "horizon": 200,
+        "physics_world_step_size": 0.02,
+        "decision_repeat": 5,
+        "map_config": {"lane_width": 3.5},
+    }
+
+
+def test_decision_dt_must_equal_physics_dt_times_repeat() -> None:
+    payload = minimum_app_config()
+    payload["metadrive"] = {
+        "physics_dt_s": 0.02,
+        "decision_repeat": 5,
+        "decision_dt_s": 0.2,
+    }
+
+    with pytest.raises(ValidationError, match="decision_dt_s"):
+        AppConfig.model_validate(payload)
+
+
+def test_scenario_seed_ranges_must_not_overlap() -> None:
+    payload = minimum_app_config()
+    payload["scenarios"] = {
+        "train": {"seed_start": 0, "seed_count": 100},
+        "validation": {"seed_start": 50, "seed_count": 10},
+        "test": {"seed_start": 200, "seed_count": 10},
+    }
+
+    with pytest.raises(ValidationError, match="overlap"):
+        AppConfig.model_validate(payload)
+
+
 def test_phase4_explicit_values_are_preserved_in_app_config() -> None:
     payload = minimum_app_config()
     payload.update(
