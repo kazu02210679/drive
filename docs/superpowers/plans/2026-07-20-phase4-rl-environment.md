@@ -728,13 +728,13 @@ Document setup with `--extra training`, smoke/standard/resume commands, output t
 versions, test/coverage evidence, real simulated/training steps, wall time, termination statistics,
 checkpoint reload result, known upstream warnings, and any minimal API adjustments.
 
-- [ ] **Step 5: Request broad Phase 4 code review and fix all Critical/Important findings**
+- [x] **Step 5: Request broad Phase 4 code review and fix all Critical/Important findings**
 
 Review the complete range from Phase 3 tip to Phase 4 HEAD for specification compliance, safety
 fallbacks, lifecycle leaks, reward sign errors, observation leakage, Gymnasium semantics, seed
 reproducibility, and SB3 artifact correctness. Re-run covering tests after each fix and re-review.
 
-- [ ] **Step 6: Re-run final verification after review fixes**
+- [x] **Step 6: Re-run final verification after review fixes**
 
 Repeat Step 1 and the real Gym/checkpoint integration tests. Expected: same clean results.
 
