@@ -76,7 +76,7 @@ tests/
 - Extends `AppConfig.observation`, `AppConfig.reward`, and `AppConfig.training` with default factories.
 - All later tasks consume these frozen models; no later component reads YAML directly.
 
-- [ ] **Step 1: Write failing default, explicit-value, and strictness tests**
+- [x] **Step 1: Write failing default, explicit-value, and strictness tests**
 
 ```python
 def test_phase4_defaults_match_specification() -> None:
@@ -109,13 +109,13 @@ def test_ppo_rollout_size_must_be_divisible_by_batch() -> None:
         PPOConfig(n_steps=10, num_envs=1, batch_size=6)
 ```
 
-- [ ] **Step 2: Run the config test and verify RED**
+- [x] **Step 2: Run the config test and verify RED**
 
 Run: `.venv\Scripts\python.exe -m pytest tests/unit/config/test_rl_config.py -v`
 
 Expected: collection fails because the three Phase 4 config classes do not exist.
 
-- [ ] **Step 3: Implement strict frozen models and validators**
+- [x] **Step 3: Implement strict frozen models and validators**
 
 ```python
 class ObservationConfig(StrictTypedFrozenModel):
@@ -171,13 +171,13 @@ class PPOConfig(StrictTypedFrozenModel):
 Add an `after` validator for rollout divisibility and add the three defaulted fields to `AppConfig`.
 Write every selected value explicitly in `base.yaml` and make `train.yaml` a complete standalone config.
 
-- [ ] **Step 4: Run config and loader suites and verify GREEN**
+- [x] **Step 4: Run config and loader suites and verify GREEN**
 
 Run: `.venv\Scripts\python.exe -m pytest tests/unit/config -v`
 
 Expected: all config tests pass, including legacy Phase 1-3 payloads.
 
-- [ ] **Step 5: Commit Task 1**
+- [x] **Step 5: Commit Task 1**
 
 ```powershell
 git add src/mad_driving/config/models.py configs/base.yaml configs/train.yaml tests/unit/config/test_rl_config.py
@@ -762,4 +762,3 @@ note that scenarios/evaluation remain Phase 5-6.
 - **Collision model gap:** vehicle versus crossing-actor penalty is derived from verified MetaDrive `crash_vehicle`/`crash_human` step info; the fixed Snapshot schema is not expanded.
 - **Type consistency:** `ObservationBuilder`, `RewardContext`, `RewardResult`, `RewardCalculator`, `MultiAgentSpeedEnv`, `TrainingResult`, and `run_training` signatures match producer/consumer tasks.
 - **Placeholder scan:** no TBD/TODO/implement-later instruction remains; each task has exact files, behavior, commands, expected RED/GREEN results, and commit boundary.
-
