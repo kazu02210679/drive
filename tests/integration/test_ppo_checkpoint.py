@@ -1,3 +1,4 @@
+import hashlib
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -69,11 +70,17 @@ def make_real_ppo_config() -> AppConfig:
     )
 
 
-def assert_loadable_policy(checkpoint: Path) -> None:
+def load_and_predict_policy(checkpoint: Path) -> PPO:
     model = PPO.load(checkpoint, device="cpu")
     action, _ = model.predict(np.zeros(24, dtype=np.float32), deterministic=True)
     predicted_action = int(np.asarray(action).item())
     assert 0 <= predicted_action <= 3
+    return model
+
+
+def checkpoint_hash(checkpoint: Path) -> str:
+    with checkpoint.open("rb") as checkpoint_file:
+        return hashlib.file_digest(checkpoint_file, "sha256").hexdigest()
 
 
 @pytest.mark.integration
@@ -96,19 +103,34 @@ def test_real_ppo_writes_artifacts_and_resumes_transactionally(tmp_path: Path) -
     )
 
     checkpoints_dir = run_dir / "checkpoints"
-    periodic_checkpoints = sorted(checkpoints_dir.glob("ppo_checkpoint_*_steps.zip"))
-    assert {path.name for path in periodic_checkpoints} == {
-        "ppo_checkpoint_8_steps.zip",
-        "ppo_checkpoint_16_steps.zip",
+    periodic_checkpoints = {
+        path.name: path for path in checkpoints_dir.glob("ppo_checkpoint_*_steps.zip")
     }
+    expected_initial_timesteps = {
+        "ppo_checkpoint_8_steps.zip": 8,
+        "ppo_checkpoint_16_steps.zip": 16,
+    }
+    assert periodic_checkpoints.keys() == expected_initial_timesteps.keys()
     all_checkpoints = [
-        *periodic_checkpoints,
+        *periodic_checkpoints.values(),
         first_result.best_checkpoint,
         first_result.final_checkpoint,
     ]
     assert first_result.timesteps == 16
     assert all(path.is_file() and zipfile.is_zipfile(path) for path in all_checkpoints)
-    assert_loadable_policy(first_result.final_checkpoint)
+    initial_periodic_hashes = {
+        name: checkpoint_hash(path) for name, path in periodic_checkpoints.items()
+    }
+    for name, expected_timesteps in expected_initial_timesteps.items():
+        assert (
+            load_and_predict_policy(periodic_checkpoints[name]).num_timesteps == expected_timesteps
+        )
+    initial_best_hash = checkpoint_hash(first_result.best_checkpoint)
+    initial_best = load_and_predict_policy(first_result.best_checkpoint)
+    assert initial_best.num_timesteps in {8, 16}
+    initial_final_hash = checkpoint_hash(first_result.final_checkpoint)
+    initial_final = load_and_predict_policy(first_result.final_checkpoint)
+    assert initial_final.num_timesteps == 16
     assert list((run_dir / "tensorboard").rglob("events.out.tfevents.*"))
 
     resolved_config = yaml.safe_load((run_dir / "config_resolved.yaml").read_text(encoding="utf-8"))
@@ -142,16 +164,34 @@ def test_real_ppo_writes_artifacts_and_resumes_transactionally(tmp_path: Path) -
 
     assert resumed_result.final_checkpoint == first_result.final_checkpoint
     assert resumed_result.timesteps == 16
-    assert zipfile.is_zipfile(resumed_result.final_checkpoint)
-    assert_loadable_policy(resumed_result.final_checkpoint)
+    resumed_periodic_checkpoints = {
+        path.name: path for path in checkpoints_dir.glob("ppo_checkpoint_*_steps.zip")
+    }
+    expected_resumed_timesteps = {
+        **expected_initial_timesteps,
+        "ppo_checkpoint_24_steps.zip": 24,
+        "ppo_checkpoint_32_steps.zip": 32,
+    }
+    assert resumed_periodic_checkpoints.keys() == expected_resumed_timesteps.keys()
     assert all(
         zipfile.is_zipfile(path)
         for path in [
-            *checkpoints_dir.glob("ppo_checkpoint_*_steps.zip"),
+            *resumed_periodic_checkpoints.values(),
             resumed_result.best_checkpoint,
             resumed_result.final_checkpoint,
         ]
     )
+    for name, initial_hash in initial_periodic_hashes.items():
+        assert checkpoint_hash(resumed_periodic_checkpoints[name]) == initial_hash
+    for name, expected_timesteps in expected_resumed_timesteps.items():
+        resumed_periodic = load_and_predict_policy(resumed_periodic_checkpoints[name])
+        assert resumed_periodic.num_timesteps == expected_timesteps
+    resumed_best = load_and_predict_policy(resumed_result.best_checkpoint)
+    assert resumed_best.num_timesteps in {24, 32}
+    assert checkpoint_hash(resumed_result.best_checkpoint) != initial_best_hash
+    resumed_final = load_and_predict_policy(resumed_result.final_checkpoint)
+    assert resumed_final.num_timesteps == 32
+    assert checkpoint_hash(resumed_result.final_checkpoint) != initial_final_hash
     assert not list(checkpoints_dir.glob(".training-*"))
     assert len(environments) == 4
     assert all(environment.closed for environment in environments)
