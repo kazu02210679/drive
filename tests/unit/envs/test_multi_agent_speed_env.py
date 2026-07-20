@@ -271,11 +271,16 @@ class RecordingRewardCalculator:
         components: dict[str, float] | None = None,
         *,
         failing_reset_calls: Sequence[int] = (),
+        failing_calculate_calls: Sequence[int] = (),
+        invalid_trace_calls: Sequence[int] = (),
     ) -> None:
         self.components = components or {"progress_reward": 1.25, "safety_penalty": -0.25}
         self.failing_reset_calls = set(failing_reset_calls)
+        self.failing_calculate_calls = set(failing_calculate_calls)
+        self.invalid_trace_calls = set(invalid_trace_calls)
         self.contexts: list[RewardContext] = []
         self.reset_calls = 0
+        self.calculate_calls = 0
 
     def reset(self) -> None:
         self.reset_calls += 1
@@ -283,8 +288,19 @@ class RecordingRewardCalculator:
             raise RuntimeError("reward reset failed")
 
     def calculate(self, context: RewardContext) -> RewardResult:
+        self.calculate_calls += 1
         self.contexts.append(context)
+        if self.calculate_calls in self.failing_calculate_calls:
+            raise RuntimeError("reward calculate failed")
+        if self.calculate_calls in self.invalid_trace_calls:
+            return InvalidTraceRewardResult()  # type: ignore[return-value]
         return RewardResult(total=sum(self.components.values()), components=self.components)
+
+
+class InvalidTraceRewardResult:
+    def __init__(self) -> None:
+        self.total = 0.0
+        self.components = {"trace_failure": float("nan")}
 
 
 class RecordingShield:
@@ -852,6 +868,83 @@ def test_post_step_observation_failure_returns_safe_values_and_truncates() -> No
         assert terminated is False
         assert truncated is True
         assert "observation_error" in info
+    finally:
+        harness.env.close()
+
+
+def test_reward_exception_after_simulator_advance_closes_and_recreates() -> None:
+    failed = FakeSimulator()
+    replacement = FakeSimulator()
+    reward = RecordingRewardCalculator(failing_calculate_calls=(1,))
+    harness = make_env(simulators=(failed, replacement), reward=reward)
+    try:
+        harness.env.reset(seed=90)
+
+        with pytest.raises(RuntimeError, match="reward calculate failed"):
+            harness.env.step(DrivingAction.KEEP)
+
+        assert failed.actions == [int(DrivingAction.STOP)]
+        assert failed.close_calls == 1
+        with pytest.raises(RuntimeError, match="reset"):
+            harness.env.step(DrivingAction.KEEP)
+
+        observation, info = harness.env.reset(seed=91)
+        assert harness.env_factory.created == [failed, replacement]
+        assert replacement.reset_seeds == [91]
+        assert harness.env.observation_space.contains(observation)
+        assert info["seed"] == 91
+        harness.env.step(DrivingAction.KEEP)
+        assert replacement.actions == [int(DrivingAction.STOP)]
+    finally:
+        harness.env.close()
+
+
+def test_reward_context_exception_after_simulator_advance_closes_and_recreates() -> None:
+    failed = FakeSimulator()
+    failed.config["decision_repeat"] = 0
+    replacement = FakeSimulator()
+    harness = make_env(simulators=(failed, replacement))
+    try:
+        harness.env.reset(seed=92)
+
+        with pytest.raises(ValueError, match="decision interval must be positive"):
+            harness.env.step(DrivingAction.KEEP)
+
+        assert failed.actions == [int(DrivingAction.STOP)]
+        assert failed.close_calls == 1
+        with pytest.raises(RuntimeError, match="reset"):
+            harness.env.step(DrivingAction.KEEP)
+
+        observation, _ = harness.env.reset(seed=93)
+        assert harness.env.observation_space.contains(observation)
+        assert replacement.reset_seeds == [93]
+        harness.env.step(DrivingAction.KEEP)
+        assert replacement.actions == [int(DrivingAction.STOP)]
+    finally:
+        harness.env.close()
+
+
+def test_trace_exception_after_simulator_advance_closes_and_recreates() -> None:
+    failed = FakeSimulator()
+    replacement = FakeSimulator()
+    reward = RecordingRewardCalculator(invalid_trace_calls=(1,))
+    harness = make_env(simulators=(failed, replacement), reward=reward)
+    try:
+        harness.env.reset(seed=94)
+
+        with pytest.raises(ValueError, match="reward_components must be finite"):
+            harness.env.step(DrivingAction.KEEP)
+
+        assert failed.actions == [int(DrivingAction.STOP)]
+        assert failed.close_calls == 1
+        with pytest.raises(RuntimeError, match="reset"):
+            harness.env.step(DrivingAction.KEEP)
+
+        observation, _ = harness.env.reset(seed=95)
+        assert harness.env.observation_space.contains(observation)
+        assert replacement.reset_seeds == [95]
+        harness.env.step(DrivingAction.KEEP)
+        assert replacement.actions == [int(DrivingAction.STOP)]
     finally:
         harness.env.close()
 

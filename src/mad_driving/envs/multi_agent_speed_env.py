@@ -328,58 +328,68 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
                 {"analysis_error": str(exc)},
             )
 
-        next_claims, next_review = analyze_safely(suite, next_snapshot)
-        reward_result = reward_calculator.calculate(
-            RewardContext(
-                previous_snapshot=snapshot,
-                next_snapshot=next_snapshot,
-                post_step_claims=next_claims,
-                executed_action=int(executed),
-                shield_intervened=shield_result.intervened,
-                arrived=bool(raw_info.get("arrive_dest", False)),
-                collision_kind=self._collision_kind(raw_info, next_snapshot),
-                decision_interval_s=decision_interval_s(environment.config),
+        try:
+            next_claims, next_review = analyze_safely(suite, next_snapshot)
+            reward_result = reward_calculator.calculate(
+                RewardContext(
+                    previous_snapshot=snapshot,
+                    next_snapshot=next_snapshot,
+                    post_step_claims=next_claims,
+                    executed_action=int(executed),
+                    shield_intervened=shield_result.intervened,
+                    arrived=bool(raw_info.get("arrive_dest", False)),
+                    collision_kind=self._collision_kind(raw_info, next_snapshot),
+                    decision_interval_s=decision_interval_s(environment.config),
+                )
             )
-        )
+        except Exception:
+            self._close_simulator()
+            raise
+
         observation, observation_error = self._build_observation_safely(
             observation_builder,
             next_snapshot,
             next_claims,
             next_review,
         )
-        terminated = bool(raw_terminated)
-        truncated = bool(raw_truncated) or observation_error is not None
-        trace = DecisionTrace(
-            step_index=step_index,
-            raw_action=int(requested),
-            executed_action=int(executed),
-            target_speed_mps=target,
-            shield_intervened=shield_result.intervened,
-            shield_reasons=shield_result.reasons,
-            claims=claims,
-            review=review,
-            reward_components=reward_result.components,
-        )
-        info = dict(raw_info)
-        info.update(
-            {
-                "requested_action": int(requested),
-                "executed_action": int(executed),
-                "shield_intervened": shield_result.intervened,
-                "shield_reasons": shield_result.reasons,
-                "target_speed_mps": target,
-                "reward_components": dict(reward_result.components),
-                "decision_trace": trace,
-            }
-        )
-        if observation_error is not None:
-            info["observation_error"] = observation_error
+        try:
+            terminated = bool(raw_terminated)
+            truncated = bool(raw_truncated) or observation_error is not None
+            trace = DecisionTrace(
+                step_index=step_index,
+                raw_action=int(requested),
+                executed_action=int(executed),
+                target_speed_mps=target,
+                shield_intervened=shield_result.intervened,
+                shield_reasons=shield_result.reasons,
+                claims=claims,
+                review=review,
+                reward_components=reward_result.components,
+            )
+            info = dict(raw_info)
+            info.update(
+                {
+                    "requested_action": int(requested),
+                    "executed_action": int(executed),
+                    "shield_intervened": shield_result.intervened,
+                    "shield_reasons": shield_result.reasons,
+                    "target_speed_mps": target,
+                    "reward_components": dict(reward_result.components),
+                    "decision_trace": trace,
+                }
+            )
+            if observation_error is not None:
+                info["observation_error"] = observation_error
+            reward_total = reward_result.total
+        except Exception:
+            self._close_simulator()
+            raise
 
         self._snapshot = next_snapshot
         self._claims = next_claims
         self._review = next_review
         self._episode_active = not (terminated or truncated)
-        return observation, reward_result.total, terminated, truncated, info
+        return observation, reward_total, terminated, truncated, info
 
     def close(self) -> None:
         """Close the current simulator instance at most once."""
