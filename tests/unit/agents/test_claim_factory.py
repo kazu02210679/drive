@@ -41,7 +41,7 @@ def test_driving_agent_protocol_is_runtime_checkable() -> None:
     class ExampleAgent:
         agent_id = "example"
 
-        def analyze(self, snapshot: SceneSnapshot) -> RiskClaim:
-            return neutral_claim(self.agent_id, snapshot)
+        def analyze(self, snapshot: SceneSnapshot) -> tuple[RiskClaim, ...]:
+            return (neutral_claim(self.agent_id, snapshot),)
 
     assert isinstance(ExampleAgent(), DrivingAgent)

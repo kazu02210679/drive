@@ -1,16 +1,16 @@
 """Deterministic worst-case braking, crossing, and occlusion analysis."""
 
 from dataclasses import dataclass
-from math import exp, inf
+from math import exp
 
-from mad_driving.agents.claim_factory import claim_id, neutral_claim
+from mad_driving.agents.claim_factory import claim_id, neutral_claim, ordered_claims
 from mad_driving.agents.kinematics import (
     project_vector,
     safe_speed_for_distance,
     stopping_distance,
 )
 from mad_driving.config.models import HazardAgentConfig
-from mad_driving.interfaces import ActorState, RiskClaim, SceneSnapshot
+from mad_driving.interfaces import ActorState, RiskClaim, SceneObservation
 
 
 @dataclass(frozen=True)
@@ -26,41 +26,36 @@ class HazardAgent:
     def __init__(self, config: HazardAgentConfig) -> None:
         self._config = config
 
-    def analyze(self, snapshot: SceneSnapshot) -> RiskClaim:
+    def analyze(self, observation: SceneObservation) -> tuple[RiskClaim, ...]:
         candidates: list[_Candidate] = []
-        for actor in sorted(snapshot.actors, key=lambda item: item.actor_id):
-            lead = self._lead_candidate(snapshot, actor)
+        for actor in sorted(observation.visible_actors, key=lambda item: item.actor_id):
+            lead = self._lead_candidate(observation, actor)
             if lead is not None:
                 candidates.append(lead)
-            crossing = self._crossing_candidate(snapshot, actor)
+            crossing = self._crossing_candidate(observation, actor)
             if crossing is not None:
                 candidates.append(crossing)
-        occlusion = self._occlusion_candidate(snapshot)
+        occlusion = self._occlusion_candidate(observation)
         if occlusion is not None:
             candidates.append(occlusion)
         if not candidates:
-            return neutral_claim(self.agent_id, snapshot)
-        return min(
-            candidates,
-            key=lambda candidate: (
-                -candidate.claim.severity,
-                candidate.claim.min_ttc_s if candidate.claim.min_ttc_s is not None else inf,
-                candidate.claim.target_actor_id or "",
-            ),
-        ).claim
+            return (neutral_claim(self.agent_id, observation),)
+        return ordered_claims(candidate.claim for candidate in candidates)
 
-    def _lead_candidate(self, snapshot: SceneSnapshot, actor: ActorState) -> _Candidate | None:
+    def _lead_candidate(
+        self, observation: SceneObservation, actor: ActorState
+    ) -> _Candidate | None:
         if not actor.same_lane or actor.relative_longitudinal_m <= 0.0:
             return None
-        longitudinal_speed, _ = project_vector(actor.velocity_xy_mps, snapshot.ego.heading_rad)
+        longitudinal_speed, _ = project_vector(actor.velocity_xy_mps, observation.ego.heading_rad)
         lead_speed = max(longitudinal_speed, 0.0)
         bumper_gap = actor.relative_longitudinal_m - 0.5 * (
             self._config.ego_length_m + actor.length_m
         )
         lead_stop_distance = stopping_distance(lead_speed, self._config.lead_max_deceleration_mps2)
         available_distance = bumper_gap + lead_stop_distance - self._config.safety_buffer_m
-        margin = available_distance - self._ego_required_distance(snapshot)
-        closing_speed = snapshot.ego.speed_mps - lead_speed
+        margin = available_distance - self._ego_required_distance(observation)
+        closing_speed = observation.ego.speed_mps - lead_speed
         if bumper_gap <= 0.0:
             ttc = 0.0
         elif closing_speed > 0.0:
@@ -68,7 +63,7 @@ class HazardAgent:
         else:
             ttc = None
         claim = self._finite_margin_claim(
-            snapshot=snapshot,
+            observation=observation,
             event_type="hazard_lead_braking",
             target_actor_id=actor.actor_id,
             margin_m=margin,
@@ -82,18 +77,22 @@ class HazardAgent:
         )
         return _Candidate(claim)
 
-    def _crossing_candidate(self, snapshot: SceneSnapshot, actor: ActorState) -> _Candidate | None:
+    def _crossing_candidate(
+        self, observation: SceneObservation, actor: ActorState
+    ) -> _Candidate | None:
         if actor.actor_type != "crossing_actor":
             return None
         conflict_distance = (
-            snapshot.distance_to_conflict_point_m
-            if snapshot.distance_to_conflict_point_m is not None
+            observation.road_context.distance_to_conflict_point_m
+            if observation.road_context.distance_to_conflict_point_m is not None
             else max(actor.relative_longitudinal_m, 0.0)
         )
-        ego_arrival = self._ego_arrival_time(snapshot, conflict_distance)
+        ego_arrival = self._ego_arrival_time(observation, conflict_distance)
         if ego_arrival is None:
             return None
-        _, observed_lateral_speed = project_vector(actor.velocity_xy_mps, snapshot.ego.heading_rad)
+        _, observed_lateral_speed = project_vector(
+            actor.velocity_xy_mps, observation.ego.heading_rad
+        )
         effective_crossing_speed = max(
             abs(observed_lateral_speed), self._config.crossing_actor_max_speed_mps
         )
@@ -101,9 +100,9 @@ class HazardAgent:
         if earliest_actor_arrival > ego_arrival + self._config.crossing_occupancy_allowance_s:
             return None
         available_distance = conflict_distance - self._config.safety_buffer_m
-        margin = available_distance - self._ego_required_distance(snapshot)
+        margin = available_distance - self._ego_required_distance(observation)
         claim = self._finite_margin_claim(
-            snapshot=snapshot,
+            observation=observation,
             event_type="hazard_crossing",
             target_actor_id=actor.actor_id,
             margin_m=margin,
@@ -117,14 +116,14 @@ class HazardAgent:
         )
         return _Candidate(claim)
 
-    def _occlusion_candidate(self, snapshot: SceneSnapshot) -> _Candidate | None:
-        if not snapshot.occlusion_present:
+    def _occlusion_candidate(self, observation: SceneObservation) -> _Candidate | None:
+        if not observation.occlusion_regions:
             return None
-        conflict_distance = snapshot.distance_to_conflict_point_m
+        conflict_distance = observation.road_context.distance_to_conflict_point_m
         if conflict_distance is None:
             event_type = "occlusion_hazard"
             claim = RiskClaim(
-                claim_id=claim_id(self.agent_id, snapshot, event_type, None),
+                claim_id=claim_id(self.agent_id, observation, event_type, None),
                 agent_id=self.agent_id,
                 event_type=event_type,
                 target_actor_id=None,
@@ -135,20 +134,20 @@ class HazardAgent:
                 min_ttc_s=None,
                 stopping_margin_m=None,
                 recommended_max_speed_mps=min(
-                    snapshot.ego.speed_limit_mps,
+                    observation.ego.speed_limit_mps,
                     self._config.occlusion_crawl_speed_mps,
                 ),
                 hard_stop_required=False,
                 evidence=("occlusion_present",),
                 assumptions=("conflict_distance_unavailable",),
-                valid_until_step=snapshot.step_index,
+                valid_until_step=observation.step_index,
             )
             return _Candidate(claim)
-        ego_arrival = self._ego_arrival_time(snapshot, conflict_distance)
+        ego_arrival = self._ego_arrival_time(observation, conflict_distance)
         available_distance = conflict_distance - self._config.safety_buffer_m
-        margin = available_distance - self._ego_required_distance(snapshot)
+        margin = available_distance - self._ego_required_distance(observation)
         claim = self._finite_margin_claim(
-            snapshot=snapshot,
+            observation=observation,
             event_type="occlusion_hazard",
             target_actor_id=None,
             margin_m=margin,
@@ -165,7 +164,7 @@ class HazardAgent:
     def _finite_margin_claim(
         self,
         *,
-        snapshot: SceneSnapshot,
+        observation: SceneObservation,
         event_type: str,
         target_actor_id: str | None,
         margin_m: float,
@@ -176,7 +175,7 @@ class HazardAgent:
     ) -> RiskClaim:
         severity = self._margin_severity(margin_m)
         recommended_speed = min(
-            snapshot.ego.speed_limit_mps,
+            observation.ego.speed_limit_mps,
             safe_speed_for_distance(
                 available_distance_m,
                 self._config.reaction_delay_s,
@@ -184,7 +183,7 @@ class HazardAgent:
             ),
         )
         return RiskClaim(
-            claim_id=claim_id(self.agent_id, snapshot, event_type, target_actor_id),
+            claim_id=claim_id(self.agent_id, observation, event_type, target_actor_id),
             agent_id=self.agent_id,
             event_type=event_type,
             target_actor_id=target_actor_id,
@@ -198,20 +197,22 @@ class HazardAgent:
             hard_stop_required=False,
             evidence=evidence,
             assumptions=assumptions,
-            valid_until_step=snapshot.step_index,
+            valid_until_step=observation.step_index,
         )
 
-    def _ego_required_distance(self, snapshot: SceneSnapshot) -> float:
-        return snapshot.ego.speed_mps * self._config.reaction_delay_s + stopping_distance(
-            snapshot.ego.speed_mps,
+    def _ego_required_distance(self, observation: SceneObservation) -> float:
+        return observation.ego.speed_mps * self._config.reaction_delay_s + stopping_distance(
+            observation.ego.speed_mps,
             self._config.ego_max_safe_deceleration_mps2,
         )
 
     @staticmethod
-    def _ego_arrival_time(snapshot: SceneSnapshot, conflict_distance_m: float) -> float | None:
-        if snapshot.ego.speed_mps <= 0.0:
+    def _ego_arrival_time(
+        observation: SceneObservation, conflict_distance_m: float
+    ) -> float | None:
+        if observation.ego.speed_mps <= 0.0:
             return None
-        return max(conflict_distance_m, 0.0) / snapshot.ego.speed_mps
+        return max(conflict_distance_m, 0.0) / observation.ego.speed_mps
 
     def _margin_severity(self, margin_m: float) -> float:
         scaled = margin_m / self._config.severe_margin_scale_m

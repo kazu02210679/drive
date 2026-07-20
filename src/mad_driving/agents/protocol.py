@@ -2,7 +2,7 @@
 
 from typing import Protocol, runtime_checkable
 
-from mad_driving.interfaces import RiskClaim, SceneSnapshot
+from mad_driving.interfaces import RiskClaim, SceneObservation
 
 
 @runtime_checkable
@@ -11,4 +11,4 @@ class DrivingAgent(Protocol):
 
     agent_id: str
 
-    def analyze(self, snapshot: SceneSnapshot) -> RiskClaim: ...
+    def analyze(self, observation: SceneObservation) -> tuple[RiskClaim, ...]: ...

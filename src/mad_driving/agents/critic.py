@@ -3,7 +3,7 @@
 from collections.abc import Sequence
 
 from mad_driving.config.models import CriticAgentConfig
-from mad_driving.interfaces import CriticReview, RiskClaim, SceneSnapshot
+from mad_driving.interfaces import CriticReview, RiskClaim, SceneObservation
 
 
 class CriticAgent:
@@ -14,7 +14,14 @@ class CriticAgent:
     def __init__(self, config: CriticAgentConfig) -> None:
         self._config = config
 
-    def review(self, snapshot: SceneSnapshot, claims: Sequence[RiskClaim]) -> CriticReview:
+    def review(
+        self,
+        observation: SceneObservation,
+        claims: Sequence[RiskClaim],
+        *,
+        failed_agent_ids: Sequence[str],
+    ) -> CriticReview:
+        del failed_agent_ids
         indexed_claims = tuple(enumerate(claims))
         valid: list[tuple[int, RiskClaim]] = []
         invalid: list[tuple[int, RiskClaim]] = []
@@ -42,7 +49,7 @@ class CriticAgent:
             reasons.append("nominal_hazard_disagreement")
             self._challenge(challenged_indexes, nominal_low, hazard_negative)
 
-        if snapshot.occlusion_present and nominal_low:
+        if observation.occlusion_regions and nominal_low:
             reasons.append("occlusion_underestimated")
             self._challenge(challenged_indexes, nominal_low)
 
@@ -64,12 +71,14 @@ class CriticAgent:
                 reasons.append("speed_recommendation_spread")
                 self._challenge(challenged_indexes, valid)
 
-        expired = [item for item in valid if item[1].valid_until_step < snapshot.step_index]
+        expired = [item for item in valid if item[1].valid_until_step < observation.step_index]
         if expired:
             reasons.append("claim_expired")
             self._challenge(challenged_indexes, expired)
 
-        definitive_limit_mps = snapshot.ego.speed_limit_mps * self._config.definitive_speed_fraction
+        definitive_limit_mps = (
+            observation.ego.speed_limit_mps * self._config.definitive_speed_fraction
+        )
         low_confidence_definitive = [
             item
             for item in valid

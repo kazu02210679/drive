@@ -1,8 +1,11 @@
 from typing import Any
 
+from mad_driving.agents.suite import AgentAnalysisResult
 from mad_driving.interfaces import (
     ActorState,
+    CriticReview,
     EgoState,
+    OcclusionRegion,
     PrivilegedWorldState,
     RiskClaim,
     RoadContext,
@@ -32,6 +35,32 @@ def make_claim(agent_id: str = "nominal", **overrides: Any) -> RiskClaim:
     }
     values.update(overrides)
     return RiskClaim(**values)
+
+
+def make_analysis(
+    *,
+    claims: tuple[RiskClaim, ...] = (),
+    failed_agent_ids: tuple[str, ...] = (),
+    errors: tuple[str, ...] = (),
+    review: CriticReview | None = None,
+) -> AgentAnalysisResult:
+    """Build a validated neutral analysis result for non-agent test seams."""
+
+    if review is None:
+        review = CriticReview(
+            conflict_score=0.0,
+            unresolved_conflict=False,
+            max_severity=0.0,
+            supported_agent_ids=tuple(sorted({claim.agent_id for claim in claims})),
+            challenged_claim_ids=(),
+            reasons=(),
+        )
+    return AgentAnalysisResult(
+        claims=claims,
+        failed_agent_ids=failed_agent_ids,
+        errors=errors,
+        review=review,
+    )
 
 
 def make_actor(
@@ -65,6 +94,13 @@ def make_actor(
         same_lane=same_lane,
         visible=True,
         occluded=False,
+    )
+
+
+def make_occlusion(region_id: str = "unit-occlusion") -> OcclusionRegion:
+    return OcclusionRegion(
+        region_id=region_id,
+        boundary_points_xy_m=((0.0, 0.0), (1.0, 0.0)),
     )
 
 
