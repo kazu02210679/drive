@@ -345,3 +345,9 @@ not prevent the final kill attempt. Final liveness remains the success criterion
 Staging and vector cleanup failures are aggregated: they replace an otherwise successful
 return, but are attached as notes when a primary training or construction exception
 already exists. `standstill_speed_mps` now validates with `gt=0.0`.
+
+A targeted re-review then found that a failed parent-pipe `remote.close()` during partial
+construction cleanup was not included in that note. A RED regression reproduced the
+missing note; the cleanup now reports either unconfirmed worker exit or remote closure
+while preserving the constructor exception. The final training unit set passed,
+`38 passed, 14 warnings`.

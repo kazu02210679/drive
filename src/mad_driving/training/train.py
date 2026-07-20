@@ -177,16 +177,19 @@ def _cleanup_partial_vector_env(
 
     processes = getattr(vector_env, "processes", None)
     if isinstance(processes, list):
+        remote_close_failed = False
         for remote_group_name in ("remotes", "work_remotes"):
             for remote in getattr(vector_env, remote_group_name, ()):
                 try:
                     remote.close()
                 except Exception:
-                    pass
+                    remote_close_failed = True
         workers_alive = _stop_processes(processes, graceful_join=False)
         owner.close()
         if workers_alive:
             raise _VectorEnvCleanupError("Subprocess worker cleanup could not be confirmed")
+        if remote_close_failed:
+            raise _VectorEnvCleanupError("Subprocess remote cleanup could not be confirmed")
         return
 
     close = getattr(vector_env, "close", None)

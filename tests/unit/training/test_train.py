@@ -756,6 +756,12 @@ class FakeRemote:
         self.close_calls += 1
 
 
+class FailingCloseRemote(FakeRemote):
+    def close(self) -> None:
+        super().close()
+        raise OSError("remote close failed")
+
+
 class FakeProcess:
     def __init__(
         self,
@@ -850,6 +856,21 @@ class OperationFailingSubprocVecEnv:
         raise OSError("subprocess operation failed")
 
 
+class RemoteCloseFailingSubprocVecEnv:
+    def __init__(self, env_fns: list[Callable[[], FakeEnv]]) -> None:
+        del env_fns
+        self.remotes = (FailingCloseRemote(),)
+        self.work_remotes = (FakeRemote(),)
+        self.processes = [
+            FakeProcess(
+                exits_on_terminate=True,
+                exits_on_kill=True,
+                initially_alive=False,
+            )
+        ]
+        raise OSError("remote constructor failed")
+
+
 def test_subprocess_cleanup_confirms_workers_dead_before_reporting_construction_failure(
     tmp_path: Path,
 ) -> None:
@@ -920,6 +941,19 @@ def test_partial_cleanup_continues_to_kill_after_join_and_terminate_fail(
     assert process.terminate_calls == 1
     assert process.kill_calls == 1
     assert process.is_alive() is False
+
+
+def test_partial_remote_close_failure_is_noted_without_masking_constructor(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(OSError, match="remote constructor failed") as raised:
+        run_with_fakes(
+            make_config(num_envs=3),
+            tmp_path / "remote-close-failure",
+            subproc_factory=RemoteCloseFailingSubprocVecEnv,
+        )
+
+    assert any("remote cleanup could not be confirmed" in note for note in raised.value.__notes__)
 
 
 class GracefulRemote(FakeRemote):
