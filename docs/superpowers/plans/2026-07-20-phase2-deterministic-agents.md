@@ -644,7 +644,7 @@ git commit -m "feat: add one-pass critic agent"
 - Extends `SmokeResult` with `final_claims` and `final_review`.
 - Extends `run_smoke(..., suite_factory=AgentSuite.from_config)` for unit-test injection while default behavior runs the real suite.
 
-- [ ] **Step 1: Write failing fixed-order suite tests**
+- [x] **Step 1: Write failing fixed-order suite tests**
 
 ```python
 def test_suite_returns_three_claims_in_fixed_order_and_one_review() -> None:
@@ -662,7 +662,7 @@ def test_suite_is_stateless_and_deterministic() -> None:
 
 Use small protocol fakes in a separate test to count exactly one call per claim agent and one Critic review without mocking MetaDrive.
 
-- [ ] **Step 2: Write failing smoke integration-unit tests**
+- [x] **Step 2: Write failing smoke integration-unit tests**
 
 Extend the existing fake-environment test:
 
@@ -677,17 +677,17 @@ assert env.closed is True
 
 Add an analysis-failure test proving `close()` still runs and a `main` test proving claims/review serialize as finite JSON.
 
-- [ ] **Step 3: Run and verify RED**
+- [x] **Step 3: Run and verify RED**
 
 Run: `.venv\Scripts\python.exe -m pytest tests\unit\agents\test_suite.py tests\unit\cli\test_smoke.py -v`
 
 Expected: suite imports and new SmokeResult fields fail.
 
-- [ ] **Step 4: Implement one-pass orchestration and final-only output**
+- [x] **Step 4: Implement one-pass orchestration and final-only output**
 
 Construct agents once before the loop. After every built snapshot, call the suite and overwrite only local `final_claims` and `final_review`. Do not feed claims into `env.step` or modify `fixed_action`. Keep environment closure in the existing `finally`.
 
-- [ ] **Step 5: Verify GREEN**
+- [x] **Step 5: Verify GREEN**
 
 Run: `.venv\Scripts\python.exe -m pytest tests\unit\agents tests\unit\cli -v`
 

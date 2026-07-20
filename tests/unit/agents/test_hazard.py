@@ -37,9 +37,7 @@ def test_hazard_reports_negative_margin_for_close_braking_lead() -> None:
 def test_hazard_positive_margin_is_advisory_and_below_half_severity() -> None:
     actor = make_actor("far-lead", longitudinal_m=100.0, longitudinal_speed_mps=10.0)
 
-    claim = HazardAgent(HazardAgentConfig()).analyze(
-        make_snapshot(actors=(actor,))
-    )
+    claim = HazardAgent(HazardAgentConfig()).analyze(make_snapshot(actors=(actor,)))
 
     assert claim.stopping_margin_m is not None and claim.stopping_margin_m > 0.0
     assert 0.0 <= claim.severity < 0.5
@@ -141,9 +139,7 @@ def test_hazard_uses_actor_id_as_final_tie_break() -> None:
         make_actor("a", longitudinal_m=10.0, longitudinal_speed_mps=2.0),
     )
 
-    claim = HazardAgent(HazardAgentConfig()).analyze(
-        make_snapshot(actors=actors)
-    )
+    claim = HazardAgent(HazardAgentConfig()).analyze(make_snapshot(actors=actors))
 
     assert claim.target_actor_id == "a"
 

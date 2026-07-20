@@ -50,9 +50,7 @@ class NominalMotionAgent:
             ),
         ).claim
 
-    def _evaluate_actor(
-        self, snapshot: SceneSnapshot, actor: ActorState
-    ) -> _Candidate | None:
+    def _evaluate_actor(self, snapshot: SceneSnapshot, actor: ActorState) -> _Candidate | None:
         if actor.same_lane and actor.relative_longitudinal_m <= 0.0:
             return None
 
@@ -84,12 +82,10 @@ class NominalMotionAgent:
             return None
 
         longitudinal_envelope = (
-            0.5 * (self._config.ego_length_m + actor.length_m)
-            + self._config.longitudinal_buffer_m
+            0.5 * (self._config.ego_length_m + actor.length_m) + self._config.longitudinal_buffer_m
         )
         lateral_envelope = (
-            0.5 * (self._config.ego_width_m + actor.width_m)
-            + self._config.lateral_buffer_m
+            0.5 * (self._config.ego_width_m + actor.width_m) + self._config.lateral_buffer_m
         )
         clearances = tuple(
             (
@@ -104,12 +100,8 @@ class NominalMotionAgent:
             None,
         )
         closing_speed = max(snapshot.ego.speed_mps - velocity[0], 0.0)
-        ttc_term = (
-            exp(-ttc / self._config.probability_ttc_scale_s) if ttc is not None else 0.0
-        )
-        distance_term = exp(
-            -minimum_clearance / self._config.probability_distance_scale_m
-        )
+        ttc_term = exp(-ttc / self._config.probability_ttc_scale_s) if ttc is not None else 0.0
+        distance_term = exp(-minimum_clearance / self._config.probability_distance_scale_m)
         closing_term = _clip(closing_speed / 10.0)
         probability = _clip(0.65 * ttc_term + 0.25 * distance_term + 0.10 * closing_term)
         recommended_speed = snapshot.ego.speed_limit_mps * (1.0 - 0.75 * probability)

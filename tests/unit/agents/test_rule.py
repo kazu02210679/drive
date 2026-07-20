@@ -14,9 +14,7 @@ from tests.unit.agents.factories import make_snapshot
         ("stop_required", "scenario_stop"),
     ],
 )
-def test_rule_hard_stops_for_explicit_constraints(
-    field: str, event_type: str
-) -> None:
+def test_rule_hard_stops_for_explicit_constraints(field: str, event_type: str) -> None:
     claim = RuleAgent(RuleAgentConfig()).analyze(make_snapshot(**{field: True}))
 
     assert claim.event_type == event_type
@@ -42,16 +40,22 @@ def test_collision_has_priority_when_multiple_rules_apply() -> None:
 def test_rule_uses_exact_fixed_priority_order() -> None:
     agent = RuleAgent(RuleAgentConfig())
 
-    assert agent.analyze(
-        make_snapshot(
-            off_road=True,
-            intersection_entry_prohibited=True,
-            stop_required=True,
-        )
-    ).event_type == "off_road_stop"
-    assert agent.analyze(
-        make_snapshot(intersection_entry_prohibited=True, stop_required=True)
-    ).event_type == "intersection_stop"
+    assert (
+        agent.analyze(
+            make_snapshot(
+                off_road=True,
+                intersection_entry_prohibited=True,
+                stop_required=True,
+            )
+        ).event_type
+        == "off_road_stop"
+    )
+    assert (
+        agent.analyze(
+            make_snapshot(intersection_entry_prohibited=True, stop_required=True)
+        ).event_type
+        == "intersection_stop"
+    )
 
 
 def test_normal_rule_claim_recommends_speed_limit() -> None:

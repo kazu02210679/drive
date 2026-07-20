@@ -64,9 +64,7 @@ def test_critic_finds_occlusion_underestimation() -> None:
 def test_critic_finds_hard_stop_conflict() -> None:
     claims = (
         make_claim("nominal", recommended_max_speed_mps=4.0),
-        make_claim(
-            "rule", recommended_max_speed_mps=0.0, hard_stop_required=True
-        ),
+        make_claim("rule", recommended_max_speed_mps=0.0, hard_stop_required=True),
     )
 
     review = critic().review(make_snapshot(), claims)
@@ -148,9 +146,7 @@ def test_critic_finds_all_eight_rules_in_fixed_order() -> None:
         recommended_max_speed_mps=5.0,
         confidence=0.4,
     )
-    rule = make_claim(
-        "rule", recommended_max_speed_mps=0.0, hard_stop_required=True
-    )
+    rule = make_claim("rule", recommended_max_speed_mps=0.0, hard_stop_required=True)
     invalid = make_claim("external", claim_id="external:1:none:invalid")
     object.__setattr__(invalid, "severity", math.inf)
 

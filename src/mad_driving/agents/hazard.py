@@ -44,32 +44,21 @@ class HazardAgent:
             candidates,
             key=lambda candidate: (
                 -candidate.claim.severity,
-                candidate.claim.min_ttc_s
-                if candidate.claim.min_ttc_s is not None
-                else inf,
+                candidate.claim.min_ttc_s if candidate.claim.min_ttc_s is not None else inf,
                 candidate.claim.target_actor_id or "",
             ),
         ).claim
 
-    def _lead_candidate(
-        self, snapshot: SceneSnapshot, actor: ActorState
-    ) -> _Candidate | None:
+    def _lead_candidate(self, snapshot: SceneSnapshot, actor: ActorState) -> _Candidate | None:
         if not actor.same_lane or actor.relative_longitudinal_m <= 0.0:
             return None
-        longitudinal_speed, _ = project_vector(
-            actor.velocity_xy_mps, snapshot.ego.heading_rad
-        )
+        longitudinal_speed, _ = project_vector(actor.velocity_xy_mps, snapshot.ego.heading_rad)
         lead_speed = max(longitudinal_speed, 0.0)
         bumper_gap = actor.relative_longitudinal_m - 0.5 * (
             self._config.ego_length_m + actor.length_m
         )
-        available_distance = (
-            bumper_gap
-            + stopping_distance(
-                lead_speed, self._config.lead_max_deceleration_mps2
-            )
-            - self._config.safety_buffer_m
-        )
+        lead_stop_distance = stopping_distance(lead_speed, self._config.lead_max_deceleration_mps2)
+        available_distance = bumper_gap + lead_stop_distance - self._config.safety_buffer_m
         margin = available_distance - self._ego_required_distance(snapshot)
         closing_speed = snapshot.ego.speed_mps - lead_speed
         if bumper_gap <= 0.0:
@@ -87,15 +76,13 @@ class HazardAgent:
             ttc_s=ttc,
             evidence=(
                 f"bumper_gap_m={bumper_gap:.6f}",
-                f"lead_stop_distance_m={stopping_distance(lead_speed, self._config.lead_max_deceleration_mps2):.6f}",
+                f"lead_stop_distance_m={lead_stop_distance:.6f}",
             ),
             assumptions=("lead_maximum_braking", "ego_reaction_then_safe_braking"),
         )
         return _Candidate(claim)
 
-    def _crossing_candidate(
-        self, snapshot: SceneSnapshot, actor: ActorState
-    ) -> _Candidate | None:
+    def _crossing_candidate(self, snapshot: SceneSnapshot, actor: ActorState) -> _Candidate | None:
         if actor.actor_type != "crossing_actor":
             return None
         conflict_distance = (
@@ -106,17 +93,12 @@ class HazardAgent:
         ego_arrival = self._ego_arrival_time(snapshot, conflict_distance)
         if ego_arrival is None:
             return None
-        _, observed_lateral_speed = project_vector(
-            actor.velocity_xy_mps, snapshot.ego.heading_rad
-        )
+        _, observed_lateral_speed = project_vector(actor.velocity_xy_mps, snapshot.ego.heading_rad)
         effective_crossing_speed = max(
             abs(observed_lateral_speed), self._config.crossing_actor_max_speed_mps
         )
         earliest_actor_arrival = abs(actor.relative_lateral_m) / effective_crossing_speed
-        if (
-            earliest_actor_arrival
-            > ego_arrival + self._config.crossing_occupancy_allowance_s
-        ):
+        if earliest_actor_arrival > ego_arrival + self._config.crossing_occupancy_allowance_s:
             return None
         available_distance = conflict_distance - self._config.safety_buffer_m
         margin = available_distance - self._ego_required_distance(snapshot)
@@ -202,9 +184,7 @@ class HazardAgent:
             ),
         )
         return RiskClaim(
-            claim_id=claim_id(
-                self.agent_id, snapshot, event_type, target_actor_id
-            ),
+            claim_id=claim_id(self.agent_id, snapshot, event_type, target_actor_id),
             agent_id=self.agent_id,
             event_type=event_type,
             target_actor_id=target_actor_id,
@@ -228,9 +208,7 @@ class HazardAgent:
         )
 
     @staticmethod
-    def _ego_arrival_time(
-        snapshot: SceneSnapshot, conflict_distance_m: float
-    ) -> float | None:
+    def _ego_arrival_time(snapshot: SceneSnapshot, conflict_distance_m: float) -> float | None:
         if snapshot.ego.speed_mps <= 0.0:
             return None
         return max(conflict_distance_m, 0.0) / snapshot.ego.speed_mps

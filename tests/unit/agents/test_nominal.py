@@ -44,9 +44,7 @@ def test_nominal_detects_predicted_cut_in() -> None:
         same_lane=False,
     )
 
-    claim = NominalMotionAgent(NominalAgentConfig()).analyze(
-        make_snapshot(actors=(actor,))
-    )
+    claim = NominalMotionAgent(NominalAgentConfig()).analyze(make_snapshot(actors=(actor,)))
 
     assert claim.target_actor_id == "cut-in"
     assert claim.event_type == "nominal_cut_in"
@@ -63,9 +61,7 @@ def test_nominal_evaluates_crossing_actor() -> None:
         same_lane=False,
     )
 
-    claim = NominalMotionAgent(NominalAgentConfig()).analyze(
-        make_snapshot(actors=(actor,))
-    )
+    claim = NominalMotionAgent(NominalAgentConfig()).analyze(make_snapshot(actors=(actor,)))
 
     assert claim.target_actor_id == "crossing"
     assert claim.event_type == "nominal_crossing"
@@ -94,9 +90,7 @@ def test_nominal_uses_actor_id_as_final_tie_break() -> None:
         make_actor("a", longitudinal_m=15.0, longitudinal_speed_mps=2.0),
     )
 
-    claim = NominalMotionAgent(NominalAgentConfig()).analyze(
-        make_snapshot(actors=actors)
-    )
+    claim = NominalMotionAgent(NominalAgentConfig()).analyze(make_snapshot(actors=actors))
 
     assert claim.target_actor_id == "a"
 
@@ -129,9 +123,7 @@ def test_nominal_uses_configured_horizon_and_step() -> None:
 def test_nominal_probability_remains_in_range_for_extreme_closing_speed() -> None:
     actor = make_actor("fast-close", longitudinal_m=6.0, longitudinal_speed_mps=-100.0)
 
-    claim = NominalMotionAgent(NominalAgentConfig()).analyze(
-        make_snapshot(actors=(actor,))
-    )
+    claim = NominalMotionAgent(NominalAgentConfig()).analyze(make_snapshot(actors=(actor,)))
 
     assert claim.probability is not None
     assert 0.0 <= claim.probability <= 1.0

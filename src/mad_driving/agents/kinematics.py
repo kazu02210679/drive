@@ -38,9 +38,7 @@ def sample_times(horizon_s: float, step_s: float) -> tuple[float, ...]:
     return tuple(values)
 
 
-def project_vector(
-    vector_xy: tuple[float, float], heading_rad: float
-) -> tuple[float, float]:
+def project_vector(vector_xy: tuple[float, float], heading_rad: float) -> tuple[float, float]:
     """Project a world-frame vector into longitudinal/lateral ego axes."""
 
     x, y = xy_pair("vector_xy", vector_xy)
@@ -77,9 +75,7 @@ def rectangular_clearance(
     """Return Euclidean distance outside a rectangular collision envelope."""
 
     longitudinal, lateral = xy_pair("relative_xy", relative_xy)
-    longitudinal_envelope = _non_negative(
-        "longitudinal_envelope_m", longitudinal_envelope_m
-    )
+    longitudinal_envelope = _non_negative("longitudinal_envelope_m", longitudinal_envelope_m)
     lateral_envelope = _non_negative("lateral_envelope_m", lateral_envelope_m)
     outside_longitudinal = max(abs(longitudinal) - longitudinal_envelope, 0.0)
     outside_lateral = max(abs(lateral) - lateral_envelope, 0.0)
@@ -109,6 +105,5 @@ def safe_speed_for_distance(
     braking = abs(deceleration)
     return max(
         0.0,
-        sqrt((braking * reaction) ** 2 + 2.0 * braking * distance)
-        - braking * reaction,
+        sqrt((braking * reaction) ** 2 + 2.0 * braking * distance) - braking * reaction,
     )

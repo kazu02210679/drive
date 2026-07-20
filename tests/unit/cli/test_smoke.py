@@ -1,9 +1,12 @@
+import json
 from typing import Any
 
 import pytest
 
+from mad_driving.cli import smoke as smoke_module
 from mad_driving.cli.smoke import main, run_smoke
 from mad_driving.config.models import AppConfig
+from mad_driving.interfaces import SceneSnapshot
 
 
 class FakeLane:
@@ -101,6 +104,13 @@ def test_run_smoke_resets_steps_until_done_and_always_closes() -> None:
     assert result.truncated is False
     assert result.final_snapshot.step_index == 2
     assert result.final_snapshot.scenario_id == "unit_smoke"
+    assert len(result.final_claims) == 3
+    assert tuple(claim.agent_id for claim in result.final_claims) == (
+        "nominal",
+        "hazard",
+        "rule",
+    )
+    assert result.final_review.unresolved_conflict is False
 
 
 def test_run_smoke_closes_when_step_raises() -> None:
@@ -115,6 +125,50 @@ def test_run_smoke_closes_when_step_raises() -> None:
         run_smoke(make_config(), env_factory=factory)
 
     assert created[0].closed is True
+
+
+class FailingSuite:
+    def analyze(self, snapshot: SceneSnapshot):
+        del snapshot
+        raise RuntimeError("analysis failed")
+
+
+def test_run_smoke_closes_when_agent_analysis_raises() -> None:
+    created: list[FakeEnv] = []
+
+    def factory(options: dict[str, object]) -> FakeEnv:
+        env = FakeEnv(options)
+        created.append(env)
+        return env
+
+    with pytest.raises(RuntimeError, match="analysis failed"):
+        run_smoke(
+            make_config(),
+            env_factory=factory,
+            suite_factory=lambda config: FailingSuite(),
+        )
+
+    assert created[0].closed is True
+
+
+def test_main_serializes_claims_and_review_as_finite_json(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = run_smoke(make_config(), env_factory=FakeEnv)
+    monkeypatch.setattr(smoke_module, "load_config", lambda path: make_config())
+    monkeypatch.setattr(smoke_module, "run_smoke", lambda config: result)
+
+    exit_code = main(["--config", "ignored.yaml"])
+
+    output = capsys.readouterr().out
+    document = json.loads(
+        output,
+        parse_constant=lambda value: (_ for _ in ()).throw(ValueError(f"non-finite JSON: {value}")),
+    )
+    assert exit_code == 0
+    assert len(document["final_claims"]) == 3
+    assert "conflict_score" in document["final_review"]
 
 
 def test_main_reports_missing_config_without_traceback(capsys: pytest.CaptureFixture[str]) -> None:
