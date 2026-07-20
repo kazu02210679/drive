@@ -72,7 +72,7 @@ def test_reward_components_are_signed_finite_and_sum_to_total() -> None:
     result = calculate(make_context())
 
     assert tuple(result.components) == EXPECTED_COMPONENT_KEYS
-    assert result.total == pytest.approx(sum(result.components.values()))
+    assert result.total == sum(result.components.values())
     assert result.components["progress_reward"] > 0.0
     assert result.components["arrival_reward"] >= 0.0
     assert all(value <= 0.0 for key, value in result.components.items() if "penalty" in key)
@@ -282,6 +282,90 @@ def test_unnecessary_brake_penalty_scales_with_action_index() -> None:
     assert result.components["unnecessary_brake_penalty"] == -0.4
 
 
+def test_missing_hazard_claim_prevents_unnecessary_brake_penalty() -> None:
+    calculator = RewardCalculator(RewardConfig(unnecessary_brake_lookahead_steps=1))
+    context = make_safe_braking_context(post_step_claims=(make_claim("rule"),))
+
+    result = calculator.calculate(context)
+
+    assert result.components["unnecessary_brake_penalty"] == 0.0
+
+
+def test_missing_explicit_rule_claim_prevents_unnecessary_brake_penalty() -> None:
+    calculator = RewardCalculator(RewardConfig(unnecessary_brake_lookahead_steps=1))
+    context = make_safe_braking_context(
+        post_step_claims=(make_claim("hazard", severity=0.1, min_ttc_s=6.0),)
+    )
+
+    result = calculator.calculate(context)
+
+    assert result.components["unnecessary_brake_penalty"] == 0.0
+
+
+def test_keep_action_clears_accumulated_unnecessary_brake_streak() -> None:
+    calculator = RewardCalculator(RewardConfig(unnecessary_brake_lookahead_steps=2))
+    safe_braking = make_safe_braking_context()
+    assert calculator.calculate(safe_braking).components["unnecessary_brake_penalty"] == 0.0
+
+    keep = make_safe_braking_context(executed_action=DrivingAction.KEEP)
+    assert calculator.calculate(keep).components["unnecessary_brake_penalty"] == 0.0
+
+    after_keep = calculator.calculate(safe_braking)
+    assert after_keep.components["unnecessary_brake_penalty"] == 0.0
+
+
+def test_unnecessary_brake_safe_ttc_threshold_is_inclusive() -> None:
+    config = RewardConfig(unnecessary_brake_lookahead_steps=1)
+    calculator = RewardCalculator(config)
+    context = make_safe_braking_context(
+        post_step_claims=(
+            make_claim(
+                "hazard",
+                severity=0.1,
+                min_ttc_s=config.unnecessary_brake_safe_ttc_s,
+            ),
+            make_claim("rule"),
+        )
+    )
+
+    result = calculator.calculate(context)
+
+    assert result.components["unnecessary_brake_penalty"] == -0.2
+
+
+def test_snapshot_stop_required_clears_unnecessary_brake_streak() -> None:
+    calculator = RewardCalculator(RewardConfig(unnecessary_brake_lookahead_steps=2))
+    safe_braking = make_safe_braking_context()
+    assert calculator.calculate(safe_braking).components["unnecessary_brake_penalty"] == 0.0
+
+    context = replace(
+        safe_braking,
+        next_snapshot=replace(safe_braking.next_snapshot, stop_required=True),
+    )
+    assert calculator.calculate(context).components["unnecessary_brake_penalty"] == 0.0
+
+    after_constraint = calculator.calculate(safe_braking)
+    assert after_constraint.components["unnecessary_brake_penalty"] == 0.0
+
+
+def test_intersection_entry_prohibited_clears_unnecessary_brake_streak() -> None:
+    calculator = RewardCalculator(RewardConfig(unnecessary_brake_lookahead_steps=2))
+    safe_braking = make_safe_braking_context()
+    assert calculator.calculate(safe_braking).components["unnecessary_brake_penalty"] == 0.0
+
+    context = replace(
+        safe_braking,
+        next_snapshot=replace(
+            safe_braking.next_snapshot,
+            intersection_entry_prohibited=True,
+        ),
+    )
+    assert calculator.calculate(context).components["unnecessary_brake_penalty"] == 0.0
+
+    after_constraint = calculator.calculate(safe_braking)
+    assert after_constraint.components["unnecessary_brake_penalty"] == 0.0
+
+
 @pytest.mark.parametrize(("speed_mps", "expected"), [(0.1, -0.25), (0.11, 0.0)])
 def test_standstill_penalty_uses_post_step_speed_and_elapsed_time(
     speed_mps: float, expected: float
@@ -324,3 +408,29 @@ def test_reward_result_copies_mutable_component_mapping() -> None:
     assert result.components == {"progress_reward": 1.0}
     with pytest.raises(FrozenInstanceError):
         result.total = 2.0  # type: ignore[misc]
+
+
+@pytest.mark.parametrize("total", [math.inf, math.nan])
+def test_reward_result_rejects_non_finite_total(total: float) -> None:
+    with pytest.raises(ValueError, match="reward total must be finite"):
+        RewardResult(total=total, components={"progress_reward": 0.0})
+
+
+@pytest.mark.parametrize("component", [math.inf, math.nan])
+def test_reward_result_rejects_non_finite_component(component: float) -> None:
+    with pytest.raises(ValueError, match="reward components must be finite"):
+        RewardResult(total=0.0, components={"progress_reward": component})
+
+
+def test_reward_result_rejects_mismatched_total() -> None:
+    with pytest.raises(ValueError, match="reward total must equal the sum of components"):
+        RewardResult(total=2.0, components={"progress_reward": 1.0})
+
+
+def test_reward_result_accepts_exact_component_sum() -> None:
+    result = RewardResult(
+        total=3.0,
+        components={"progress_reward": 1.0, "arrival_reward": 2.0},
+    )
+
+    assert result.total == sum(result.components.values())
