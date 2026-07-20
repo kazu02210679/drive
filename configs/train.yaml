@@ -99,7 +99,6 @@ reward:
   unnecessary_brake_scale: 0.20
   unnecessary_brake_severity_threshold: 0.25
   unnecessary_brake_safe_ttc_s: 5.0
-  unnecessary_brake_lookahead_steps: 3
   standstill_per_second: 0.50
   standstill_speed_mps: 0.10
   shield_intervention: 2.0

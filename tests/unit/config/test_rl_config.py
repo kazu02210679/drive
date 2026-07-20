@@ -128,3 +128,8 @@ def test_ppo_rollout_size_must_be_divisible_by_batch() -> None:
 def test_standstill_speed_threshold_must_be_positive() -> None:
     with pytest.raises(ValidationError, match="standstill_speed_mps"):
         RewardConfig(standstill_speed_mps=0.0)
+
+
+def test_stale_unnecessary_brake_lookahead_setting_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="unnecessary_brake_lookahead_steps"):
+        RewardConfig.model_validate({"unnecessary_brake_lookahead_steps": 3})

@@ -4,35 +4,28 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Literal
 
+from mad_driving.agents.suite import AgentAnalysisResult
 from mad_driving.config.models import RewardConfig
 from mad_driving.control.actions import DrivingAction
-from mad_driving.interfaces import RiskClaim, SceneSnapshot
+from mad_driving.interfaces import CollisionKind, RiskClaim, SceneFrame
 from mad_driving.interfaces._validation import require_action, require_positive
-
-CollisionKind = Literal["vehicle", "crossing_actor"]
 
 
 @dataclass(frozen=True)
 class RewardContext:
     """Immutable inputs for one post-step reward calculation."""
 
-    previous_snapshot: SceneSnapshot
-    next_snapshot: SceneSnapshot
-    post_step_claims: tuple[RiskClaim, ...]
+    previous_frame: SceneFrame
+    next_frame: SceneFrame
+    analysis: AgentAnalysisResult
     executed_action: int
     shield_intervened: bool
-    arrived: bool
-    collision_kind: CollisionKind | None
     decision_interval_s: float
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "post_step_claims", tuple(self.post_step_claims))
         require_action("executed_action", self.executed_action)
         require_positive("decision_interval_s", self.decision_interval_s)
-        if self.collision_kind not in (None, "vehicle", "crossing_actor"):
-            raise ValueError("collision_kind must be vehicle, crossing_actor, or None")
 
 
 @dataclass(frozen=True)
@@ -61,9 +54,8 @@ class RewardCalculator:
         self.reset()
 
     def reset(self) -> None:
-        """Clear episode-local arrival and safe-braking state."""
+        """Clear episode-local arrival state."""
 
-        self._safe_brake_streak = 0
         self._arrival_rewarded = False
 
     def calculate(self, context: RewardContext) -> RewardResult:
@@ -71,13 +63,14 @@ class RewardCalculator:
 
         dt = self._elapsed_time(context)
         rule_constraint = self._has_rule_constraint(context)
-        min_ttc_s = self._minimum_ttc(context.post_step_claims)
+        min_ttc_s = self._minimum_ttc(context.analysis.claims)
+        privileged = context.next_frame.privileged
         components = {
             "progress_reward": self._progress_reward(context),
-            "arrival_reward": self._arrival_reward(context.arrived),
-            "collision_penalty": self._collision_penalty(context.collision_kind),
+            "arrival_reward": self._arrival_reward(privileged.arrived),
+            "collision_penalty": self._collision_penalty(privileged.collision_kind),
             "near_miss_penalty": self._near_miss_penalty(min_ttc_s),
-            "offroad_penalty": -self._config.offroad if context.next_snapshot.off_road else 0.0,
+            "offroad_penalty": -self._config.offroad if privileged.off_road else 0.0,
             "rule_violation_penalty": (
                 -self._config.hard_rule_violation
                 if rule_constraint and context.executed_action < DrivingAction.STOP
@@ -89,7 +82,8 @@ class RewardCalculator:
             ),
             "standstill_penalty": (
                 -self._config.standstill_per_second * dt
-                if context.next_snapshot.ego.speed_mps <= self._config.standstill_speed_mps
+                if context.next_frame.observation.ego.speed_mps
+                <= self._config.standstill_speed_mps
                 else 0.0
             ),
             "shield_intervention_penalty": (
@@ -105,12 +99,15 @@ class RewardCalculator:
 
     @staticmethod
     def _elapsed_time(context: RewardContext) -> float:
-        elapsed = context.next_snapshot.sim_time_s - context.previous_snapshot.sim_time_s
+        elapsed = (
+            context.next_frame.observation.sim_time_s
+            - context.previous_frame.observation.sim_time_s
+        )
         return elapsed if elapsed > 0.0 else context.decision_interval_s
 
     def _progress_reward(self, context: RewardContext) -> float:
-        previous_ego = context.previous_snapshot.ego
-        next_ego = context.next_snapshot.ego
+        previous_ego = context.previous_frame.observation.ego
+        next_ego = context.next_frame.observation.ego
         delta_x = next_ego.position_xy_m[0] - previous_ego.position_xy_m[0]
         delta_y = next_ego.position_xy_m[1] - previous_ego.position_xy_m[1]
         forward_distance = delta_x * math.cos(previous_ego.heading_rad) + delta_y * math.sin(
@@ -144,20 +141,20 @@ class RewardCalculator:
 
     @staticmethod
     def _has_rule_constraint(context: RewardContext) -> bool:
-        snapshot = context.next_snapshot
+        observation = context.next_frame.observation
         return (
-            snapshot.stop_required
-            or snapshot.intersection_entry_prohibited
+            observation.road_context.stop_required
+            or observation.road_context.intersection_entry_prohibited
             or any(
                 claim.agent_id == "rule" and claim.hard_stop_required
-                for claim in context.post_step_claims
+                for claim in context.analysis.claims
             )
         )
 
     def _jerk_penalty(self, context: RewardContext, dt: float) -> float:
         acceleration_delta = abs(
-            context.next_snapshot.ego.acceleration_mps2
-            - context.previous_snapshot.ego.acceleration_mps2
+            context.next_frame.observation.ego.acceleration_mps2
+            - context.previous_frame.observation.ego.acceleration_mps2
         )
         return -self._config.jerk_scale * acceleration_delta / dt
 
@@ -167,31 +164,30 @@ class RewardCalculator:
         min_ttc_s: float | None,
         rule_constraint: bool,
     ) -> float:
-        hazard_claims = tuple(
-            claim for claim in context.post_step_claims if claim.agent_id == "hazard"
+        claims = context.analysis.claims
+        hazard_claims = tuple(claim for claim in claims if claim.agent_id == "hazard")
+        rule_claims = tuple(claim for claim in claims if claim.agent_id == "rule")
+        privileged = context.next_frame.privileged
+        safe_ttc = (
+            min_ttc_s is None
+            or min_ttc_s >= self._config.unnecessary_brake_safe_ttc_s
         )
-        has_rule_claim = any(claim.agent_id == "rule" for claim in context.post_step_claims)
         safe_post_step = (
             bool(hazard_claims)
-            and has_rule_claim
+            and bool(rule_claims)
+            and "hazard" not in context.analysis.failed_agent_ids
+            and "rule" not in context.analysis.failed_agent_ids
             and all(
                 claim.severity < self._config.unnecessary_brake_severity_threshold
                 for claim in hazard_claims
             )
             and not rule_constraint
-            and min_ttc_s is not None
-            and min_ttc_s >= self._config.unnecessary_brake_safe_ttc_s
-            and context.collision_kind is None
-            and not context.next_snapshot.collision_occurred
-            and not context.next_snapshot.off_road
+            and safe_ttc
+            and not privileged.collision_occurred
+            and not privileged.off_road
             and not context.shield_intervened
         )
         braking = context.executed_action >= DrivingAction.SLOW
         if not (safe_post_step and braking):
-            self._safe_brake_streak = 0
-            return 0.0
-
-        self._safe_brake_streak += 1
-        if self._safe_brake_streak < self._config.unnecessary_brake_lookahead_steps:
             return 0.0
         return -self._config.unnecessary_brake_scale * context.executed_action

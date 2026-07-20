@@ -1,4 +1,4 @@
-"""Tests for the stateful ten-component transition reward."""
+"""Tests for the frame-based, ten-component transition reward."""
 
 import math
 from dataclasses import FrozenInstanceError, replace
@@ -8,7 +8,7 @@ import pytest
 from mad_driving.config.models import RewardConfig
 from mad_driving.control.actions import DrivingAction
 from mad_driving.envs.reward import RewardCalculator, RewardContext, RewardResult
-from tests.unit.agents.factories import make_claim, make_snapshot
+from tests.unit.agents.factories import make_analysis, make_claim, make_frame, make_snapshot
 
 EXPECTED_COMPONENT_KEYS = (
     "progress_reward",
@@ -25,27 +25,20 @@ EXPECTED_COMPONENT_KEYS = (
 
 
 def make_context(**overrides: object) -> RewardContext:
-    previous = make_snapshot(step_index=10, sim_time_s=1.0)
-    next_snapshot = make_snapshot(step_index=11, sim_time_s=2.0)
-    next_snapshot = replace(
-        next_snapshot,
-        ego=replace(
-            next_snapshot.ego,
-            position_xy_m=(10.0, 0.0),
-            speed_mps=1.0,
-        ),
+    previous_observation = make_snapshot(step_index=10, sim_time_s=1.0)
+    next_observation = make_snapshot(step_index=11, sim_time_s=2.0, ego_speed_mps=1.0)
+    next_observation = replace(
+        next_observation,
+        ego=replace(next_observation.ego, position_xy_m=(10.0, 0.0)),
     )
     values: dict[str, object] = {
-        "previous_snapshot": previous,
-        "next_snapshot": next_snapshot,
-        "post_step_claims": (
-            make_claim("hazard", min_ttc_s=10.0),
-            make_claim("rule"),
+        "previous_frame": make_frame(observation=previous_observation),
+        "next_frame": make_frame(observation=next_observation),
+        "analysis": make_analysis(
+            claims=(make_claim("nominal"), make_claim("hazard"), make_claim("rule"))
         ),
         "executed_action": DrivingAction.KEEP,
         "shield_intervened": False,
-        "arrived": False,
-        "collision_kind": None,
         "decision_interval_s": 0.1,
     }
     values.update(overrides)
@@ -58,9 +51,12 @@ def calculate(context: RewardContext, config: RewardConfig | None = None) -> Rew
 
 def make_safe_braking_context(**overrides: object) -> RewardContext:
     values: dict[str, object] = {
-        "post_step_claims": (
-            make_claim("hazard", severity=0.1, min_ttc_s=6.0),
-            make_claim("rule", hard_stop_required=False),
+        "analysis": make_analysis(
+            claims=(
+                make_claim("nominal"),
+                make_claim("hazard", severity=0.1, min_ttc_s=6.0),
+                make_claim("rule", hard_stop_required=False),
+            )
         ),
         "executed_action": DrivingAction.SLOW,
     }
@@ -84,25 +80,37 @@ def test_reward_components_are_signed_finite_and_sum_to_total() -> None:
     ("displacement", "expected"),
     [((3.0, 4.0), 0.4), ((3.0, -4.0), 0.0)],
 )
-def test_progress_projects_forward_on_previous_heading_only(
+def test_progress_uses_previous_heading_and_frame_transition(
     displacement: tuple[float, float], expected: float
 ) -> None:
-    previous = make_snapshot(step_index=1, sim_time_s=1.0)
-    previous = replace(previous, ego=replace(previous.ego, heading_rad=math.pi / 2.0))
-    next_snapshot = make_snapshot(step_index=2, sim_time_s=2.0)
-    next_snapshot = replace(
-        next_snapshot,
-        ego=replace(next_snapshot.ego, position_xy_m=displacement, speed_mps=1.0),
+    context = make_context()
+    previous = replace(
+        context.previous_frame.observation,
+        ego=replace(context.previous_frame.observation.ego, heading_rad=math.pi / 2.0),
+    )
+    next_observation = replace(
+        context.next_frame.observation,
+        ego=replace(
+            context.next_frame.observation.ego,
+            position_xy_m=displacement,
+            speed_mps=1.0,
+        ),
     )
 
-    result = calculate(make_context(previous_snapshot=previous, next_snapshot=next_snapshot))
+    result = calculate(
+        replace(
+            context,
+            previous_frame=make_frame(observation=previous),
+            next_frame=make_frame(observation=next_observation),
+        )
+    )
 
     assert result.components["progress_reward"] == pytest.approx(expected)
 
 
-def test_arrival_reward_is_one_shot_and_resettable() -> None:
+def test_arrival_reward_uses_next_privileged_state_once_per_episode() -> None:
     calculator = RewardCalculator(RewardConfig())
-    context = make_context(arrived=True)
+    context = make_context(next_frame=make_frame(arrived=True))
 
     rewards = [calculator.calculate(context).components["arrival_reward"] for _ in range(2)]
     calculator.reset()
@@ -116,8 +124,12 @@ def test_arrival_reward_is_one_shot_and_resettable() -> None:
     ("collision_kind", "expected"),
     [("vehicle", -200.0), ("crossing_actor", -500.0), (None, 0.0)],
 )
-def test_collision_penalty_uses_collision_kind(collision_kind: str | None, expected: float) -> None:
-    result = calculate(make_context(collision_kind=collision_kind))
+def test_collision_penalty_uses_next_privileged_state(
+    collision_kind: str | None, expected: float
+) -> None:
+    result = calculate(
+        make_context(next_frame=make_frame(collision_occurred=True, collision_kind=collision_kind))
+    )
 
     assert result.components["collision_penalty"] == expected
 
@@ -126,259 +138,230 @@ def test_collision_penalty_uses_collision_kind(collision_kind: str | None, expec
     ("ttc_s", "expected"),
     [(0.0, -50.0), (1.5, -12.5), (3.0, 0.0), (4.0, 0.0)],
 )
-def test_near_miss_penalty_is_continuous_quadratic(ttc_s: float, expected: float) -> None:
-    claims = (
-        make_claim("nominal", min_ttc_s=ttc_s),
-        make_claim("hazard", min_ttc_s=ttc_s + 1.0),
+def test_near_miss_penalty_uses_current_analysis(ttc_s: float, expected: float) -> None:
+    result = calculate(
+        make_context(
+            analysis=make_analysis(
+                claims=(
+                    make_claim("nominal", min_ttc_s=ttc_s),
+                    make_claim("hazard", min_ttc_s=ttc_s + 1.0),
+                    make_claim("rule"),
+                )
+            )
+        )
     )
-
-    result = calculate(make_context(post_step_claims=claims))
 
     assert result.components["near_miss_penalty"] == pytest.approx(expected)
 
 
-@pytest.mark.parametrize(("off_road", "expected"), [(True, -100.0), (False, 0.0)])
-def test_offroad_penalty_uses_post_step_snapshot(off_road: bool, expected: float) -> None:
-    context = make_context()
-    next_snapshot = replace(context.next_snapshot, off_road=off_road)
+def test_raw_out_of_road_privileged_state_drives_penalty() -> None:
+    result = calculate(make_context(next_frame=make_frame(off_road=True)))
 
-    result = calculate(replace(context, next_snapshot=next_snapshot))
-
-    assert result.components["offroad_penalty"] == expected
+    assert result.components["offroad_penalty"] == -100.0
 
 
 @pytest.mark.parametrize("source", ["claim", "stop_required", "intersection_prohibited"])
-def test_rule_violation_penalizes_non_stop_action_for_any_hard_constraint(source: str) -> None:
+def test_rule_violation_uses_current_rule_constraint(source: str) -> None:
     context = make_context(executed_action=DrivingAction.PREPARE_STOP)
-    claims = context.post_step_claims
-    next_snapshot = context.next_snapshot
+    analysis = context.analysis
+    next_observation = context.next_frame.observation
     if source == "claim":
-        claims = (make_claim("rule", hard_stop_required=True),)
+        analysis = make_analysis(claims=(make_claim("rule", hard_stop_required=True),))
     elif source == "stop_required":
-        next_snapshot = replace(next_snapshot, stop_required=True)
+        next_observation = replace(
+            next_observation,
+            road_context=replace(next_observation.road_context, stop_required=True),
+        )
     else:
-        next_snapshot = replace(next_snapshot, intersection_entry_prohibited=True)
+        next_observation = replace(
+            next_observation,
+            road_context=replace(
+                next_observation.road_context,
+                intersection_entry_prohibited=True,
+            ),
+        )
 
-    result = calculate(replace(context, post_step_claims=claims, next_snapshot=next_snapshot))
-
-    assert result.components["rule_violation_penalty"] == -100.0
-
-
-def test_rule_violation_allows_stop_action() -> None:
-    context = make_context(
-        post_step_claims=(make_claim("rule", hard_stop_required=True),),
-        executed_action=DrivingAction.STOP,
+    result = calculate(
+        replace(
+            context,
+            analysis=analysis,
+            next_frame=make_frame(observation=next_observation),
+        )
     )
 
-    result = calculate(context)
-
-    assert result.components["rule_violation_penalty"] == 0.0
+    assert result.components["rule_violation_penalty"] == -100.0
 
 
 @pytest.mark.parametrize(
     ("previous_time", "next_time", "fallback_dt", "expected"),
     [(1.0, 1.5, 0.1, -0.2), (1.0, 1.0, 0.25, -0.4)],
 )
-def test_jerk_penalty_uses_elapsed_or_fallback_decision_interval(
+def test_jerk_penalty_uses_frame_elapsed_time_or_decision_interval(
     previous_time: float, next_time: float, fallback_dt: float, expected: float
 ) -> None:
     context = make_context(decision_interval_s=fallback_dt)
-    previous = replace(
-        context.previous_snapshot,
+    previous_observation = replace(
+        context.previous_frame.observation,
         sim_time_s=previous_time,
-        ego=replace(context.previous_snapshot.ego, acceleration_mps2=1.0),
+        ego=replace(context.previous_frame.observation.ego, acceleration_mps2=1.0),
     )
-    next_snapshot = replace(
-        context.next_snapshot,
+    next_observation = replace(
+        context.next_frame.observation,
         sim_time_s=next_time,
-        ego=replace(context.next_snapshot.ego, acceleration_mps2=3.0),
+        ego=replace(context.next_frame.observation.ego, acceleration_mps2=3.0),
     )
 
-    result = calculate(replace(context, previous_snapshot=previous, next_snapshot=next_snapshot))
+    result = calculate(
+        replace(
+            context,
+            previous_frame=make_frame(observation=previous_observation),
+            next_frame=make_frame(observation=next_observation),
+        )
+    )
 
     assert result.components["jerk_penalty"] == pytest.approx(expected)
 
 
-def test_unnecessary_brake_penalty_starts_after_safe_lookahead_and_reset() -> None:
-    calculator = RewardCalculator(RewardConfig(unnecessary_brake_lookahead_steps=3))
+def test_no_actor_safe_scene_penalizes_unnecessary_stop_immediately() -> None:
+    context = make_context(
+        analysis=make_analysis(
+            claims=(
+                make_claim("nominal", min_ttc_s=None, severity=0.0),
+                make_claim("hazard", min_ttc_s=None, severity=0.0),
+                make_claim("rule", min_ttc_s=None, severity=0.0),
+            )
+        ),
+        executed_action=DrivingAction.STOP,
+    )
 
-    penalties = [
-        calculator.calculate(make_safe_braking_context()).components["unnecessary_brake_penalty"]
-        for _ in range(4)
-    ]
-    calculator.reset()
-    after_reset = calculator.calculate(make_safe_braking_context()).components[
-        "unnecessary_brake_penalty"
-    ]
+    result = RewardCalculator(RewardConfig()).calculate(context)
 
-    assert penalties == [0.0, 0.0, -0.2, -0.2]
-    assert after_reset == 0.0
+    assert result.components["unnecessary_brake_penalty"] == pytest.approx(-0.6)
+
+
+def test_current_safe_stop_does_not_wait_for_future_steps() -> None:
+    calculator = RewardCalculator(RewardConfig())
+    context = make_safe_braking_context(executed_action=DrivingAction.STOP)
+
+    first = calculator.calculate(context).components["unnecessary_brake_penalty"]
+    second = calculator.calculate(context).components["unnecessary_brake_penalty"]
+
+    assert first == pytest.approx(-0.6)
+    assert second == pytest.approx(-0.6)
 
 
 @pytest.mark.parametrize(
-    "dangerous_context",
+    "analysis",
     [
-        make_safe_braking_context(
-            post_step_claims=(
-                make_claim("hazard", severity=0.25, min_ttc_s=6.0),
-                make_claim("rule"),
-            )
+        make_analysis(claims=(make_claim("nominal"), make_claim("rule"))),
+        make_analysis(claims=(make_claim("nominal"), make_claim("hazard"))),
+        make_analysis(
+            claims=(make_claim("hazard"), make_claim("rule")),
+            failed_agent_ids=("hazard",),
+            errors=("hazard:RuntimeError:failed",),
         ),
-        make_safe_braking_context(
-            post_step_claims=(
-                make_claim("hazard", severity=0.1, min_ttc_s=4.99),
-                make_claim("rule"),
-            )
+        make_analysis(
+            claims=(make_claim("hazard"), make_claim("rule")),
+            failed_agent_ids=("rule",),
+            errors=("rule:RuntimeError:failed",),
         ),
-        make_safe_braking_context(
-            post_step_claims=(
-                make_claim("hazard", severity=0.1, min_ttc_s=6.0),
-                make_claim("rule", hard_stop_required=True),
-            )
-        ),
-        replace(
-            make_safe_braking_context(),
-            next_snapshot=replace(make_safe_braking_context().next_snapshot, off_road=True),
-        ),
-        make_safe_braking_context(collision_kind="vehicle"),
-        replace(
-            make_safe_braking_context(),
-            next_snapshot=replace(
-                make_safe_braking_context().next_snapshot, collision_occurred=True
-            ),
-        ),
-        make_safe_braking_context(shield_intervened=True),
     ],
-    ids=[
-        "hazard",
+    ids=["missing_hazard", "missing_rule", "failed_hazard", "failed_rule"],
+)
+def test_missing_or_failed_specialist_suppresses_unnecessary_brake_judgment(
+    analysis: object,
+) -> None:
+    result = calculate(make_safe_braking_context(analysis=analysis))
+
+    assert result.components["unnecessary_brake_penalty"] == 0.0
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "severity",
         "ttc",
         "rule",
         "offroad",
-        "collision_kind",
-        "snapshot_collision",
+        "collision",
         "shield",
     ],
 )
-def test_dangerous_post_step_event_clears_unnecessary_brake_streak(
-    dangerous_context: RewardContext,
-) -> None:
-    calculator = RewardCalculator(RewardConfig(unnecessary_brake_lookahead_steps=2))
-    safe = make_safe_braking_context(executed_action=DrivingAction.STOP)
-    assert calculator.calculate(safe).components["unnecessary_brake_penalty"] == 0.0
-
-    assert calculator.calculate(dangerous_context).components["unnecessary_brake_penalty"] == 0.0
-    after_danger = calculator.calculate(safe).components["unnecessary_brake_penalty"]
-
-    assert after_danger == 0.0
-
-
-def test_unnecessary_brake_penalty_scales_with_action_index() -> None:
-    calculator = RewardCalculator(RewardConfig(unnecessary_brake_lookahead_steps=1))
-
-    result = calculator.calculate(
-        make_safe_braking_context(executed_action=DrivingAction.PREPARE_STOP)
-    )
-
-    assert result.components["unnecessary_brake_penalty"] == -0.4
-
-
-def test_missing_hazard_claim_prevents_unnecessary_brake_penalty() -> None:
-    calculator = RewardCalculator(RewardConfig(unnecessary_brake_lookahead_steps=1))
-    context = make_safe_braking_context(post_step_claims=(make_claim("rule"),))
-
-    result = calculator.calculate(context)
-
-    assert result.components["unnecessary_brake_penalty"] == 0.0
-
-
-def test_missing_explicit_rule_claim_prevents_unnecessary_brake_penalty() -> None:
-    calculator = RewardCalculator(RewardConfig(unnecessary_brake_lookahead_steps=1))
-    context = make_safe_braking_context(
-        post_step_claims=(make_claim("hazard", severity=0.1, min_ttc_s=6.0),)
-    )
-
-    result = calculator.calculate(context)
-
-    assert result.components["unnecessary_brake_penalty"] == 0.0
-
-
-def test_keep_action_clears_accumulated_unnecessary_brake_streak() -> None:
-    calculator = RewardCalculator(RewardConfig(unnecessary_brake_lookahead_steps=2))
-    safe_braking = make_safe_braking_context()
-    assert calculator.calculate(safe_braking).components["unnecessary_brake_penalty"] == 0.0
-
-    keep = make_safe_braking_context(executed_action=DrivingAction.KEEP)
-    assert calculator.calculate(keep).components["unnecessary_brake_penalty"] == 0.0
-
-    after_keep = calculator.calculate(safe_braking)
-    assert after_keep.components["unnecessary_brake_penalty"] == 0.0
-
-
-def test_unnecessary_brake_safe_ttc_threshold_is_inclusive() -> None:
-    config = RewardConfig(unnecessary_brake_lookahead_steps=1)
-    calculator = RewardCalculator(config)
-    context = make_safe_braking_context(
-        post_step_claims=(
-            make_claim(
-                "hazard",
-                severity=0.1,
-                min_ttc_s=config.unnecessary_brake_safe_ttc_s,
-            ),
-            make_claim("rule"),
+def test_current_safety_event_suppresses_unnecessary_brake_penalty(case: str) -> None:
+    if case == "severity":
+        context = make_safe_braking_context(
+            analysis=make_analysis(
+                claims=(
+                    make_claim("hazard", severity=0.25, min_ttc_s=6.0),
+                    make_claim("rule"),
+                )
+            )
         )
-    )
+    elif case == "ttc":
+        context = make_safe_braking_context(
+            analysis=make_analysis(
+                claims=(
+                    make_claim("hazard", severity=0.1, min_ttc_s=4.99),
+                    make_claim("rule"),
+                )
+            )
+        )
+    elif case == "rule":
+        context = make_safe_braking_context(
+            analysis=make_analysis(
+                claims=(
+                    make_claim("hazard", severity=0.1, min_ttc_s=6.0),
+                    make_claim("rule", hard_stop_required=True),
+                )
+            )
+        )
+    elif case == "offroad":
+        context = make_safe_braking_context(next_frame=make_frame(off_road=True))
+    elif case == "collision":
+        context = make_safe_braking_context(
+            next_frame=make_frame(collision_occurred=True, collision_kind="vehicle")
+        )
+    else:
+        context = make_safe_braking_context(shield_intervened=True)
 
-    result = calculator.calculate(context)
+    result = calculate(context)
+
+    assert result.components["unnecessary_brake_penalty"] == 0.0
+
+
+def test_safe_ttc_threshold_is_inclusive() -> None:
+    config = RewardConfig()
+    result = calculate(
+        make_safe_braking_context(
+            analysis=make_analysis(
+                claims=(
+                    make_claim(
+                        "hazard",
+                        severity=0.1,
+                        min_ttc_s=config.unnecessary_brake_safe_ttc_s,
+                    ),
+                    make_claim("rule"),
+                )
+            )
+        ),
+        config,
+    )
 
     assert result.components["unnecessary_brake_penalty"] == -0.2
 
 
-def test_snapshot_stop_required_clears_unnecessary_brake_streak() -> None:
-    calculator = RewardCalculator(RewardConfig(unnecessary_brake_lookahead_steps=2))
-    safe_braking = make_safe_braking_context()
-    assert calculator.calculate(safe_braking).components["unnecessary_brake_penalty"] == 0.0
-
-    context = replace(
-        safe_braking,
-        next_snapshot=replace(safe_braking.next_snapshot, stop_required=True),
-    )
-    assert calculator.calculate(context).components["unnecessary_brake_penalty"] == 0.0
-
-    after_constraint = calculator.calculate(safe_braking)
-    assert after_constraint.components["unnecessary_brake_penalty"] == 0.0
-
-
-def test_intersection_entry_prohibited_clears_unnecessary_brake_streak() -> None:
-    calculator = RewardCalculator(RewardConfig(unnecessary_brake_lookahead_steps=2))
-    safe_braking = make_safe_braking_context()
-    assert calculator.calculate(safe_braking).components["unnecessary_brake_penalty"] == 0.0
-
-    context = replace(
-        safe_braking,
-        next_snapshot=replace(
-            safe_braking.next_snapshot,
-            intersection_entry_prohibited=True,
-        ),
-    )
-    assert calculator.calculate(context).components["unnecessary_brake_penalty"] == 0.0
-
-    after_constraint = calculator.calculate(safe_braking)
-    assert after_constraint.components["unnecessary_brake_penalty"] == 0.0
-
-
 @pytest.mark.parametrize(("speed_mps", "expected"), [(0.1, -0.25), (0.11, 0.0)])
-def test_standstill_penalty_uses_post_step_speed_and_elapsed_time(
+def test_standstill_penalty_uses_next_observation_speed(
     speed_mps: float, expected: float
 ) -> None:
     context = make_context()
-    previous = replace(context.previous_snapshot, sim_time_s=1.0)
-    next_snapshot = replace(
-        context.next_snapshot,
+    next_observation = replace(
+        context.next_frame.observation,
         sim_time_s=1.5,
-        ego=replace(context.next_snapshot.ego, speed_mps=speed_mps),
+        ego=replace(context.next_frame.observation.ego, speed_mps=speed_mps),
     )
 
-    result = calculate(replace(context, previous_snapshot=previous, next_snapshot=next_snapshot))
+    result = calculate(replace(context, next_frame=make_frame(observation=next_observation)))
 
     assert result.components["standstill_penalty"] == pytest.approx(expected)
 
@@ -392,16 +375,21 @@ def test_shield_intervention_penalty_requires_actual_intervention(
     assert result.components["shield_intervention_penalty"] == expected
 
 
-def test_non_finite_computed_output_is_rejected() -> None:
-    config = RewardConfig(progress_per_meter=1e308)
+@pytest.mark.parametrize("decision_interval_s", [0.0, -0.1, math.inf, math.nan])
+def test_reward_context_requires_positive_finite_decision_interval(
+    decision_interval_s: float,
+) -> None:
+    with pytest.raises(ValueError, match="decision_interval_s"):
+        make_context(decision_interval_s=decision_interval_s)
 
+
+def test_non_finite_computed_output_is_rejected() -> None:
     with pytest.raises(ValueError, match="finite"):
-        calculate(make_context(), config)
+        calculate(make_context(), RewardConfig(progress_per_meter=1e308))
 
 
 def test_reward_result_copies_mutable_component_mapping() -> None:
     source = {"progress_reward": 1.0}
-
     result = RewardResult(total=1.0, components=source)
     source["progress_reward"] = 2.0
 
