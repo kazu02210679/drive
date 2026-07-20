@@ -128,8 +128,10 @@ training:
 ```
 
 PPO既定値は仕様書をそのまま使う。`n_steps * num_envs`は`batch_size`以上かつ
-`batch_size`で割り切れることを起動時に検証する。Windowsでsubprocess vector envの
-構築に失敗した場合は同数の`DummyVecEnv`へフォールバックする。
+`batch_size`で割り切れることを起動時に検証する。複数環境では各MetaDrive engineを
+別processへ隔離する。subprocess vector envの構築に失敗した場合は、部分構築された
+workerの停止を確認して明示的に失敗する。同数の`DummyVecEnv`へのフォールバックは、
+MetaDrive 0.4.3のprocess単位のengine singleton制約を破るため行わない。
 
 ## Observation contract
 
@@ -274,7 +276,10 @@ runs/<run_id>/
 
 SB3の`CheckpointCallback`と`EvalCallback`を使い、追加callbackで
 `info["reward_components"]`をTensorBoardへ記録する。評価envは学習envと別instanceにする。
-全envは成功・例外の両方でcloseする。
+`EvalCallback`はbest checkpoint選択にだけ使い、Phase 6の評価artifactは保存しない。
+全envは成功・例外の両方でcloseし、subprocess workerは期限付きjoin、terminate、killの順で
+停止を確認する。cleanup失敗は成功として返さず、既存の学習例外がある場合はそれを保持して
+cleanup失敗をnoteへ記録する。
 
 CLIは次を提供する。
 

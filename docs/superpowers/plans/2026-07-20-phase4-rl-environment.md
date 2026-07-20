@@ -573,8 +573,8 @@ def test_run_training_uses_only_configured_ppo_values_and_closes_envs(tmp_path) 
 
 Add tests for 500,000 normal timesteps, unique train/eval env instances, checkpoint callback frequency
 scaled by number of envs, resume using `PPO.load(..., env=...)`, `reset_num_timesteps=False`,
-subprocess construction success, Windows-style construction failure falling back to `DummyVecEnv`,
-and cleanup on `learn()`/save failure.
+subprocess construction success, construction failure with verified cleanup and explicit error,
+bounded worker teardown, and cleanup on `learn()`/save failure.
 
 - [x] **Step 3: Write failing CLI tests**
 
@@ -611,14 +611,16 @@ model = PPO(
 
 Use built-in `CheckpointCallback` and `EvalCallback`; save `final_model.zip` explicitly. Serialize
 `config.model_dump(mode="json")` to `config_resolved.yaml` with safe YAML and stable key order.
-Use `SubprocVecEnv` only when `num_envs > 1`; catch construction failure, close partial resources,
-and rebuild an equal-count `DummyVecEnv`.
+Use `SubprocVecEnv` when `num_envs > 1`; on construction failure, close partial resources, prove
+workers stopped, and fail explicitly. Do not rebuild an equal-count `DummyVecEnv`: MetaDrive 0.4.3
+allows only one engine per process, so that fallback is unsafe. For `num_envs == 1`, isolate the
+separate evaluation environment in a one-worker `SubprocVecEnv` and use bounded, verified teardown.
 
 - [x] **Step 6: Run Task 6 tests and verify GREEN**
 
 Run: `.venv\Scripts\python.exe -m pytest tests/unit/training tests/unit/cli/test_train.py -v`
 
-Expected: all callback, lifecycle, resume, fallback, serialization, and CLI tests pass.
+Expected: all callback, lifecycle, resume, process-isolation, serialization, and CLI tests pass.
 
 - [x] **Step 7: Commit Task 6**
 

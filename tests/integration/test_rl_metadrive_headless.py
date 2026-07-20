@@ -1,11 +1,15 @@
 import math
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
+import gymnasium as gym
 import numpy as np
 import pytest
 from gymnasium.utils.env_checker import check_env
 from numpy.typing import NDArray
+from stable_baselines3.common.vec_env import SubprocVecEnv
 
 from mad_driving.config.loader import load_config
 from mad_driving.config.models import AppConfig
@@ -15,6 +19,16 @@ from mad_driving.training import run_training
 
 SEED = 42
 ACTION_SEQUENCE = tuple(index % 4 for index in range(100))
+
+
+class CapturingSubprocVecEnv(SubprocVecEnv):
+    latest: "CapturingSubprocVecEnv | None" = None
+
+    def __init__(self, env_fns: list[Callable[[], gym.Env[Any, Any]]]) -> None:
+        super().__init__(env_fns)
+        type(self).latest = self
+
+
 METADRIVE_INFO_KEYS = {
     "arrive_dest",
     "crash_vehicle",
@@ -156,8 +170,18 @@ def test_real_single_metadrive_training_isolates_evaluation_engine(tmp_path: Pat
     )
     config = AppConfig.model_validate(payload)
 
-    result = run_training(config, smoke=True, run_dir=tmp_path / "real-training")
+    CapturingSubprocVecEnv.latest = None
+    result = run_training(
+        config,
+        smoke=True,
+        run_dir=tmp_path / "real-training",
+        subproc_vec_env_factory=CapturingSubprocVecEnv,
+    )
 
     assert result.timesteps == 8
     assert zipfile.is_zipfile(result.best_checkpoint)
     assert zipfile.is_zipfile(result.final_checkpoint)
+    evaluation = CapturingSubprocVecEnv.latest
+    assert evaluation is not None
+    assert evaluation.closed is True
+    assert all(not process.is_alive() for process in evaluation.processes)

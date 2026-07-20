@@ -306,7 +306,12 @@ def test_run_training_uses_only_configured_ppo_values_and_closes_envs(tmp_path: 
     )
     run_dir = tmp_path / "run"
 
-    result, environments, dummy, _, evaluation = run_with_fakes(config, run_dir)
+    subproc = VecFactory()
+    result, environments, dummy, _, evaluation = run_with_fakes(
+        config,
+        run_dir,
+        subproc_factory=subproc,
+    )
 
     model = FakePPO.instances[0]
     train_env = dummy.created[0]
@@ -332,6 +337,8 @@ def test_run_training_uses_only_configured_ppo_values_and_closes_envs(tmp_path: 
     assert model.learn_kwargs["total_timesteps"] == 5_000
     assert model.learn_kwargs["reset_num_timesteps"] is True
     assert train_env is not eval_env
+    assert dummy.created == [train_env]
+    assert subproc.created == [eval_env]
     assert environments.created[0] is not environments.created[1]
     assert all(env.closed for env in environments.created)
     assert all(env.close_calls == 1 for env in environments.created)
@@ -346,6 +353,8 @@ def test_run_training_uses_only_configured_ppo_values_and_closes_envs(tmp_path: 
     assert result.best_checkpoint.is_file()
     assert zipfile.is_zipfile(result.final_checkpoint)
     assert zipfile.is_zipfile(result.best_checkpoint)
+    assert "log_path" not in evaluation.calls[0]
+    assert not (run_dir / "evaluation").exists()
 
 
 def test_normal_training_uses_500_000_timesteps(tmp_path: Path) -> None:
@@ -682,26 +691,27 @@ class FailingSubprocVecEnv:
             env.close()
 
 
-def test_subprocess_failure_closes_partial_resources_and_rebuilds_equal_dummy_count(
+def test_subprocess_failure_closes_partial_resources_and_fails_without_dummy_fallback(
     tmp_path: Path,
 ) -> None:
     dummy = VecFactory()
     environments = EnvFactory()
 
-    run_with_fakes(
-        make_config(num_envs=3),
-        tmp_path / "fallback",
-        env_factory=environments,
-        dummy_factory=dummy,
-        subproc_factory=FailingSubprocVecEnv,
-    )
+    with pytest.raises(OSError, match="Windows spawn failed"):
+        run_with_fakes(
+            make_config(num_envs=3),
+            tmp_path / "fallback",
+            env_factory=environments,
+            dummy_factory=dummy,
+            subproc_factory=FailingSubprocVecEnv,
+        )
 
     assert FailingSubprocVecEnv.latest is not None
     assert FailingSubprocVecEnv.latest.closed is True
     assert FailingSubprocVecEnv.latest.envs[0].closed is True
     assert FailingSubprocVecEnv.latest.envs[0].close_calls == 1
-    assert [vec.num_envs for vec in dummy.created] == [3, 1]
-    assert len(environments.created) == 5
+    assert dummy.created == []
+    assert len(environments.created) == 1
     assert all(env.closed for env in environments.created)
     assert all(env.close_calls == 1 for env in environments.created)
 
@@ -780,15 +790,18 @@ class UnsafeProcessFailingSubprocVecEnv:
         raise OSError("subprocess handshake failed")
 
 
-def test_subprocess_cleanup_confirms_workers_dead_before_dummy_fallback(tmp_path: Path) -> None:
+def test_subprocess_cleanup_confirms_workers_dead_before_reporting_construction_failure(
+    tmp_path: Path,
+) -> None:
     dummy = VecFactory()
 
-    run_with_fakes(
-        make_config(num_envs=3),
-        tmp_path / "process-fallback",
-        dummy_factory=dummy,
-        subproc_factory=ProcessFailingSubprocVecEnv,
-    )
+    with pytest.raises(OSError, match="subprocess handshake failed"):
+        run_with_fakes(
+            make_config(num_envs=3),
+            tmp_path / "process-fallback",
+            dummy_factory=dummy,
+            subproc_factory=ProcessFailingSubprocVecEnv,
+        )
 
     partial = ProcessFailingSubprocVecEnv.latest
     assert partial is not None
@@ -805,7 +818,7 @@ def test_subprocess_cleanup_confirms_workers_dead_before_dummy_fallback(tmp_path
     assert already_dead.join_calls == [1.0]
     assert all(process.is_alive() is False for process in partial.processes)
     assert all(process.is_alive_calls >= 2 for process in partial.processes)
-    assert [vec.num_envs for vec in dummy.created] == [3, 1]
+    assert dummy.created == []
 
 
 def test_subprocess_cleanup_refuses_fallback_when_worker_survives(tmp_path: Path) -> None:
@@ -828,6 +841,126 @@ def test_subprocess_cleanup_refuses_fallback_when_worker_survives(tmp_path: Path
     assert process.join_calls == [1.0, 1.0]
     assert process.is_alive() is True
     assert dummy.created == []
+
+
+class GracefulRemote(FakeRemote):
+    def __init__(self, process: FakeProcess) -> None:
+        super().__init__()
+        self.process = process
+        self.sent: list[tuple[str, None]] = []
+
+    def send(self, message: tuple[str, None]) -> None:
+        self.sent.append(message)
+        if message == ("close", None):
+            self.process.alive = False
+
+
+class RuntimeProcessVecEnv(FakeVecEnv):
+    def __init__(
+        self,
+        env_fns: list[Callable[[], FakeEnv]],
+        *,
+        exits_on_terminate: bool = True,
+        exits_on_kill: bool = True,
+    ) -> None:
+        super().__init__(env_fns)
+        self.processes = [
+            FakeProcess(
+                exits_on_terminate=exits_on_terminate,
+                exits_on_kill=exits_on_kill,
+            )
+        ]
+        self.remotes = (GracefulRemote(self.processes[0]),)
+        self.waiting = False
+
+    def close(self) -> None:
+        raise AssertionError("process vector env must use bounded worker shutdown")
+
+
+class RuntimeProcessVecFactory:
+    def __init__(
+        self,
+        *,
+        graceful: bool = True,
+        exits_on_terminate: bool = True,
+        exits_on_kill: bool = True,
+    ) -> None:
+        self.graceful = graceful
+        self.exits_on_terminate = exits_on_terminate
+        self.exits_on_kill = exits_on_kill
+        self.created: list[RuntimeProcessVecEnv] = []
+
+    def __call__(self, env_fns: list[Callable[[], FakeEnv]]) -> RuntimeProcessVecEnv:
+        vector_env = RuntimeProcessVecEnv(
+            env_fns,
+            exits_on_terminate=self.exits_on_terminate,
+            exits_on_kill=self.exits_on_kill,
+        )
+        if not self.graceful:
+            vector_env.remotes = (FakeRemote(),)
+        self.created.append(vector_env)
+        return vector_env
+
+
+def test_successful_training_confirms_subprocess_evaluation_worker_exited(
+    tmp_path: Path,
+) -> None:
+    subproc = RuntimeProcessVecFactory()
+
+    run_with_fakes(
+        make_config(),
+        tmp_path / "bounded-close",
+        subproc_factory=subproc,
+    )
+
+    evaluation = subproc.created[0]
+    process = evaluation.processes[0]
+    remote = evaluation.remotes[0]
+    assert remote.sent == [("close", None)]
+    assert remote.close_calls == 1
+    assert process.join_calls == [1.0]
+    assert process.terminate_calls == 0
+    assert process.kill_calls == 0
+    assert process.is_alive() is False
+    assert evaluation.closed is True
+
+
+def test_worker_cleanup_failure_replaces_success_with_explicit_error(tmp_path: Path) -> None:
+    subproc = RuntimeProcessVecFactory(
+        graceful=False,
+        exits_on_terminate=False,
+        exits_on_kill=False,
+    )
+
+    with pytest.raises(RuntimeError, match="worker cleanup could not be confirmed"):
+        run_with_fakes(
+            make_config(),
+            tmp_path / "unsafe-close",
+            subproc_factory=subproc,
+        )
+
+    process = subproc.created[0].processes[0]
+    assert process.terminate_calls == 1
+    assert process.kill_calls == 1
+    assert process.is_alive() is True
+
+
+def test_worker_cleanup_failure_does_not_mask_training_error(tmp_path: Path) -> None:
+    FakePPO.fail_learn = True
+    subproc = RuntimeProcessVecFactory(
+        graceful=False,
+        exits_on_terminate=False,
+        exits_on_kill=False,
+    )
+
+    with pytest.raises(RuntimeError, match="learn failed") as raised:
+        run_with_fakes(
+            make_config(),
+            tmp_path / "learn-and-close-failure",
+            subproc_factory=subproc,
+        )
+
+    assert any("worker cleanup could not be confirmed" in note for note in raised.value.__notes__)
 
 
 class SerializingVecFactory(VecFactory):

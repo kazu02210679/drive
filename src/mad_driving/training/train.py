@@ -95,6 +95,62 @@ def _safe_close(resource: object | None) -> None:
             pass
 
 
+def _close_vector_env(resource: object | None) -> None:
+    """Close a vector env and prove subprocess workers have stopped."""
+
+    if resource is None:
+        return
+    processes = getattr(resource, "processes", None)
+    if not isinstance(processes, list):
+        close = getattr(resource, "close", None)
+        if callable(close):
+            close()
+        return
+
+    remotes = tuple(getattr(resource, "remotes", ()))
+    if not getattr(resource, "closed", False) and not getattr(resource, "waiting", False):
+        for remote in remotes:
+            send = getattr(remote, "send", None)
+            if callable(send):
+                try:
+                    send(("close", None))
+                except Exception:
+                    pass
+
+    for process in processes:
+        try:
+            process.join(timeout=1.0)
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=1.0)
+            if process.is_alive():
+                kill = getattr(process, "kill", None)
+                if callable(kill):
+                    kill()
+                    process.join(timeout=1.0)
+        except Exception:
+            pass
+
+    for remote in remotes:
+        try:
+            remote.close()
+        except Exception:
+            pass
+    try:
+        resource.closed = True  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
+    workers_alive = False
+    for process in processes:
+        try:
+            workers_alive = process.is_alive() or workers_alive
+        except Exception:
+            workers_alive = True
+    if workers_alive:
+        raise _VectorEnvCleanupError("Subprocess worker cleanup could not be confirmed")
+
+
 def _cleanup_partial_vector_env(
     vector_env: object,
     owner: _OwnedEnvironments,
@@ -180,13 +236,7 @@ def _build_train_env(
     count = config.training.num_envs
     if count == 1:
         return _construct_vector_env(dummy_vec_env_factory, owner.thunks(1), owner)
-    try:
-        return _construct_vector_env(subproc_vec_env_factory, owner.thunks(count), owner)
-    except _VectorEnvCleanupError:
-        raise
-    except Exception:
-        owner.close()
-        return _construct_vector_env(dummy_vec_env_factory, owner.thunks(count), owner)
+    return _construct_vector_env(subproc_vec_env_factory, owner.thunks(count), owner)
 
 
 def _scaled_frequency(interval_steps: int, num_envs: int) -> int:
@@ -301,10 +351,8 @@ def run_training(
 
     checkpoints_dir = destination / "checkpoints"
     tensorboard_dir = destination / "tensorboard"
-    evaluation_dir = destination / "evaluation"
     checkpoints_dir.mkdir(parents=True, exist_ok=True)
     tensorboard_dir.mkdir(parents=True, exist_ok=True)
-    evaluation_dir.mkdir(parents=True, exist_ok=True)
     _write_resolved_config(config, destination / "config_resolved.yaml")
     requested_timesteps = (
         config.training.smoke_timesteps if smoke else config.training.total_timesteps
@@ -320,6 +368,7 @@ def run_training(
     eval_owner = _OwnedEnvironments.create(config, env_factory)
     train_env: Any = None
     eval_env: Any = None
+    primary_error: BaseException | None = None
     try:
         train_env = _build_train_env(
             config,
@@ -347,7 +396,6 @@ def run_training(
         eval_callback = eval_callback_factory(
             eval_env=eval_env,
             best_model_save_path=str(staging_dir),
-            log_path=str(evaluation_dir),
             eval_freq=_scaled_frequency(
                 min(config.training.eval_interval_steps, requested_timesteps),
                 config.training.num_envs,
@@ -403,13 +451,27 @@ def run_training(
             best_checkpoint=best_checkpoint,
             timesteps=timesteps,
         )
-    except _CheckpointPromotionRollbackError:
-        cleanup_staging = False
+    except BaseException as exc:
+        primary_error = exc
+        if isinstance(exc, _CheckpointPromotionRollbackError):
+            cleanup_staging = False
         raise
     finally:
-        _safe_close(eval_env)
-        _safe_close(train_env)
+        cleanup_errors: list[Exception] = []
+        for vector_env in (eval_env, train_env):
+            try:
+                _close_vector_env(vector_env)
+            except Exception as exc:
+                cleanup_errors.append(exc)
         eval_owner.close()
         train_owner.close()
         if cleanup_staging:
             _cleanup_checkpoint_staging(staging_dir, checkpoints_dir)
+        if cleanup_errors:
+            cleanup_error = _VectorEnvCleanupError(
+                "Vector environment worker cleanup could not be confirmed"
+            )
+            if primary_error is None:
+                raise cleanup_error from cleanup_errors[0]
+            details = "; ".join(str(error) for error in cleanup_errors)
+            primary_error.add_note(f"Cleanup also failed: {details}")

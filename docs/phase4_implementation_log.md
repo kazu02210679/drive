@@ -264,3 +264,61 @@ Result:
   baselines, ablations, and visualization remain Phase 6. Task 8 Steps 5, 6, and 8
   remain controller-owned and were not performed here; no broad review, push, or PR was
   attempted.
+
+## Task 8 review corrections and final smoke
+
+The Task 8 review found three Important issues in the first successful smoke state:
+
+1. the planned equal-count `DummyVecEnv` fallback for a failed multi-environment
+   `SubprocVecEnv` would place multiple MetaDrive engines in one process;
+2. normal `SubprocVecEnv.close()` had no bounded worker-exit verification; and
+3. supplying `EvalCallback.log_path` produced `evaluations.npz`, although the approved
+   Phase 4 boundary permits only resolved config, checkpoints, and TensorBoard events.
+
+The fallback conflicted with the observed MetaDrive 0.4.3 process-wide engine singleton.
+The design and plan were therefore amended to the minimum safe alternative required by
+the top-level specification: partial subprocess resources are cleaned, worker exit is
+verified, and construction fails explicitly instead of creating an unsafe same-process
+fallback.
+
+TDD evidence:
+
+- RED: the new placement, teardown, exception-preservation, and artifact-boundary tests
+  produced `6 failed, 27 passed`;
+- GREEN: all training unit tests passed, `33 passed`;
+- real/focused regression: training, CLI, real PPO checkpoint/resume, and real MetaDrive
+  engine isolation passed, `47 passed, 19 warnings`;
+- the real regression captures the evaluation `SubprocVecEnv` and asserts `closed=True`
+  plus every worker process not alive after `run_training` returns.
+
+Runtime teardown now sends the graceful close request when possible, uses bounded joins,
+then escalates through terminate and kill, and confirms every worker stopped. A cleanup
+failure replaces an otherwise successful result. If training already failed, that
+original exception remains primary and receives a cleanup-failure note.
+
+After reinstalling the non-editable project wheel, a fresh target was verified absent and
+the canonical CLI was rerun:
+
+```powershell
+.venv\Scripts\python.exe -m mad_driving.cli.train --config configs/train.yaml --smoke --run-dir runs/phase4_smoke_seed42_postreview1
+```
+
+The command exited 0 in `37.1s`: `5,000` requested, `6,144` actual training
+transitions, five evaluation episodes of `200` steps, best checkpoint step `5,000`, and
+final checkpoint step `6,144`. The final artifact tree is:
+
+```text
+runs/phase4_smoke_seed42_postreview1/
+├── config_resolved.yaml                                      2,683 bytes
+├── checkpoints/
+│   ├── best_model.zip                                      169,754 bytes (step 5,000)
+│   └── final_model.zip                                     169,754 bytes (step 6,144)
+└── tensorboard/PPO_1/
+    └── events.out.tfevents.1784562285.kaji.47140.0             3,938 bytes
+```
+
+No `evaluation/` directory or `evaluations.npz` exists. A fresh
+`MultiAgentSpeedEnv` then loaded the final checkpoint and completed 100 deterministic
+prediction steps with finite observations and rewards, without termination or
+truncation. Together the final verification exercised `7,244` simulator steps: `6,144`
+training + `1,000` callback evaluation + `100` checkpoint reload.

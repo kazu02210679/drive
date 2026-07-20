@@ -106,14 +106,12 @@ Linux:
 │   ├── best_model.zip
 │   ├── final_model.zip
 │   └── ppo_checkpoint_<steps>_steps.zip  # interval到達時のみ
-├── evaluation/
-│   └── evaluations.npz
 └── tensorboard/
     └── PPO_<n>/
         └── events.out.tfevents.*
 ```
 
-Phase 4の実測では、最初のrun directoryを失敗証跡として保持したため、成功runは`runs/phase4_smoke_seed42_retry1`です。5,000 requested / 6,144 actual training stepsを38.6秒で実行し、1,000 evaluation steps（5 episodes × 200、全てhorizon truncation）、best step 5,000、final step 6,144を確認しました。final checkpointのfresh環境への再読込後、決定論的100 stepsでObservationとRewardは全て有限、`terminated=false`、`truncated=false`でした。詳細は [`docs/phase4_implementation_log.md`](docs/phase4_implementation_log.md) にあります。
+Phase 4の最終実測`runs/phase4_smoke_seed42_postreview1`では、5,000 requested / 6,144 actual training stepsを37.1秒で実行し、1,000 evaluation steps（5 episodes × 200、全てhorizon truncation）、best step 5,000、final step 6,144を確認しました。`EvalCallback`はbest checkpoint選択に使いますが、Phase 6で定義する評価artifactは保存しません。final checkpointのfresh環境への再読込後、決定論的100 stepsでObservationとRewardが全て有限であることも確認しています。詳細は [`docs/phase4_implementation_log.md`](docs/phase4_implementation_log.md) にあります。
 
 ## Verify
 
