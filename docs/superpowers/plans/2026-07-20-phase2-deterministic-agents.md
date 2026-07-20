@@ -565,7 +565,7 @@ git commit -m "feat: add deterministic rule agent"
 - Produces: `CriticAgent(config).review(snapshot, claims: Sequence[RiskClaim]) -> CriticReview`.
 - Produces reason codes in the exact approved order and never calls an agent.
 
-- [ ] **Step 1: Write one failing test per required review rule**
+- [x] **Step 1: Write one failing test per required review rule**
 
 Use valid claims for rules 1–7 and a deliberately corrupted frozen claim for rule 8:
 
@@ -603,17 +603,17 @@ def test_invalid_claim_never_enters_review_arithmetic() -> None:
 
 Also test each reason in isolation, expired boundary equality, duplicate-free challenged IDs, supported agent sorting, empty claims, and low-confidence definitive thresholds.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run: `.venv\Scripts\python.exe -m pytest tests\unit\agents\test_critic.py -v`
 
 Expected: import failure for `CriticAgent`.
 
-- [ ] **Step 3: Implement defensive validation and fixed checks**
+- [x] **Step 3: Implement defensive validation and fixed checks**
 
 First partition claims into valid and invalid without performing arithmetic on invalid fields. Evaluate rules in an ordered tuple. Add challenge IDs in input order with a seen set. Use `len(distinct_reasons)/8.0`, `bool(reasons)`, and maximum valid severity unless any invalid claim forces `1.0`.
 
-- [ ] **Step 4: Verify GREEN and model regressions**
+- [x] **Step 4: Verify GREEN and model regressions**
 
 Run: `.venv\Scripts\python.exe -m pytest tests\unit\agents\test_critic.py tests\unit\interfaces -v`
 
