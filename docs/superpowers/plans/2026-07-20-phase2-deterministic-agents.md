@@ -497,7 +497,7 @@ git commit -m "feat: add worst-case hazard agent"
 - Produces: `RuleAgent(config).analyze(snapshot) -> RiskClaim`.
 - Hard-stop priority: collision, off-road, intersection prohibition, scenario stop.
 
-- [ ] **Step 1: Write failing rule-table tests**
+- [x] **Step 1: Write failing rule-table tests**
 
 ```python
 @pytest.mark.parametrize(
@@ -530,17 +530,17 @@ def test_normal_rule_claim_recommends_speed_limit() -> None:
     assert claim.hard_stop_required is False
 ```
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run: `.venv\Scripts\python.exe -m pytest tests\unit\agents\test_rule.py -v`
 
 Expected: import failure for `RuleAgent`.
 
-- [ ] **Step 3: Implement the fixed priority and overspeed severity**
+- [x] **Step 3: Implement the fixed priority and overspeed severity**
 
 Use the first true item from the exact priority tuple. Otherwise set probability to `1.0` only when over the speed limit and severity to `clip((speed-limit)/max(limit, 1.0), 0, 1)`.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 Run: `.venv\Scripts\python.exe -m pytest tests\unit\agents\test_rule.py -v`
 
