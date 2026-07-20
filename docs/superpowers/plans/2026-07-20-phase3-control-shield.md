@@ -367,7 +367,7 @@ Run: `.venv\Scripts\python.exe -m pytest tests\unit\control\test_action_mapper.p
 
 Expected: all action, boundary, and invalid-input tests pass.
 
-- [ ] **Step 5: Commit the action model**
+- [x] **Step 5: Commit the action model**
 
 ```powershell
 git add src\mad_driving\control tests\unit\control\test_action_mapper.py
@@ -389,7 +389,7 @@ git commit -m "feat: add four-action speed mapping"
 - Produces: `RuleBasedCoordinator(config).decide(snapshot, claims, review) -> DrivingAction`.
 - Produces test helper: `make_claim(agent_id="nominal", **overrides) -> RiskClaim` in `tests/unit/agents/factories.py`.
 
-- [ ] **Step 1: Add a reusable claim factory and failing Coordinator tests**
+- [x] **Step 1: Add a reusable claim factory and failing Coordinator tests**
 
 Add this test helper with full valid defaults:
 
@@ -480,15 +480,17 @@ def test_identical_input_is_exactly_deterministic() -> None:
     assert coordinator.decide(*arguments) == coordinator.decide(*arguments)
 ```
 
-The conflict test expects PREPARE_STOP because an empty claim sequence invokes the safe missing-input floor, which is stricter than the configured conflict floor SLOW.
+The missing-agent test covers the PREPARE_STOP floor independently. The review
+test supplies all three required agents so it directly verifies the configured
+conflict floor SLOW and severity floor PREPARE_STOP.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run: `.venv\Scripts\python.exe -m pytest tests\unit\coordinator\test_rule_based.py -v`
 
 Expected: import failure for `mad_driving.coordinator`.
 
-- [ ] **Step 3: Implement candidate aggregation without physics duplication**
+- [x] **Step 3: Implement candidate aggregation without physics duplication**
 
 ```python
 from collections.abc import Sequence
@@ -533,7 +535,7 @@ class RuleBasedCoordinator:
 
 Do not inspect TTC or stopping margin in this class.
 
-- [ ] **Step 4: Verify GREEN with mapping regressions**
+- [x] **Step 4: Verify GREEN with mapping regressions**
 
 Run: `.venv\Scripts\python.exe -m pytest tests\unit\coordinator tests\unit\control\test_action_mapper.py -v`
 

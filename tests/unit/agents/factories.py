@@ -1,6 +1,28 @@
 from typing import Any
 
-from mad_driving.interfaces import ActorState, EgoState, SceneSnapshot
+from mad_driving.interfaces import ActorState, EgoState, RiskClaim, SceneSnapshot
+
+
+def make_claim(agent_id: str = "nominal", **overrides: Any) -> RiskClaim:
+    values: dict[str, Any] = {
+        "claim_id": f"{agent_id}:1:none:test",
+        "agent_id": agent_id,
+        "event_type": "test",
+        "target_actor_id": None,
+        "probability": 0.0,
+        "confidence": 1.0,
+        "severity": 0.0,
+        "time_horizon_s": 1.0,
+        "min_ttc_s": None,
+        "stopping_margin_m": None,
+        "recommended_max_speed_mps": 20.0,
+        "hard_stop_required": False,
+        "evidence": ("test",),
+        "assumptions": (),
+        "valid_until_step": 1,
+    }
+    values.update(overrides)
+    return RiskClaim(**values)
 
 
 def make_actor(
