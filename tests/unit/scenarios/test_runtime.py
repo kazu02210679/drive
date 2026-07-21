@@ -172,6 +172,26 @@ def test_scenario_transition_is_immutable() -> None:
         transition.state = ScenarioState("crossing", state.seeds, {})  # type: ignore[misc]
 
 
+@pytest.mark.parametrize(
+    ("success", "failure"),
+    [(True, True), (1, False), (False, 0)],
+)
+def test_scenario_step_result_rejects_invalid_or_contradictory_outcomes(
+    success: object,
+    failure: object,
+) -> None:
+    with pytest.raises(ValueError, match="scenario|boolean"):
+        ScenarioStepResult(success=success, failure=failure)  # type: ignore[arg-type]
+
+
+def test_scenario_transition_validates_owned_types() -> None:
+    state = ScenarioState("crossing", EpisodeSeeds(1, 2, 3), {})
+    with pytest.raises(TypeError, match="state"):
+        ScenarioTransition(state=object(), outcome=ScenarioStepResult(False, False))  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="outcome"):
+        ScenarioTransition(state=state, outcome=object())  # type: ignore[arg-type]
+
+
 def test_observation_context_rejects_malformed_occlusion_regions() -> None:
     class MalformedRegion:
         region_id = "unvalidated"

@@ -250,6 +250,54 @@ def test_missing_agent_count_is_monotone_for_every_valid_config(
     assert multiple.executed_action >= one.executed_action >= complete.executed_action
 
 
+def test_intentional_ablation_is_not_treated_as_runtime_agent_failure() -> None:
+    result = SafetyShield(ShieldConfig(mode="enforce")).filter(
+        DrivingAction.KEEP,
+        make_snapshot(),
+        (make_claim("nominal"),),
+        expected_agent_ids=("nominal",),
+        failed_agent_ids=(),
+    )
+
+    assert result.executed_action is DrivingAction.KEEP
+    assert "agent_missing" not in result.reasons
+    assert "multiple_agents_missing" not in result.reasons
+
+
+def test_expected_agent_runtime_failure_applies_missing_agent_floor() -> None:
+    result = SafetyShield(ShieldConfig(mode="enforce")).filter(
+        DrivingAction.KEEP,
+        make_snapshot(),
+        (make_claim("nominal"), make_claim("rule")),
+        expected_agent_ids=("nominal", "hazard", "rule"),
+        failed_agent_ids=("hazard",),
+    )
+
+    assert result.executed_action is DrivingAction.PREPARE_STOP
+    assert "agent_missing" in result.reasons
+
+
+@pytest.mark.parametrize(
+    ("expected", "failed"),
+    [
+        (("nominal", "nominal"), ()),
+        (("unknown",), ()),
+        (("nominal",), ("hazard",)),
+    ],
+)
+def test_agent_status_contract_rejects_inconsistent_ids(
+    expected: tuple[str, ...], failed: tuple[str, ...]
+) -> None:
+    with pytest.raises(ValueError, match="agent_ids|specialist"):
+        SafetyShield(ShieldConfig()).filter(
+            DrivingAction.KEEP,
+            make_snapshot(),
+            (),
+            expected_agent_ids=expected,
+            failed_agent_ids=failed,
+        )
+
+
 def test_shield_result_rejects_inconsistent_flags_and_duplicate_reasons() -> None:
     with pytest.raises(ValueError, match="intervention_required"):
         ShieldResult(

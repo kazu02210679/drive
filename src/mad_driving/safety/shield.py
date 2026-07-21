@@ -10,7 +10,7 @@ from mad_driving.interfaces.defensive_validation import (
     valid_snapshot,
 )
 
-_REQUIRED_AGENT_IDS = frozenset({"nominal", "hazard", "rule"})
+_SPECIALIST_AGENT_IDS = frozenset({"nominal", "hazard", "rule"})
 
 
 class SafetyShield:
@@ -24,6 +24,9 @@ class SafetyShield:
         requested_action: DrivingAction | int,
         observation: SceneObservation,
         claims: Sequence[RiskClaim],
+        *,
+        expected_agent_ids: Sequence[str] = ("nominal", "hazard", "rule"),
+        failed_agent_ids: Sequence[str] = (),
     ) -> ShieldResult:
         """Diagnose risk and optionally enforce the safest candidate action."""
 
@@ -31,20 +34,31 @@ class SafetyShield:
         if self._config.mode == "off":
             return ShieldResult(requested, requested, requested, False, False, ())
 
+        expected = self._agent_id_set(expected_agent_ids, "expected_agent_ids")
+        failed = self._agent_id_set(failed_agent_ids, "failed_agent_ids")
+        if not failed.issubset(expected):
+            raise ValueError("failed_agent_ids must be a subset of expected_agent_ids")
         valid_claims = tuple(claim for claim in claims if valid_claim(claim))
         observation_is_valid = valid_snapshot(observation)
         reasons: list[str] = []
         candidates = [DrivingAction.KEEP]
 
-        if len(valid_claims) != len(claims) or not observation_is_valid:
+        unexpected_claim = any(claim.agent_id not in expected for claim in valid_claims)
+        failed_claim = any(claim.agent_id in failed for claim in valid_claims)
+        if (
+            len(valid_claims) != len(claims)
+            or not observation_is_valid
+            or unexpected_claim
+            or failed_claim
+        ):
             reasons.append("invalid_input")
             candidates.append(DrivingAction.STOP)
         if any(claim.hard_stop_required for claim in valid_claims):
             reasons.append("hard_stop_required")
             candidates.append(DrivingAction.STOP)
 
-        present_agent_ids = {claim.agent_id for claim in valid_claims}
-        missing_count = len(_REQUIRED_AGENT_IDS - present_agent_ids)
+        present_agent_ids = {claim.agent_id for claim in valid_claims if claim.agent_id in expected}
+        missing_count = len((expected - present_agent_ids) | failed)
         if missing_count >= 2:
             reasons.append("multiple_agents_missing")
             candidates.append(DrivingAction(self._config.multiple_missing_action))
@@ -107,3 +121,17 @@ class SafetyShield:
             intervened=executed != requested,
             reasons=tuple(reasons),
         )
+
+    @staticmethod
+    def _agent_id_set(agent_ids: Sequence[str], field_name: str) -> frozenset[str]:
+        if isinstance(agent_ids, str | bytes):
+            raise ValueError(f"{field_name} must be a sequence of specialist agent IDs")
+        values = tuple(agent_ids)
+        if not all(isinstance(agent_id, str) and agent_id for agent_id in values):
+            raise ValueError(f"{field_name} must contain non-empty strings")
+        if len(values) != len(set(values)):
+            raise ValueError(f"{field_name} must contain unique values")
+        result = frozenset(values)
+        if not result.issubset(_SPECIALIST_AGENT_IDS):
+            raise ValueError(f"{field_name} contains an unknown specialist agent ID")
+        return result

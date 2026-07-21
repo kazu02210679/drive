@@ -25,6 +25,8 @@ class FakeNavigation:
 
 
 class FakeVehicle:
+    LENGTH = 4.5
+    WIDTH = 1.8
     name = "ego"
     position = (0.0, 0.0)
     velocity = (1.0, 0.0)

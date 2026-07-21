@@ -556,15 +556,34 @@ class InvalidTraceRewardResult:
 class RecordingShield:
     def __init__(self, executed_action: DrivingAction = DrivingAction.STOP) -> None:
         self.executed_action = executed_action
-        self.calls: list[tuple[DrivingAction | int, SceneObservation, tuple[RiskClaim, ...]]] = []
+        self.calls: list[
+            tuple[
+                DrivingAction | int,
+                SceneObservation,
+                tuple[RiskClaim, ...],
+                tuple[str, ...],
+                tuple[str, ...],
+            ]
+        ] = []
 
     def filter(
         self,
         requested_action: DrivingAction | int,
         observation: SceneObservation,
         claims: Sequence[RiskClaim],
+        *,
+        expected_agent_ids: Sequence[str],
+        failed_agent_ids: Sequence[str],
     ) -> ShieldResult:
-        self.calls.append((requested_action, observation, tuple(claims)))
+        self.calls.append(
+            (
+                requested_action,
+                observation,
+                tuple(claims),
+                tuple(expected_agent_ids),
+                tuple(failed_agent_ids),
+            )
+        )
         requested = DrivingAction(requested_action)
         required = max(requested, self.executed_action)
         executed = max(requested, self.executed_action)
@@ -1054,7 +1073,7 @@ def test_runtime_context_flows_to_frame_builder_and_hidden_actor_stays_privilege
         harness.env.close()
 
 
-def test_step_uses_analysis_result_observation_only_shield_and_frame_reward_context() -> None:
+def test_step_routes_agent_status_to_shield_but_excludes_it_from_reward_context() -> None:
     pre = make_analysis(claims=complete_claims(severity=0.1))
     post = make_analysis(claims=complete_claims(severity=0.9))
     suite = SequenceSuite((pre, post))
@@ -1066,11 +1085,13 @@ def test_step_uses_analysis_result_observation_only_shield_and_frame_reward_cont
 
         assert shield.calls[0][1] is suite.observations[0]
         assert not isinstance(shield.calls[0][1], SceneFrame)
+        assert shield.calls[0][3] == pre.expected_agent_ids
+        assert shield.calls[0][4] == pre.failed_agent_ids
         context = harness.reward.contexts[-1]
         assert context.previous_frame.observation is suite.observations[0]
         assert context.next_frame.observation is suite.observations[1]
-        assert context.previous_analysis == pre
-        assert context.next_analysis == post
+        assert not hasattr(context, "previous_analysis")
+        assert not hasattr(context, "next_analysis")
         assert context.executed_action == int(DrivingAction.STOP)
         assert context.decision_interval_s == pytest.approx(0.10)
     finally:
@@ -1490,15 +1511,18 @@ def test_step_builds_trace_from_pre_step_analysis_and_post_step_reward() -> None
         harness.env.close()
 
 
-def test_monitor_shield_requirement_and_control_fail_safe_are_explicit_diagnostics() -> None:
+def test_low_level_control_fail_safe_is_a_fatal_internal_error() -> None:
     class MonitorShield:
         def filter(
             self,
             requested_action: DrivingAction | int,
             observation: SceneObservation,
             claims: Sequence[RiskClaim],
+            *,
+            expected_agent_ids: Sequence[str],
+            failed_agent_ids: Sequence[str],
         ) -> ShieldResult:
-            del observation, claims
+            del observation, claims, expected_agent_ids, failed_agent_ids
             requested = DrivingAction(requested_action)
             return ShieldResult(
                 requested_action=requested,
@@ -1519,23 +1543,14 @@ def test_monitor_shield_requirement_and_control_fail_safe_are_explicit_diagnosti
         )
     )
     harness = make_env(simulators=(simulator,), shield=MonitorShield())
-    try:
-        harness.env.reset(seed=123)
-        _, _, _, _, info = harness.env.step(DrivingAction.KEEP)
-        trace = info["decision_trace"]
+    harness.env.reset(seed=123)
 
-        assert info["required_action"] == DrivingAction.STOP
-        assert info["intervention_required"] is True
-        assert info["shield_intervened"] is False
-        assert info["control_fail_safe"] is True
-        assert info["control_fail_safe_reason"] == "ValueError"
-        assert trace.required_action == DrivingAction.STOP
-        assert trace.intervention_required is True
-        assert trace.shield_intervened is False
-        assert trace.control_fail_safe is True
-        assert trace.control_fail_safe_reason == "ValueError"
-    finally:
-        harness.env.close()
+    with pytest.raises(RuntimeError, match="low-level control fail-safe: ValueError"):
+        harness.env.step(DrivingAction.KEEP)
+
+    assert simulator.close_calls == 1
+    with pytest.raises(RuntimeError, match="fatally closed"):
+        harness.env.reset(seed=124)
 
 
 def test_per_agent_failure_result_remains_a_valid_mdp_step() -> None:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from math import cos, pi, sin
+from math import cos, inf, pi, sin
 from numbers import Integral
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
@@ -104,6 +104,14 @@ class SceneSnapshotBuilder:
             arrived=bool(raw_info.get("arrive_dest", False)),
             scenario_success=scenario_result.success,
             scenario_failure=scenario_result.failure,
+            minimum_actual_ttc_s=self._minimum_actual_ttc_s(
+                ego_velocity=ego_velocity,
+                ego_heading=heading,
+                ego_length_m=self._positive_dimension("ego.length", ego_vehicle.LENGTH),
+                ego_width_m=self._positive_dimension("ego.width", ego_vehicle.WIDTH),
+                actors=all_actors,
+            ),
+            hard_rule_constraint=(context.stop_required or context.intersection_entry_prohibited),
         )
         return SceneFrame(
             scenario_id=context.scenario_id,
@@ -124,6 +132,75 @@ class SceneSnapshotBuilder:
                 "crash_building",
             )
         )
+
+    @staticmethod
+    def _positive_dimension(name: str, value: object) -> float:
+        dimension = finite_float(name, value)
+        if dimension <= 0.0:
+            raise ValueError(f"{name} must be positive")
+        return dimension
+
+    @classmethod
+    def _minimum_actual_ttc_s(
+        cls,
+        *,
+        ego_velocity: tuple[float, float],
+        ego_heading: float,
+        ego_length_m: float,
+        ego_width_m: float,
+        actors: tuple[ActorState, ...],
+    ) -> float | None:
+        """Return fixed-oracle time to collision from all simulator-truth actors."""
+
+        values: list[float] = []
+        for actor in actors:
+            relative_velocity_xy = (
+                actor.velocity_xy_mps[0] - ego_velocity[0],
+                actor.velocity_xy_mps[1] - ego_velocity[1],
+            )
+            relative_velocity = (
+                cos(ego_heading) * relative_velocity_xy[0]
+                + sin(ego_heading) * relative_velocity_xy[1],
+                -sin(ego_heading) * relative_velocity_xy[0]
+                + cos(ego_heading) * relative_velocity_xy[1],
+            )
+            ttc = cls._rectangle_entry_time_s(
+                position=(actor.relative_longitudinal_m, actor.relative_lateral_m),
+                velocity=relative_velocity,
+                half_extents=(
+                    0.5 * (ego_length_m + actor.length_m),
+                    0.5 * (ego_width_m + actor.width_m),
+                ),
+            )
+            if ttc is not None:
+                values.append(ttc)
+        return min(values, default=None)
+
+    @staticmethod
+    def _rectangle_entry_time_s(
+        *,
+        position: tuple[float, float],
+        velocity: tuple[float, float],
+        half_extents: tuple[float, float],
+    ) -> float | None:
+        """Solve constant-velocity entry into the ego-aligned collision rectangle."""
+
+        entry = -inf
+        exit_time = inf
+        for coordinate, rate, extent in zip(position, velocity, half_extents, strict=True):
+            if rate == 0.0:
+                if abs(coordinate) > extent:
+                    return None
+                continue
+            first = (-extent - coordinate) / rate
+            second = (extent - coordinate) / rate
+            entry = max(entry, min(first, second))
+            exit_time = min(exit_time, max(first, second))
+            if entry > exit_time:
+                return None
+        if exit_time < 0.0:
+            return None
+        return max(entry, 0.0)
 
     @staticmethod
     def _collision_kind(raw_info: Mapping[str, object], vehicle: Any) -> CollisionKind | None:

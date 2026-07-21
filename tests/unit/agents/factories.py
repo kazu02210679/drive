@@ -43,6 +43,7 @@ def make_analysis(
     failed_agent_ids: tuple[str, ...] = (),
     errors: tuple[str, ...] = (),
     review: CriticReview | None = None,
+    expected_agent_ids: tuple[str, ...] = ("nominal", "hazard", "rule"),
 ) -> AgentAnalysisResult:
     """Build a validated neutral analysis result for non-agent test seams."""
 
@@ -60,6 +61,7 @@ def make_analysis(
         failed_agent_ids=failed_agent_ids,
         errors=errors,
         review=review,
+        expected_agent_ids=expected_agent_ids,
     )
 
 
@@ -154,6 +156,8 @@ def make_frame(
     arrived: bool = False,
     scenario_success: bool = False,
     scenario_failure: bool = False,
+    minimum_actual_ttc_s: float | None = None,
+    hard_rule_constraint: bool = False,
 ) -> SceneFrame:
     """Build a full frame for reward and environment tests."""
 
@@ -174,5 +178,7 @@ def make_frame(
             arrived=arrived,
             scenario_success=scenario_success,
             scenario_failure=scenario_failure,
+            minimum_actual_ttc_s=minimum_actual_ttc_s,
+            hard_rule_constraint=hard_rule_constraint,
         ),
     )

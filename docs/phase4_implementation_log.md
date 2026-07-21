@@ -725,3 +725,37 @@ Final checkpoint SHA-256 values are
 reload at `num_timesteps=6144` and complete 100 deterministic real MetaDrive decisions
 with finite 24-dimensional observations and finite rewards. Each reward sum is
 `-32.434590492396445`.
+
+## Phase 4.2 comparison-validity remediation (contract v4)
+
+This section supersedes the contract-v3 learning objective while leaving the
+24-dimensional Observation schema unchanged. `RewardContext` no longer accepts Agent
+analysis. Near-miss, hard-rule, and unnecessary-brake terms now consume only the fixed
+privileged oracle stored in the pre/post `SceneFrame`; hidden actors participate in the
+oracle TTC. Vehicle, object, sidewalk, and building collisions share the vehicle collision
+penalty. The Shield now receives separately derived `expected_agent_ids` and
+`failed_agent_ids`, so intentional B1/ablation omissions do not activate an Agent-failure
+floor. Active low-level control fail-safe status closes the Gymnasium environment and raises
+instead of entering PPO as a normal high-level Action transition. Scenario outcomes reject
+non-booleans and simultaneous success/failure.
+
+The first attempted pair, `phase4_2_oracle_v4_smoke_20260721_e/f`, is excluded: the
+non-editable environment retained the already-installed contract-v3 wheel. After
+`uv sync --reinstall-package mad-driving`, the installed package reported contract 4 and a
+`RewardContext` with only frame/action/Shield/timing fields.
+
+The authoritative runs are `phase4_2_oracle_v4_smoke_20260721_g/h`. Each requested 5,000
+timesteps, evaluated five fixed validation episodes at step 5,000 with mean reward `-64.71`
+and length `200`, and completed at the PPO rollout boundary of 6,144. Both metadata files
+record `research_contract_version=4`, `observation_schema_version=1`, and shape `[24]`.
+Ignoring descriptor identity headers, both runs have byte-equal sequences of 31 training
+and 6 validation episode-seed records. Final checkpoint SHA-256 values are
+`6c2dc8e226cb6b71bafeea51bc06d64f3f81ecd0069463d1f05f7619c2cfc25d` for G and
+`37144849eda8d6a508e4906b2dac65b44e134911aed03d55ca370f6f0a47f7f3` for H. Both reload
+at 6,144 timesteps and complete 100 deterministic real MetaDrive decisions with finite
+observations/rewards and identical reward sum `-32.434590492396445`.
+
+Final verification: `721 passed, 25 warnings in 67.21s`; total coverage `90.08%` over
+3,779 statements and 1,110 branches; Ruff lint/format and mypy all pass. Warnings remain the
+documented upstream Matplotlib deprecations and SB3 notices for the intentional complementary
+training/validation VecEnv topology.

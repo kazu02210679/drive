@@ -95,7 +95,13 @@ def run_control_smoke(
                 analysis.claims,
                 analysis.review,
             )
-            shield_result = shield.filter(requested, frame.observation, analysis.claims)
+            shield_result = shield.filter(
+                requested,
+                frame.observation,
+                analysis.claims,
+                expected_agent_ids=analysis.expected_agent_ids,
+                failed_agent_ids=analysis.failed_agent_ids,
+            )
             executed = shield_result.executed_action
             target = target_speed_mps(
                 executed,

@@ -5,10 +5,9 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-from mad_driving.agents.suite import AgentAnalysisResult
 from mad_driving.config.models import RewardConfig
 from mad_driving.control.actions import DrivingAction
-from mad_driving.interfaces import CollisionKind, RiskClaim, SceneFrame
+from mad_driving.interfaces import CollisionKind, SceneFrame
 from mad_driving.interfaces._validation import require_action, require_positive
 
 
@@ -18,8 +17,6 @@ class RewardContext:
 
     previous_frame: SceneFrame
     next_frame: SceneFrame
-    previous_analysis: AgentAnalysisResult
-    next_analysis: AgentAnalysisResult
     executed_action: int
     shield_intervened: bool
     decision_interval_s: float
@@ -63,12 +60,11 @@ class RewardCalculator:
         """Calculate all ten signed components for one transition."""
 
         dt = self._elapsed_time(context)
-        rule_constraint = self._has_rule_constraint(
-            context.previous_frame,
-            context.previous_analysis,
-        )
-        previous_min_ttc_s = self._minimum_ttc(context.previous_analysis.claims)
-        next_min_ttc_s = self._minimum_ttc(context.next_analysis.claims)
+        previous_oracle = context.previous_frame.privileged
+        next_oracle = context.next_frame.privileged
+        rule_constraint = previous_oracle.hard_rule_constraint
+        previous_min_ttc_s = previous_oracle.minimum_actual_ttc_s
+        next_min_ttc_s = next_oracle.minimum_actual_ttc_s
         privileged = context.next_frame.privileged
         components = {
             "progress_reward": self._progress_reward(context),
@@ -128,38 +124,15 @@ class RewardCalculator:
     def _collision_penalty(self, collision_kind: CollisionKind | None) -> float:
         if collision_kind == "crossing_actor":
             return -self._config.collision_crossing_actor
-        if collision_kind == "vehicle":
+        if collision_kind in {"vehicle", "object", "sidewalk", "building"}:
             return -self._config.collision_vehicle
         return 0.0
-
-    @staticmethod
-    def _minimum_ttc(claims: tuple[RiskClaim, ...]) -> float | None:
-        values = [
-            claim.min_ttc_s
-            for claim in claims
-            if claim.agent_id in {"nominal", "hazard"} and claim.min_ttc_s is not None
-        ]
-        return min(values, default=None)
 
     def _near_miss_penalty(self, min_ttc_s: float | None) -> float:
         if min_ttc_s is None:
             return 0.0
         proximity = max(0.0, 1.0 - min_ttc_s / self._config.near_miss_ttc_s)
         return -self._config.near_miss_max * proximity**2
-
-    @staticmethod
-    def _has_rule_constraint(
-        frame: SceneFrame,
-        analysis: AgentAnalysisResult,
-    ) -> bool:
-        observation = frame.observation
-        return (
-            observation.road_context.stop_required
-            or observation.road_context.intersection_entry_prohibited
-            or any(
-                claim.agent_id == "rule" and claim.hard_stop_required for claim in analysis.claims
-            )
-        )
 
     def _jerk_penalty(self, context: RewardContext, dt: float) -> float:
         acceleration_delta = abs(
@@ -174,21 +147,10 @@ class RewardCalculator:
         min_ttc_s: float | None,
         rule_constraint: bool,
     ) -> float:
-        claims = context.previous_analysis.claims
-        hazard_claims = tuple(claim for claim in claims if claim.agent_id == "hazard")
-        rule_claims = tuple(claim for claim in claims if claim.agent_id == "rule")
         privileged = context.next_frame.privileged
         safe_ttc = min_ttc_s is None or min_ttc_s >= self._config.unnecessary_brake_safe_ttc_s
         safe_post_step = (
-            bool(hazard_claims)
-            and bool(rule_claims)
-            and "hazard" not in context.previous_analysis.failed_agent_ids
-            and "rule" not in context.previous_analysis.failed_agent_ids
-            and all(
-                claim.severity < self._config.unnecessary_brake_severity_threshold
-                for claim in hazard_claims
-            )
-            and not rule_constraint
+            not rule_constraint
             and safe_ttc
             and not privileged.collision_occurred
             and not privileged.off_road

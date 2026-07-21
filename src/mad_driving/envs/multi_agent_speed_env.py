@@ -91,6 +91,9 @@ class Shield(Protocol):
         requested_action: DrivingAction | int,
         observation: SceneObservation,
         claims: Sequence[RiskClaim],
+        *,
+        expected_agent_ids: Sequence[str],
+        failed_agent_ids: Sequence[str],
     ) -> ShieldResult: ...
 
 
@@ -355,6 +358,8 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
                 requested,
                 frame.observation,
                 analysis.claims,
+                expected_agent_ids=analysis.expected_agent_ids,
+                failed_agent_ids=analysis.failed_agent_ids,
             )
             executed = shield_result.executed_action
             target = target_speed_mps(
@@ -381,6 +386,7 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
             if control_fail_safe:
                 if not isinstance(control_fail_safe_reason, str) or not control_fail_safe_reason:
                     raise ValueError("fail_safe_reason must identify an active fail-safe")
+                raise RuntimeError(f"low-level control fail-safe: {control_fail_safe_reason}")
             elif control_fail_safe_reason is not None:
                 raise ValueError("fail_safe_reason must be None when fail_safe is false")
             transition = runtime.after_step(
@@ -416,8 +422,6 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
                 RewardContext(
                     previous_frame=frame,
                     next_frame=next_frame,
-                    previous_analysis=analysis,
-                    next_analysis=next_analysis,
                     executed_action=int(executed),
                     shield_intervened=shield_result.intervened,
                     decision_interval_s=runtime_decision_interval_s,

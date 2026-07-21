@@ -135,6 +135,7 @@ def test_intentional_ablation_is_absent_not_a_failure() -> None:
     result = analyze_safely(suite, make_snapshot())
 
     assert result.failed_agent_ids == ()
+    assert result.expected_agent_ids == ("hazard", "rule")
     assert result.errors == ()
     assert tuple(claim.agent_id for claim in result.claims) == ("hazard", "rule")
 
@@ -162,6 +163,7 @@ def test_analysis_result_is_frozen_and_defensively_validates_claims() -> None:
         failed_agent_ids=["hazard"],  # type: ignore[arg-type]
         errors=["hazard:RuntimeError:unavailable"],  # type: ignore[arg-type]
         review=CriticReview(0.0, False, 0.0, (), (), ()),
+        expected_agent_ids=("nominal", "hazard", "rule"),
     )
 
     assert result.claims == (make_claim(),)
@@ -172,7 +174,13 @@ def test_analysis_result_is_frozen_and_defensively_validates_claims() -> None:
     invalid = make_claim()
     object.__setattr__(invalid, "severity", float("nan"))
     with pytest.raises(ValueError, match="claims"):
-        AgentAnalysisResult((invalid,), (), (), CriticReview(0.0, False, 0.0, (), (), ()))
+        AgentAnalysisResult(
+            (invalid,),
+            (),
+            (),
+            CriticReview(0.0, False, 0.0, (), (), ()),
+            ("nominal", "hazard", "rule"),
+        )
 
 
 def test_make_analysis_derives_a_finite_neutral_review_when_omitted() -> None:
@@ -206,7 +214,13 @@ def test_analysis_result_deeply_freezes_caller_owned_claim_and_review_sequences(
         reasons=reasons,  # type: ignore[arg-type]
     )
 
-    result = AgentAnalysisResult((claim,), (), (), review)
+    result = AgentAnalysisResult(
+        (claim,),
+        (),
+        (),
+        review,
+        ("nominal", "hazard", "rule"),
+    )
     evidence.append("mutated")
     assumptions.append("mutated")
     supported_agent_ids.append("nominal")
@@ -239,6 +253,21 @@ def test_analysis_result_rejects_invalid_failed_agent_error_mapping(
             failed_agent_ids,
             errors,
             CriticReview(0.0, False, 0.0, (), (), ()),
+            ("nominal", "hazard", "rule"),
+        )
+
+
+def test_analysis_result_requires_failures_and_claims_to_belong_to_expected_agents() -> None:
+    with pytest.raises(ValueError, match="failed_agent_ids"):
+        make_analysis(
+            failed_agent_ids=("hazard",),
+            errors=("hazard:RuntimeError:failed",),
+            expected_agent_ids=("nominal",),
+        )
+    with pytest.raises(ValueError, match="claim agent_ids"):
+        make_analysis(
+            claims=(make_claim("hazard"),),
+            expected_agent_ids=("nominal",),
         )
 
 

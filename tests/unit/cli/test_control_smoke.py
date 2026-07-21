@@ -26,6 +26,8 @@ class FakeNavigation:
 
 
 class FakeVehicle:
+    LENGTH = 4.5
+    WIDTH = 1.8
     name = "ego"
     position = (0.0, 0.0)
     velocity = (1.0, 0.0)
@@ -157,6 +159,7 @@ class FailedAgentSuite:
                 challenged_claim_ids=(),
                 reasons=("agent_analysis_failed",),
             ),
+            expected_agent_ids=("nominal", "hazard", "rule"),
         )
 
 

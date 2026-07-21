@@ -218,7 +218,6 @@ class RewardConfig(StrictTypedFrozenModel):
     hard_rule_violation: FiniteFloat = Field(default=100.0, ge=0.0)
     jerk_scale: FiniteFloat = Field(default=0.05, ge=0.0)
     unnecessary_brake_scale: FiniteFloat = Field(default=0.20, ge=0.0)
-    unnecessary_brake_severity_threshold: FiniteFloat = Field(default=0.25, ge=0.0, le=1.0)
     unnecessary_brake_safe_ttc_s: FiniteFloat = Field(default=5.0, gt=0.0)
     standstill_per_second: FiniteFloat = Field(default=0.50, ge=0.0)
     standstill_speed_mps: FiniteFloat = Field(default=0.10, gt=0.0)

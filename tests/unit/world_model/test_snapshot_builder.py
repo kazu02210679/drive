@@ -186,6 +186,13 @@ def test_identical_runtime_state_produces_identical_snapshot() -> None:
     assert asdict(first) == asdict(second)
 
 
+def test_privileged_oracle_ttc_uses_all_actor_truth_independent_of_visibility() -> None:
+    frame = build_frame(make_env(), visible_actor_ids=frozenset())
+
+    assert frame.observation.visible_actors == ()
+    assert frame.privileged.minimum_actual_ttc_s == pytest.approx(1.5)
+
+
 def test_metadrive_random_seed_stabilizes_regenerated_actor_ids() -> None:
     lane = FakeLane(("A", "B", 0))
     first = make_env()

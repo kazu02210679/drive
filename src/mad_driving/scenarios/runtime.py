@@ -58,6 +58,12 @@ class ScenarioStepResult:
     success: bool
     failure: bool
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.success, bool) or not isinstance(self.failure, bool):
+            raise ValueError("scenario outcome flags must be boolean")
+        if self.success and self.failure:
+            raise ValueError("scenario cannot succeed and fail simultaneously")
+
 
 @dataclass(frozen=True)
 class ScenarioTransition:
@@ -65,6 +71,12 @@ class ScenarioTransition:
 
     state: ScenarioState
     outcome: ScenarioStepResult
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.state, ScenarioState):
+            raise TypeError("ScenarioTransition.state must be a ScenarioState")
+        if not isinstance(self.outcome, ScenarioStepResult):
+            raise TypeError("ScenarioTransition.outcome must be a ScenarioStepResult")
 
 
 @dataclass(frozen=True)

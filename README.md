@@ -6,7 +6,7 @@ MetaDrive上の1台の自車内部に、複数の決定論的な専門Agentと�
 
 ## Current status
 
-Phase 4.1（research-validity hardening）まで実装済みです。Phase 1の厳密な設定検証とMetaDrive境界、Phase 2の専門Agent、Phase 3の安全制御、Phase 4のGymnasium/PPO経路に加え、次を含みます。
+Phase 4.2（comparison-validity remediation）まで実装済みです。Phase 1の厳密な設定検証とMetaDrive境界、Phase 2の専門Agent、Phase 3の安全制御、Phase 4のGymnasium/PPO経路に加え、次を含みます。
 
 - Nominal Agentによる等加速度運動予測
 - Hazard Agentによる先行車急制動・横断Actor・遮蔽の最悪ケース評価
@@ -20,12 +20,13 @@ Phase 4.1（research-validity hardening）まで実装済みです。Phase 1の�
 - 複数Claimをfield-wiseで保守集約する有限な24次元`float32` Observationと、action-selection/transition境界を分けた10成分Reward
 - `physics_dt_s=0.02`、`decision_repeat=5`、`decision_dt_s=0.10`の明示timing
 - `ScenarioRuntime` lifecycle、role別seed identity、Gymnasium暗黙resetで進む再現可能なepisode seed列
-- Agent可視構造から遮蔽Actorの運動学を除外し、衝突・路外・到着・scenario outcomeをReward専用privileged stateへ分離
+- Agent可視構造から遮蔽Actorの運動学を除外し、全Actor truthから計算する固定oracle TTC、Rule制約、衝突・路外・到着・scenario outcomeをReward専用privileged stateへ分離
+- 構成上無効なAgentと実行時失敗したAgentを区別するablation-aware Safety Shield
 - CPU上の標準PPO学習、best/final/periodic checkpoint、resolved config、TensorBoard、strict resume provenance
 
 速度Actionは安全側へ単調な`KEEP=0`、`SLOW=1`、`PREPARE_STOP=2`、`STOP=3`です。Safety Shieldには診断も介入もしない`off`、診断だけ行う`monitor`、要求より安全側のActionを強制する`enforce`があります。既定値は`enforce`です。
 
-Phase 6では意思決定性能のB1・B2・Proposedをすべて`monitor`で比較し、実行可能システムは全方式を`enforce`で比較します。最終test seedsはmodel選択やCurriculumへ使いません。Rule violationとUnnecessary-brake RewardはAction選択時のpre-step Observation/Agent分析で判定し、Near-missは遷移後の物理リスクClaimで判定します。将来lookaheadは使いません。
+Phase 6では意思決定性能のB1・B2・Proposedをすべて`monitor`で比較し、実行可能システムは全方式を`enforce`で比較します。最終test seedsはmodel選択やCurriculumへ使いません。Rewardは比較対象AgentのClaimを入力にせず、全方式共通のprivileged oracle transitionだけから計算します。Rule violationとUnnecessary-brakeはpre-step oracle、Near-missはpost-step oracle TTCを使用し、将来lookaheadは使いません。
 
 座標はMetaDrive world XYを使い、headingは反時計回りが正です。Actor相対座標は自車body frameで前方・左方が正、`lane_offset_m`はMetaDrive lane-local lateral signを保持します。`same_lane`はlane index一致だけでなくlane幅内の位置も要求します。
 
@@ -107,7 +108,7 @@ Linux:
 
 `configs/base.yaml`がsmokeとtrainingの共通canonical configです。`metadrive.start_seed`と`metadrive.num_scenarios`はsmoke用の既定値で、PPO環境はroleごとに`scenarios.<role>`の範囲へ上書きします。
 
-新規学習とresumeは必須の`--run-dir`で、存在しない、または空のdestinationを明示した場合だけ受け付けます。`<UNIQUE_RUN_ID>`は毎回新しい識別子へ置換してください。非空directoryを上書きしません。Resume sourceはread-onlyとして扱い、checkpoint SHA-256、親run/config、config差分、開始step、Observation/Action schemaを新しいrunの`run_metadata.json`へ記録します。source hostでcanonicalizeしたhistorical parent pathはcross-host provenance文字列として保持します。全runは`research_contract_version=3`、`observation_schema_version=1`です。各train/validation環境の実際のreset情報はdescriptor-boundな`episode_seeds/<role>-worker-<index>.jsonl`へ耐久書き込みします。parentはwriterがopenな間にVecEnv control channelからrole/worker/path/platform identityを保持し、close後のinventoryはそのparent-held identityに対して検証します。metadataの`episode_seed_artifacts`は相対path、role、worker、件数、schema version、検証済みplatform file identity、同一byte readのSHA-256を示します。
+新規学習とresumeは必須の`--run-dir`で、存在しない、または空のdestinationを明示した場合だけ受け付けます。`<UNIQUE_RUN_ID>`は毎回新しい識別子へ置換してください。非空directoryを上書きしません。Resume sourceはread-onlyとして扱い、checkpoint SHA-256、親run/config、config差分、開始step、Observation/Action schemaを新しいrunの`run_metadata.json`へ記録します。source hostでcanonicalizeしたhistorical parent pathはcross-host provenance文字列として保持します。全runは`research_contract_version=4`、`observation_schema_version=1`です。各train/validation環境の実際のreset情報はdescriptor-boundな`episode_seeds/<role>-worker-<index>.jsonl`へ耐久書き込みします。parentはwriterがopenな間にVecEnv control channelからrole/worker/path/platform identityを保持し、close後のinventoryはそのparent-held identityに対して検証します。metadataの`episode_seed_artifacts`は相対path、role、worker、件数、schema version、検証済みplatform file identity、同一byte readのSHA-256を示します。
 
 `training.num_envs=1`ではtrainをparent processの`DummyVecEnv`、validationを1 workerの`SubprocVecEnv`にします。`num_envs>1`ではtrainを`SubprocVecEnv`、validation worker 0をparent processの`DummyVecEnv`にします。この相補構成でMetaDrive engineを1 processに1つに保ちつつ、学習中にperiodic evaluationとbest-checkpoint選択を行います。各評価直前にvalidation VecEnvをAppConfigのroot `seed`で再seedし、比較するcheckpointごとに同じepisode-seed列を再生します。
 
@@ -129,7 +130,7 @@ Linux:
         └── events.out.tfevents.*
 ```
 
-旧Task 11の再生成seed列と、path occupantをidentity trust sourceにした後続runは実run証拠として廃止しました。`runs/phase4_1_worker_identity_final_smoke_20260721_a`と`runs/phase4_1_worker_identity_final_smoke_20260721_b`は旧research contract v2の履歴証拠です。最新のv3 evidenceは`runs/phase4_2_review_fix_v3_smoke_20260721_c`と`runs/phase4_2_review_fix_v3_smoke_20260721_d`です。両runは5,000 step時点で同一の5-episode periodic validationを行い、その後6,144 stepまで学習しました。両final checkpointは6,144 stepで再読込でき、各100 decision stepsのObservationとRewardはすべて有限でした。詳細は [`docs/phase4_implementation_log.md`](docs/phase4_implementation_log.md) にあります。
+旧Task 11の再生成seed列と、path occupantをidentity trust sourceにした後続runは実run証拠として廃止しました。`runs/phase4_1_worker_identity_final_smoke_20260721_a`と`runs/phase4_1_worker_identity_final_smoke_20260721_b`は旧research contract v2、`runs/phase4_2_review_fix_v3_smoke_20260721_c`と`runs/phase4_2_review_fix_v3_smoke_20260721_d`は旧v3の履歴証拠です。最新のv4 evidenceは`runs/phase4_2_oracle_v4_smoke_20260721_g`と`runs/phase4_2_oracle_v4_smoke_20260721_h`です。両runは5,000 step時点で同一の5-episode periodic validationを行い、その後6,144 stepまで学習しました。両final checkpointは6,144 stepで再読込でき、各100 decision stepsのObservationとRewardはすべて有限かつ同一でした。詳細は [`docs/phase4_implementation_log.md`](docs/phase4_implementation_log.md) にあります。
 
 ## Verify
 

@@ -1,6 +1,6 @@
 import json
 import math
-from dataclasses import FrozenInstanceError, asdict, fields
+from dataclasses import FrozenInstanceError, asdict, fields, replace
 from typing import Any
 
 import pytest
@@ -101,6 +101,8 @@ def make_frame(**overrides: Any) -> SceneFrame:
             arrived=False,
             scenario_success=False,
             scenario_failure=False,
+            minimum_actual_ttc_s=None,
+            hard_rule_constraint=False,
         ),
     }
     values.update(overrides)
@@ -114,6 +116,17 @@ def test_agent_visible_observation_excludes_scenario_identity_and_seeds() -> Non
     assert "scenario_id" not in observation_fields
     assert "seeds" not in observation_fields
     assert {"scenario_id", "seeds"} <= frame_fields
+
+
+@pytest.mark.parametrize("value", [-0.1, math.inf, math.nan])
+def test_privileged_oracle_ttc_requires_a_non_negative_finite_value(value: float) -> None:
+    with pytest.raises(ValueError, match="minimum_actual_ttc_s"):
+        replace(make_frame().privileged, minimum_actual_ttc_s=value)
+
+
+def test_privileged_rule_constraint_requires_a_boolean() -> None:
+    with pytest.raises(ValueError, match="hard_rule_constraint"):
+        replace(make_frame().privileged, hard_rule_constraint=1)  # type: ignore[arg-type]
 
 
 def make_claim(**overrides: Any) -> RiskClaim:
@@ -182,6 +195,8 @@ def test_scene_frame_keeps_privileged_labels_out_of_observation() -> None:
             arrived=True,
             scenario_success=True,
             scenario_failure=False,
+            minimum_actual_ttc_s=1.5,
+            hard_rule_constraint=True,
         )
     )
 

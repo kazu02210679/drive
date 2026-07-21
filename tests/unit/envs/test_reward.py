@@ -8,7 +8,7 @@ import pytest
 from mad_driving.config.models import RewardConfig
 from mad_driving.control.actions import DrivingAction
 from mad_driving.envs.reward import RewardCalculator, RewardContext, RewardResult
-from tests.unit.agents.factories import make_analysis, make_claim, make_frame, make_snapshot
+from tests.unit.agents.factories import make_frame, make_snapshot
 
 EXPECTED_COMPONENT_KEYS = (
     "progress_reward",
@@ -31,15 +31,9 @@ def make_context(**overrides: object) -> RewardContext:
         next_observation,
         ego=replace(next_observation.ego, position_xy_m=(10.0, 0.0)),
     )
-    analysis = overrides.pop(
-        "analysis",
-        make_analysis(claims=(make_claim("nominal"), make_claim("hazard"), make_claim("rule"))),
-    )
     values: dict[str, object] = {
         "previous_frame": make_frame(observation=previous_observation),
         "next_frame": make_frame(observation=next_observation),
-        "previous_analysis": analysis,
-        "next_analysis": analysis,
         "executed_action": DrivingAction.KEEP,
         "shield_intervened": False,
         "decision_interval_s": 0.1,
@@ -54,13 +48,7 @@ def calculate(context: RewardContext, config: RewardConfig | None = None) -> Rew
 
 def make_safe_braking_context(**overrides: object) -> RewardContext:
     values: dict[str, object] = {
-        "analysis": make_analysis(
-            claims=(
-                make_claim("nominal"),
-                make_claim("hazard", severity=0.1, min_ttc_s=6.0),
-                make_claim("rule", hard_stop_required=False),
-            )
-        ),
+        "previous_frame": make_frame(minimum_actual_ttc_s=6.0),
         "executed_action": DrivingAction.SLOW,
     }
     values.update(overrides)
@@ -125,7 +113,14 @@ def test_arrival_reward_uses_next_privileged_state_once_per_episode() -> None:
 
 @pytest.mark.parametrize(
     ("collision_kind", "expected"),
-    [("vehicle", -200.0), ("crossing_actor", -500.0), (None, 0.0)],
+    [
+        ("vehicle", -200.0),
+        ("crossing_actor", -500.0),
+        ("object", -200.0),
+        ("sidewalk", -200.0),
+        ("building", -200.0),
+        (None, 0.0),
+    ],
 )
 def test_collision_penalty_uses_next_privileged_state(
     collision_kind: str | None, expected: float
@@ -141,20 +136,23 @@ def test_collision_penalty_uses_next_privileged_state(
     ("ttc_s", "expected"),
     [(0.0, -50.0), (1.5, -12.5), (3.0, 0.0), (4.0, 0.0)],
 )
-def test_near_miss_penalty_uses_current_analysis(ttc_s: float, expected: float) -> None:
-    result = calculate(
-        make_context(
-            analysis=make_analysis(
-                claims=(
-                    make_claim("nominal", min_ttc_s=ttc_s),
-                    make_claim("hazard", min_ttc_s=ttc_s + 1.0),
-                    make_claim("rule"),
-                )
-            )
-        )
-    )
+def test_near_miss_penalty_uses_post_step_oracle_ttc(ttc_s: float, expected: float) -> None:
+    result = calculate(make_context(next_frame=make_frame(minimum_actual_ttc_s=ttc_s)))
 
     assert result.components["near_miss_penalty"] == pytest.approx(expected)
+
+
+def test_reward_contract_excludes_agent_analysis_and_uses_oracle_transition() -> None:
+    context = make_context(
+        previous_frame=make_frame(minimum_actual_ttc_s=8.0),
+        next_frame=make_frame(minimum_actual_ttc_s=1.5),
+    )
+
+    result = calculate(context)
+
+    assert "previous_analysis" not in RewardContext.__dataclass_fields__
+    assert "next_analysis" not in RewardContext.__dataclass_fields__
+    assert result.components["near_miss_penalty"] == pytest.approx(-12.5)
 
 
 def test_raw_out_of_road_privileged_state_drives_penalty() -> None:
@@ -163,56 +161,28 @@ def test_raw_out_of_road_privileged_state_drives_penalty() -> None:
     assert result.components["offroad_penalty"] == -100.0
 
 
-@pytest.mark.parametrize("source", ["claim", "stop_required", "intersection_prohibited"])
-def test_rule_violation_uses_current_rule_constraint(source: str) -> None:
-    context = make_context(executed_action=DrivingAction.PREPARE_STOP)
-    analysis = context.previous_analysis
-    previous_observation = context.previous_frame.observation
-    if source == "claim":
-        analysis = make_analysis(claims=(make_claim("rule", hard_stop_required=True),))
-    elif source == "stop_required":
-        previous_observation = replace(
-            previous_observation,
-            road_context=replace(previous_observation.road_context, stop_required=True),
-        )
-    else:
-        previous_observation = replace(
-            previous_observation,
-            road_context=replace(
-                previous_observation.road_context,
-                intersection_entry_prohibited=True,
-            ),
-        )
-
+def test_rule_violation_uses_pre_action_oracle_constraint() -> None:
     result = calculate(
-        replace(
-            context,
-            previous_analysis=analysis,
-            previous_frame=make_frame(observation=previous_observation),
+        make_context(
+            previous_frame=make_frame(hard_rule_constraint=True),
+            executed_action=DrivingAction.PREPARE_STOP,
         )
     )
 
     assert result.components["rule_violation_penalty"] == -100.0
 
 
-def test_action_validity_uses_pre_action_analysis_and_observation() -> None:
-    previous_analysis = make_analysis(
-        claims=(
-            make_claim("hazard", severity=0.9, min_ttc_s=1.0),
-            make_claim("rule", hard_stop_required=True),
-        )
-    )
-    next_analysis = make_analysis(
-        claims=(
-            make_claim("hazard", severity=0.0, min_ttc_s=8.0),
-            make_claim("rule", hard_stop_required=False),
-        )
-    )
-
+def test_action_validity_uses_pre_action_oracle_not_post_action_oracle() -> None:
     result = calculate(
         make_context(
-            previous_analysis=previous_analysis,
-            next_analysis=next_analysis,
+            previous_frame=make_frame(
+                minimum_actual_ttc_s=1.0,
+                hard_rule_constraint=True,
+            ),
+            next_frame=make_frame(
+                minimum_actual_ttc_s=8.0,
+                hard_rule_constraint=False,
+            ),
             executed_action=DrivingAction.PREPARE_STOP,
         )
     )
@@ -224,18 +194,8 @@ def test_action_validity_uses_pre_action_analysis_and_observation() -> None:
 def test_unnecessary_brake_uses_pre_action_ttc_not_braking_outcome_ttc() -> None:
     result = calculate(
         make_context(
-            previous_analysis=make_analysis(
-                claims=(
-                    make_claim("hazard", severity=0.1, min_ttc_s=1.0),
-                    make_claim("rule"),
-                )
-            ),
-            next_analysis=make_analysis(
-                claims=(
-                    make_claim("hazard", severity=0.1, min_ttc_s=8.0),
-                    make_claim("rule"),
-                )
-            ),
+            previous_frame=make_frame(minimum_actual_ttc_s=1.0),
+            next_frame=make_frame(minimum_actual_ttc_s=8.0),
             executed_action=DrivingAction.SLOW,
         )
     )
@@ -243,33 +203,19 @@ def test_unnecessary_brake_uses_pre_action_ttc_not_braking_outcome_ttc() -> None
     assert result.components["unnecessary_brake_penalty"] == 0.0
 
 
-def test_near_miss_uses_post_action_analysis() -> None:
+def test_near_miss_uses_post_action_oracle() -> None:
     result = calculate(
         make_context(
-            previous_analysis=make_analysis(
-                claims=(make_claim("hazard", min_ttc_s=8.0), make_claim("rule"))
-            ),
-            next_analysis=make_analysis(
-                claims=(make_claim("hazard", min_ttc_s=0.0), make_claim("rule"))
-            ),
+            previous_frame=make_frame(minimum_actual_ttc_s=8.0),
+            next_frame=make_frame(minimum_actual_ttc_s=0.0),
         )
     )
 
     assert result.components["near_miss_penalty"] == -50.0
 
 
-def test_near_miss_ignores_non_physical_rule_claim_ttc() -> None:
-    result = calculate(
-        make_context(
-            next_analysis=make_analysis(
-                claims=(
-                    make_claim("nominal", min_ttc_s=8.0),
-                    make_claim("hazard", min_ttc_s=8.0),
-                    make_claim("rule", min_ttc_s=0.0, hard_stop_required=True),
-                )
-            )
-        )
-    )
+def test_no_oracle_collision_course_has_no_near_miss_penalty() -> None:
+    result = calculate(make_context(next_frame=make_frame(minimum_actual_ttc_s=None)))
 
     assert result.components["near_miss_penalty"] == 0.0
 
@@ -305,16 +251,7 @@ def test_jerk_penalty_uses_frame_elapsed_time_or_decision_interval(
 
 
 def test_no_actor_safe_scene_penalizes_unnecessary_stop_immediately() -> None:
-    context = make_context(
-        analysis=make_analysis(
-            claims=(
-                make_claim("nominal", min_ttc_s=None, severity=0.0),
-                make_claim("hazard", min_ttc_s=None, severity=0.0),
-                make_claim("rule", min_ttc_s=None, severity=0.0),
-            )
-        ),
-        executed_action=DrivingAction.STOP,
-    )
+    context = make_context(executed_action=DrivingAction.STOP)
 
     result = RewardCalculator(RewardConfig()).calculate(context)
 
@@ -333,35 +270,8 @@ def test_current_safe_stop_does_not_wait_for_future_steps() -> None:
 
 
 @pytest.mark.parametrize(
-    "analysis",
-    [
-        make_analysis(claims=(make_claim("nominal"), make_claim("rule"))),
-        make_analysis(claims=(make_claim("nominal"), make_claim("hazard"))),
-        make_analysis(
-            claims=(make_claim("hazard"), make_claim("rule")),
-            failed_agent_ids=("hazard",),
-            errors=("hazard:RuntimeError:failed",),
-        ),
-        make_analysis(
-            claims=(make_claim("hazard"), make_claim("rule")),
-            failed_agent_ids=("rule",),
-            errors=("rule:RuntimeError:failed",),
-        ),
-    ],
-    ids=["missing_hazard", "missing_rule", "failed_hazard", "failed_rule"],
-)
-def test_missing_or_failed_specialist_suppresses_unnecessary_brake_judgment(
-    analysis: object,
-) -> None:
-    result = calculate(make_safe_braking_context(analysis=analysis))
-
-    assert result.components["unnecessary_brake_penalty"] == 0.0
-
-
-@pytest.mark.parametrize(
     "case",
     [
-        "severity",
         "ttc",
         "rule",
         "offroad",
@@ -370,31 +280,13 @@ def test_missing_or_failed_specialist_suppresses_unnecessary_brake_judgment(
     ],
 )
 def test_current_safety_event_suppresses_unnecessary_brake_penalty(case: str) -> None:
-    if case == "severity":
-        context = make_safe_braking_context(
-            analysis=make_analysis(
-                claims=(
-                    make_claim("hazard", severity=0.25, min_ttc_s=6.0),
-                    make_claim("rule"),
-                )
-            )
-        )
-    elif case == "ttc":
-        context = make_safe_braking_context(
-            analysis=make_analysis(
-                claims=(
-                    make_claim("hazard", severity=0.1, min_ttc_s=4.99),
-                    make_claim("rule"),
-                )
-            )
-        )
+    if case == "ttc":
+        context = make_safe_braking_context(previous_frame=make_frame(minimum_actual_ttc_s=4.99))
     elif case == "rule":
         context = make_safe_braking_context(
-            analysis=make_analysis(
-                claims=(
-                    make_claim("hazard", severity=0.1, min_ttc_s=6.0),
-                    make_claim("rule", hard_stop_required=True),
-                )
+            previous_frame=make_frame(
+                minimum_actual_ttc_s=6.0,
+                hard_rule_constraint=True,
             )
         )
     elif case == "offroad":
@@ -415,16 +307,7 @@ def test_safe_ttc_threshold_is_inclusive() -> None:
     config = RewardConfig()
     result = calculate(
         make_safe_braking_context(
-            analysis=make_analysis(
-                claims=(
-                    make_claim(
-                        "hazard",
-                        severity=0.1,
-                        min_ttc_s=config.unnecessary_brake_safe_ttc_s,
-                    ),
-                    make_claim("rule"),
-                )
-            )
+            previous_frame=make_frame(minimum_actual_ttc_s=config.unnecessary_brake_safe_ttc_s)
         ),
         config,
     )

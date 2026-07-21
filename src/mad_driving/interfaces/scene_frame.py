@@ -67,6 +67,8 @@ class PrivilegedWorldState:
     arrived: bool
     scenario_success: bool
     scenario_failure: bool
+    minimum_actual_ttc_s: float | None
+    hard_rule_constraint: bool
 
     def __post_init__(self) -> None:
         all_actors = tuple(self.all_actors)
@@ -81,6 +83,12 @@ class PrivilegedWorldState:
             "building",
         }:
             raise ValueError("collision_kind is not recognized")
+        if self.minimum_actual_ttc_s is not None:
+            require_finite("minimum_actual_ttc_s", self.minimum_actual_ttc_s)
+            if self.minimum_actual_ttc_s < 0.0:
+                raise ValueError("minimum_actual_ttc_s must be non-negative")
+        if not isinstance(self.hard_rule_constraint, bool):
+            raise ValueError("hard_rule_constraint must be boolean")
         object.__setattr__(self, "all_actors", all_actors)
 
 

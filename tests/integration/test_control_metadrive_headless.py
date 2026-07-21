@@ -64,6 +64,7 @@ class EmergencyOnSecondAnalysisSuite:
                 challenged_claim_ids=(),
                 reasons=(),
             ),
+            expected_agent_ids=("nominal", "hazard", "rule"),
         )
 
 

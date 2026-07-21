@@ -50,10 +50,12 @@ class AgentAnalysisResult:
     failed_agent_ids: tuple[str, ...]
     errors: tuple[str, ...]
     review: CriticReview
+    expected_agent_ids: tuple[str, ...] = ("nominal", "hazard", "rule")
 
     def __post_init__(self) -> None:
         claims = tuple(_canonical_claim(claim) for claim in self.claims)
         failed_agent_ids = _canonical_strings(self.failed_agent_ids, "failed_agent_ids")
+        expected_agent_ids = _canonical_strings(self.expected_agent_ids, "expected_agent_ids")
         errors = _canonical_strings(self.errors, "errors")
         claim_ids = tuple(claim.claim_id for claim in claims)
         if len(claim_ids) != len(set(claim_ids)):
@@ -62,10 +64,19 @@ class AgentAnalysisResult:
             raise ValueError("failed_agent_ids must contain non-empty strings")
         if len(failed_agent_ids) != len(set(failed_agent_ids)):
             raise ValueError("failed_agent_ids must be unique")
+        if not all(agent_id for agent_id in expected_agent_ids):
+            raise ValueError("expected_agent_ids must contain non-empty strings")
+        if len(expected_agent_ids) != len(set(expected_agent_ids)):
+            raise ValueError("expected_agent_ids must be unique")
+        if not set(failed_agent_ids).issubset(expected_agent_ids):
+            raise ValueError("failed_agent_ids must be a subset of expected_agent_ids")
+        if not {claim.agent_id for claim in claims}.issubset(expected_agent_ids):
+            raise ValueError("claim agent_ids must be a subset of expected_agent_ids")
         _validate_error_mapping(failed_agent_ids, errors)
         review = _canonical_review(self.review)
         object.__setattr__(self, "claims", claims)
         object.__setattr__(self, "failed_agent_ids", failed_agent_ids)
+        object.__setattr__(self, "expected_agent_ids", expected_agent_ids)
         object.__setattr__(self, "errors", errors)
         object.__setattr__(self, "review", review)
 
@@ -102,9 +113,11 @@ class AgentSuite:
         failed_agent_ids: list[str] = []
         errors: list[str] = []
         seen_claim_ids: set[str] = set()
-        for agent in (self.nominal, self.hazard, self.rule):
-            if agent is None:
-                continue
+        agents = tuple(
+            agent for agent in (self.nominal, self.hazard, self.rule) if agent is not None
+        )
+        expected_agent_ids = tuple(agent.agent_id for agent in agents)
+        for agent in agents:
             try:
                 agent_claims = tuple(agent.analyze(observation))
                 self._validate_agent_claims(agent, agent_claims, seen_claim_ids)
@@ -123,7 +136,13 @@ class AgentSuite:
                 reasons=review.reasons
                 + tuple(f"agent_analysis_failed:{agent_id}" for agent_id in failed),
             )
-        return AgentAnalysisResult(tuple(claims), failed, tuple(errors), review)
+        return AgentAnalysisResult(
+            claims=tuple(claims),
+            failed_agent_ids=failed,
+            errors=tuple(errors),
+            review=review,
+            expected_agent_ids=expected_agent_ids,
+        )
 
     @staticmethod
     def _validate_agent_claims(

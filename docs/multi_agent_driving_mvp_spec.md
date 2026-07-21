@@ -567,7 +567,7 @@ class SafetyShield:
 
 学習は設定可能とし、初期値は`enforce`＋介入ペナルティとする。比較実験では、意思決定性能比較のB1・B2・Proposedをすべて`monitor`にそろえ、実行可能システム比較の全方式を`enforce`にそろえる。`Proposed without Shield`は主baselineではなくablationとして扱う。
 
-`monitor`でも`required_action`と`intervention_required`を`info`と`DecisionTrace`へ必ず記録する。低レベル制御がfail-safeへ入った場合は`control_fail_safe`と非空の`control_fail_safe_reason`を同じ2箇所へ記録し、通常時はfalse/`None`とする。
+`monitor`でも`required_action`と`intervention_required`を`info`と`DecisionTrace`へ必ず記録する。Shieldへは構成上存在する`expected_agent_ids`と、そのうち実行時に失敗した`failed_agent_ids`を別々に渡す。expectedに含まれないAgentは意図的ablationとして欠落数へ含めず、expectedなのにClaimがないAgentだけへ安全floorを適用する。低レベル制御がfail-safeへ入った場合は内部故障としてresourceをcloseし、通常のAction遷移をPPO bufferへ返さない。
 
 ---
 
@@ -645,22 +645,24 @@ reward:
   shield_intervention: 2.0
 ```
 
+### 比較方式に依存しないReward oracle
+
+Reward APIはAgent Claim、CriticReview、Agent失敗状態を入力に取らない。全方式共通の`PrivilegedWorldState.minimum_actual_ttc_s`は、可視・遮蔽を問わず全Simulator truth Actorについて、現在速度を固定した自車座標系の矩形衝突包絡への最初の進入時刻として決定論的に計算する。`hard_rule_constraint`もprivileged stateへ固定する。Agent ClaimはObservation、Shield、診断だけに使用する。
+
 ### Near-miss
 
-遷移後のnext Agent分析に含まれるNominal/Hazardの物理リスクTTCに応じた連続ペナルティとする。Rule Claimの規則上のTTCはnear-miss集計へ混ぜない。閾値を跨いだ瞬間だけの不連続な報酬にしない。
+遷移後の`minimum_actual_ttc_s`に応じた連続ペナルティとする。閾値を跨いだ瞬間だけの不連続な報酬にしない。
 
 ### Unnecessary brake
 
 以下をすべて満たす場合に発生する。
 
 - ActionがSLOW以上
-- HazardAgentとRuleAgentが失敗せず、両AgentのClaimが存在する
-- 全Hazard Claimのseverityが設定閾値未満
-- TTCが欠損して危険Actorがいない、または最小TTCが安全閾値以上
-- Action選択時のRule制約がない
+- Action選択時のoracle TTCが欠損して衝突course上のActorがいない、または最小TTCが安全閾値以上
+- Action選択時のoracle Rule制約がない
 - 遷移後の衝突、路外、Shield介入がない
 
-Actionの妥当性はAction選択時のprevious SceneFrameとprevious Agent分析で判定し、`-scale * executed_action`を即時に適用する。遷移後の衝突、路外、Shield介入は安全側のActionを誤罰しないための抑止条件としてだけ使う。将来lookahead、safe-brake streakを使用しない。「後から危険eventが発生しなかった」は評価metricであり、学習Reward入力ではない。
+Actionの妥当性はAction選択時のprevious privileged oracleで判定し、`-scale * executed_action`を即時に適用する。遷移後の衝突、路外、Shield介入は安全側のActionを誤罰しないための抑止条件としてだけ使う。将来lookahead、safe-brake streakを使用しない。「後から危険eventが発生しなかった」は評価metricであり、学習Reward入力ではない。`vehicle`、`object`、`sidewalk`、`building`への衝突はvehicle collision penalty、`crossing_actor`への衝突は専用のより大きいpenaltyを適用する。
 
 ### 終了条件
 
@@ -835,7 +837,7 @@ runs/<run_id>/
    └─ episode_<id>.gif
 ```
 
-新規学習は必須の`--run-dir`で、存在しない、または空のrun destinationを明示した場合だけ受け付ける。`training.run_root`へのgeneric fallback、非空directoryの再利用、overwrite optionは設けない。Resumeもsource runとは別の新しい空destinationへ書き、source checkpointのSHA-256、source hostで正規化したpath、親run/config、current configとの差分、開始`num_timesteps`、Observation/Action schemaを記録する。current resume sourceはcurrent hostでcanonicalize/dereferenceするが、既存metadata内のhistorical parent pathはcross-host provenance文字列として保持し、current hostのPath flavorで再解釈しない。全runは`research_contract_version=3`と`observation_schema_version=1`を持つ。旧contractのcheckpointを正式比較へ混在させない。
+新規学習は必須の`--run-dir`で、存在しない、または空のrun destinationを明示した場合だけ受け付ける。`training.run_root`へのgeneric fallback、非空directoryの再利用、overwrite optionは設けない。Resumeもsource runとは別の新しい空destinationへ書き、source checkpointのSHA-256、source hostで正規化したpath、親run/config、current configとの差分、開始`num_timesteps`、Observation/Action schemaを記録する。current resume sourceはcurrent hostでcanonicalize/dereferenceするが、既存metadata内のhistorical parent pathはcross-host provenance文字列として保持し、current hostのPath flavorで再解釈しない。全runは`research_contract_version=4`と`observation_schema_version=1`を持つ。旧contractのcheckpointを正式比較へ混在させない。
 
 ### GIF Overlay
 

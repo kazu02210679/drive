@@ -98,7 +98,6 @@ reward:
   hard_rule_violation: 100.0
   jerk_scale: 0.05
   unnecessary_brake_scale: 0.20
-  unnecessary_brake_severity_threshold: 0.25
   unnecessary_brake_safe_ttc_s: 5.0
   standstill_per_second: 0.50
   standstill_speed_mps: 0.10
