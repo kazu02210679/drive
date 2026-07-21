@@ -1,7 +1,7 @@
 # Phase 5 Scenarios and Curriculum Design
 
 **Date:** 2026-07-22  
-**Status:** Approved direction; detailed design awaiting review  
+**Status:** Approved
 **Parent:** Phase 4 branch `feat/phase4-rl-environment`, PR #4  
 **Implementation branch:** `feat/phase5-scenarios`
 
@@ -105,11 +105,13 @@ Stable scenario ordering is:
 level 0: nominal
 level 1: lead_brake
 level 2: lead_brake, cut_in
-level 3: lead_brake, cut_in, occluded_crossing
+level 3: occluded_crossing
 ```
 
-Level 0 uses a nominal no-hazard runtime. At levels with multiple choices, the
-choice is sampled uniformly before scenario-specific parameters are sampled.
+Level 0 uses a nominal no-hazard runtime. At Level 2 the choice is sampled
+uniformly before scenario-specific parameters are sampled. Level 3 always uses
+Occluded Crossing and adds a seeded secondary lead vehicle so the scene contains
+multiple simultaneous hazard candidates as required by the top-level spec.
 
 ### 4.2 MetaDrive Actor manager
 
@@ -210,6 +212,8 @@ Sampled defaults:
 - crossing speed: 2.0-6.0 m/s;
 - release trigger: 1.0-3.0 s;
 - occluder offset from lane edge: at least 0.5 m;
+- secondary lead gap: 35-55 m;
+- secondary lead speed fraction: 0.80-1.00;
 - post-crossing survival window: 2.0 s.
 
 A static occluder is placed outside the ego lane and outside the ego collision
@@ -218,6 +222,12 @@ excluded from `visible_actor_ids` while it remains behind the configured
 occlusion boundary. It becomes visible deterministically when it crosses that
 boundary. The runtime provides `OcclusionRegion` and
 `distance_to_conflict_point_m` through `ScenarioObservationContext`.
+
+Level 3 also spawns one same-lane secondary lead vehicle. It maintains its sampled
+speed and does not perform an additional emergency event. Its purpose is to
+provide a real, visible competing hazard candidate while the crossing Actor is
+hidden, creating the intended disagreement-prone multi-hazard scene without
+introducing a fourth scenario type.
 
 Success means the cyclist clears the ego corridor and the survival window
 completes without collision. Collision with the cyclist is failure. The
