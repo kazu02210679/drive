@@ -105,6 +105,31 @@ class EnvFactory:
         return env
 
 
+class CloseFailingEnv(FakeEnv):
+    def close(self) -> None:
+        super().close()
+        raise OSError(f"environment {self.identifier} close failed")
+
+
+class CloseFailingEnvFactory(EnvFactory):
+    def __call__(
+        self,
+        config: AppConfig,
+        *,
+        role: EnvironmentRole,
+        worker_index: int,
+    ) -> FakeEnv:
+        self.calls.append(EnvironmentCall(config, role, worker_index))
+        env = CloseFailingEnv(
+            len(self.created),
+            config=config,
+            role=role,
+            worker_index=worker_index,
+        )
+        self.created.append(env)
+        return env
+
+
 class FakeVecEnv:
     def __init__(self, env_fns: list[Callable[[], FakeEnv]]) -> None:
         self.envs = [env_fn() for env_fn in env_fns]
@@ -179,6 +204,9 @@ class FakeEvalCallback:
 
     def on_fake_training(self, model: "FakePPO", produced_timesteps: int) -> None:
         train_env = model.init_kwargs["env"]
+        if train_env.closed:
+            for environment in self.eval_env.envs:
+                environment.reset()
         callback_calls = math.ceil(produced_timesteps / train_env.num_envs)
         if callback_calls >= self.eval_freq:
             model.write_checkpoint(self.best_model_save_path / "best_model.zip", "best")
@@ -194,6 +222,17 @@ class EvalCallbackFactory:
         callback = FakeEvalCallback(**kwargs)
         self.instances.append(callback)
         return callback
+
+
+class NoBestEvalCallback:
+    def on_fake_training(self, model: "FakePPO", produced_timesteps: int) -> None:
+        del model, produced_timesteps
+
+
+class NoBestEvalCallbackFactory:
+    def __call__(self, **kwargs: Any) -> NoBestEvalCallback:
+        del kwargs
+        return NoBestEvalCallback()
 
 
 class RewardCallbackFactory:
@@ -496,6 +535,101 @@ def test_nonempty_run_directory_is_rejected_before_any_side_effect(tmp_path: Pat
     assert list(run_dir.iterdir()) == [marker]
     assert environments.calls == []
     assert FakePPO.instances == []
+
+
+def test_vector_constructor_error_keeps_primary_and_notes_owner_close_failure(
+    tmp_path: Path,
+) -> None:
+    environments = CloseFailingEnvFactory()
+
+    def fail_after_first_environment(
+        env_fns: list[Callable[[], gym.Env[Any, Any]]],
+    ) -> object:
+        env_fns[0]()
+        raise RuntimeError("vector construction failed")
+
+    with pytest.raises(RuntimeError, match="vector construction failed") as captured:
+        run_training(
+            make_config(),
+            smoke=True,
+            run_dir=tmp_path / "constructor-close-failure",
+            env_factory=environments,
+            ppo_factory=FakePPO,
+            dummy_vec_env_factory=fail_after_first_environment,
+            subproc_vec_env_factory=VecFactory(),
+            checkpoint_callback_factory=CheckpointCallbackFactory(),
+            eval_callback_factory=EvalCallbackFactory(),
+            reward_callback_factory=RewardCallbackFactory(),
+        )
+
+    assert environments.created[0].close_calls == 1
+    assert any("environment 0 close failed" in note for note in captured.value.__notes__)
+
+
+def test_environment_close_failure_prevents_success_publication(tmp_path: Path) -> None:
+    run_dir = tmp_path / "close-failure"
+    environments = CloseFailingEnvFactory()
+
+    with pytest.raises(OSError, match="environment 0 close failed") as captured:
+        run_with_fakes(
+            make_config(),
+            run_dir,
+            env_factory=environments,
+        )
+
+    assert not run_dir.exists()
+    assert [environment.close_calls for environment in environments.created] == [1, 1]
+    assert any("environment 1 close failed" in note for note in captured.value.__notes__)
+
+
+def test_seed_artifact_finalization_failure_prevents_success_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = tmp_path / "seed-finalization-failure"
+    environments = EnvFactory()
+
+    def fail_finalization(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise RuntimeError("seed artifact finalization failed")
+
+    monkeypatch.setattr(
+        train_module,
+        "summarize_episode_seed_artifacts",
+        fail_finalization,
+    )
+
+    with pytest.raises(RuntimeError, match="seed artifact finalization failed"):
+        run_with_fakes(
+            make_config(),
+            run_dir,
+            env_factory=environments,
+        )
+
+    assert not run_dir.exists()
+    assert all(environment.closed for environment in environments.created)
+
+
+def test_logger_close_failure_is_not_retried_and_prevents_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = tmp_path / "logger-close-failure"
+    close_calls = 0
+
+    def fail_logger_close(model: object | None) -> None:
+        nonlocal close_calls
+        assert model is not None
+        close_calls += 1
+        raise OSError("logger close failed")
+
+    monkeypatch.setattr(train_module, "_close_model_logger", fail_logger_close)
+
+    with pytest.raises(OSError, match="logger close failed"):
+        run_with_fakes(make_config(), run_dir)
+
+    assert close_calls == 1
+    assert not run_dir.exists()
 
 
 def test_existing_empty_run_directory_is_accepted(tmp_path: Path) -> None:
@@ -826,7 +960,9 @@ def test_run_directory_file_is_rejected_and_preserved_before_any_side_effect(
     assert FakePPO.instances == []
 
 
-def test_run_training_uses_only_configured_ppo_values_and_closes_envs(tmp_path: Path) -> None:
+def test_single_environment_training_and_validation_never_invoke_subprocess_factory(
+    tmp_path: Path,
+) -> None:
     config = make_config(
         learning_rate=0.0007,
         n_epochs=4,
@@ -878,8 +1014,8 @@ def test_run_training_uses_only_configured_ppo_values_and_closes_envs(tmp_path: 
     assert model.learn_kwargs["total_timesteps"] == 5_000
     assert model.learn_kwargs["reset_num_timesteps"] is True
     assert train_env is not eval_env
-    assert dummy.created == [train_env]
-    assert subproc.created == [eval_env]
+    assert dummy.created == [train_env, eval_env]
+    assert subproc.created == []
     assert environments.created[0] is not environments.created[1]
     assert all(env.closed for env in environments.created)
     assert all(env.close_calls == 1 for env in environments.created)
@@ -936,6 +1072,7 @@ def test_fresh_run_writes_complete_research_contract_metadata(tmp_path: Path) ->
     run_with_fakes(config, run_dir)
 
     metadata = json.loads((run_dir / "run_metadata.json").read_text(encoding="utf-8"))
+    summaries = metadata.pop("episode_seed_artifacts")
     assert metadata == {
         "research_contract_version": 2,
         "observation_schema_version": 1,
@@ -946,25 +1083,23 @@ def test_fresh_run_writes_complete_research_contract_metadata(tmp_path: Path) ->
         "action_order": ["KEEP", "SLOW", "PREPARE_STOP", "STOP"],
         "resolved_config": config.model_dump(mode="json"),
         "resume": None,
-        "episode_seed_artifacts": [
-            {
-                "path": "episode_seeds/train-worker-000.jsonl",
-                "record_count": 0,
-                "role": "train",
-                "schema_version": 1,
-                "sha256": hashlib.sha256(b"").hexdigest(),
-                "worker_index": 0,
-            },
-            {
-                "path": "episode_seeds/validation-worker-000.jsonl",
-                "record_count": 0,
-                "role": "validation",
-                "schema_version": 1,
-                "sha256": hashlib.sha256(b"").hexdigest(),
-                "worker_index": 0,
-            },
-        ],
     }
+    assert [
+        (summary["path"], summary["record_count"], summary["role"], summary["worker_index"])
+        for summary in summaries
+    ] == [
+        ("episode_seeds/train-worker-000.jsonl", 0, "train", 0),
+        ("episode_seeds/validation-worker-000.jsonl", 1, "validation", 0),
+    ]
+    for summary in summaries:
+        artifact = run_dir / summary["path"]
+        stat_result = os.stat(artifact, follow_symlinks=False)
+        assert summary["schema_version"] == 2
+        assert summary["file_identity"] == {
+            "device": stat_result.st_dev,
+            "inode": stat_result.st_ino,
+        }
+        assert summary["sha256"] == hashlib.sha256(artifact.read_bytes()).hexdigest()
 
 
 def test_training_persists_actual_reset_seed_artifacts_by_role_and_worker(
@@ -990,6 +1125,7 @@ def test_training_persists_actual_reset_seed_artifacts_by_role_and_worker(
         item["path"]: [
             json.loads(line)
             for line in (run_dir / item["path"]).read_text(encoding="utf-8").splitlines()
+            if "episode_rng_seed" in line
         ]
         for item in summaries
     }
@@ -1088,7 +1224,7 @@ def test_failed_best_validation_does_not_publish_a_best_checkpoint(
             make_config(),
             run_dir,
             env_factory=environments,
-            eval_factory=CallbackFactory(),
+            eval_factory=NoBestEvalCallbackFactory(),
         )
 
     assert not best_checkpoint.exists()
@@ -1161,7 +1297,7 @@ def test_failed_resume_preserves_all_source_run_artifacts(
     source_before = source_tree_bytes(source.run_dir)
     run_dir = tmp_path / failure
     env_factory: Any = EnvFactory()
-    eval_factory: EvalCallbackFactory | CallbackFactory = EvalCallbackFactory()
+    eval_factory: Any = EvalCallbackFactory()
     if failure == "environment":
         env_factory = FailingEnvFactory()
     elif failure == "ppo":
@@ -1171,7 +1307,7 @@ def test_failed_resume_preserves_all_source_run_artifacts(
     elif failure == "save":
         FakePPO.fail_save = True
     elif failure == "best_validation":
-        eval_factory = CallbackFactory()
+        eval_factory = NoBestEvalCallbackFactory()
     elif failure == "final_validation":
         FakePPO.skip_save = True
 
@@ -1634,15 +1770,28 @@ def test_partial_remote_close_failure_is_noted_without_masking_constructor(
 
 
 class GracefulRemote(FakeRemote):
-    def __init__(self, process: FakeProcess) -> None:
+    def __init__(
+        self,
+        process: FakeProcess,
+        environments: list[gym.Env[Any, Any]] | None = None,
+    ) -> None:
         super().__init__()
         self.process = process
+        self.environments = environments or []
         self.sent: list[tuple[str, None]] = []
 
     def send(self, message: tuple[str, None]) -> None:
         self.sent.append(message)
         if message == ("close", None):
+            for environment in self.environments:
+                environment.close()
             self.process.alive = False
+
+
+class RuntimeCloseFailingRemote(GracefulRemote):
+    def close(self) -> None:
+        super().close()
+        raise OSError("runtime remote close failed")
 
 
 class RuntimeProcessVecEnv(FakeVecEnv):
@@ -1660,7 +1809,7 @@ class RuntimeProcessVecEnv(FakeVecEnv):
                 exits_on_kill=exits_on_kill,
             )
         ]
-        self.remotes = (GracefulRemote(self.processes[0]),)
+        self.remotes = (GracefulRemote(self.processes[0], self.envs),)
         self.waiting = False
 
     def close(self) -> None:
@@ -1692,27 +1841,27 @@ class RuntimeProcessVecFactory:
         return vector_env
 
 
-def test_successful_training_confirms_subprocess_evaluation_worker_exited(
+def test_successful_training_confirms_subprocess_training_worker_exited(
     tmp_path: Path,
 ) -> None:
     subproc = RuntimeProcessVecFactory()
 
     run_with_fakes(
-        make_config(),
+        make_config(num_envs=2),
         tmp_path / "bounded-close",
         subproc_factory=subproc,
     )
 
-    evaluation = subproc.created[0]
-    process = evaluation.processes[0]
-    remote = evaluation.remotes[0]
+    training = subproc.created[0]
+    process = training.processes[0]
+    remote = training.remotes[0]
     assert remote.sent == [("close", None)]
     assert remote.close_calls == 1
     assert process.join_calls == [1.0]
     assert process.terminate_calls == 0
     assert process.kill_calls == 0
     assert process.is_alive() is False
-    assert evaluation.closed is True
+    assert training.closed is True
 
 
 def test_runtime_cleanup_continues_to_kill_after_join_and_terminate_fail() -> None:
@@ -1737,6 +1886,28 @@ def test_runtime_cleanup_continues_to_kill_after_join_and_terminate_fail() -> No
     assert process.is_alive() is False
 
 
+def test_runtime_subprocess_remote_close_failure_is_propagated() -> None:
+    vector_env = RuntimeProcessVecEnv(
+        [
+            lambda: FakeEnv(
+                0,
+                config=make_config(),
+                role="train",
+                worker_index=0,
+            )
+        ]
+    )
+    remote = RuntimeCloseFailingRemote(vector_env.processes[0])
+    vector_env.remotes = (remote,)
+
+    with pytest.raises(RuntimeError, match="remote cleanup.*could not be confirmed"):
+        train_module._close_vector_env(vector_env)
+
+    assert remote.close_calls == 1
+    assert vector_env.processes[0].is_alive() is False
+    assert vector_env.closed is True
+
+
 def test_worker_cleanup_failure_replaces_success_with_explicit_error(tmp_path: Path) -> None:
     subproc = RuntimeProcessVecFactory(
         graceful=False,
@@ -1746,7 +1917,7 @@ def test_worker_cleanup_failure_replaces_success_with_explicit_error(tmp_path: P
 
     with pytest.raises(RuntimeError, match="worker cleanup could not be confirmed"):
         run_with_fakes(
-            make_config(),
+            make_config(num_envs=2),
             tmp_path / "unsafe-close",
             subproc_factory=subproc,
         )
@@ -1767,7 +1938,7 @@ def test_worker_cleanup_failure_does_not_mask_training_error(tmp_path: Path) -> 
 
     with pytest.raises(RuntimeError, match="learn failed") as raised:
         run_with_fakes(
-            make_config(),
+            make_config(num_envs=2),
             tmp_path / "learn-and-close-failure",
             subproc_factory=subproc,
         )

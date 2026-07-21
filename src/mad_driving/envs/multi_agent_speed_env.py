@@ -357,6 +357,7 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
             step_index = frame.observation.step_index + 1
             runtime.before_step(environment, scenario_state, step_index=step_index)
             _, _, raw_terminated, raw_truncated, raw_step_info = environment.step(int(executed))
+            runtime_decision_interval_s = self._validated_decision_interval(environment)
             step_info = self._copy_info(raw_step_info)
             scenario_result = runtime.after_step(
                 environment,
@@ -367,6 +368,7 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
             if not isinstance(scenario_result, ScenarioStepResult):
                 raise TypeError("ScenarioRuntime.after_step must return ScenarioStepResult")
             context = self._runtime_context(runtime, scenario_state)
+            runtime_decision_interval_s = self._validated_decision_interval(environment)
             next_frame = self._build_frame(
                 builder,
                 environment,
@@ -395,14 +397,19 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
                 next_analysis,
             )
             privileged = next_frame.privileged
-            terminated = bool(raw_terminated) or any(
+            terminated = any(
                 (
                     privileged.collision_occurred,
+                    privileged.off_road,
                     privileged.arrived,
                     privileged.scenario_success,
                     privileged.scenario_failure,
                 )
             )
+            if bool(raw_terminated) and not terminated:
+                raise RuntimeError(
+                    "raw simulator termination has no matching typed privileged outcome"
+                )
             truncated = bool(raw_truncated)
             trace = DecisionTrace(
                 step_index=step_index,
@@ -456,10 +463,7 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
         environment = self._detach_environment()
         if environment is None:
             return
-        try:
-            environment.close()
-        except Exception:
-            pass
+        environment.close()
 
     def _new_environment(self) -> DrivingEnvironment:
         metadrive_config = self._config.metadrive_dict()

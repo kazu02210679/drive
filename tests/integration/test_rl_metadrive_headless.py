@@ -2,14 +2,14 @@ import math
 import zipfile
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import gymnasium as gym
 import numpy as np
 import pytest
 from gymnasium.utils.env_checker import check_env
 from numpy.typing import NDArray
-from stable_baselines3.common.vec_env import SubprocVecEnv
+from stable_baselines3.common.vec_env import DummyVecEnv
 
 from mad_driving.config.loader import load_config
 from mad_driving.config.models import AppConfig
@@ -21,12 +21,17 @@ SEED = 42
 ACTION_SEQUENCE = tuple(index % 4 for index in range(100))
 
 
-class CapturingSubprocVecEnv(SubprocVecEnv):
-    latest: "CapturingSubprocVecEnv | None" = None
+class CapturingDummyVecEnv(DummyVecEnv):
+    created: ClassVar[list["CapturingDummyVecEnv"]] = []
 
     def __init__(self, env_fns: list[Callable[[], gym.Env[Any, Any]]]) -> None:
         super().__init__(env_fns)
-        type(self).latest = self
+        self.closed = False
+        type(self).created.append(self)
+
+    def close(self) -> None:
+        super().close()
+        self.closed = True
 
 
 METADRIVE_INFO_KEYS = {
@@ -255,7 +260,9 @@ def test_real_rl_environment_repeats_same_seed_initial_observation_and_traces() 
 
 
 @pytest.mark.integration
-def test_real_single_metadrive_training_isolates_evaluation_engine(tmp_path: Path) -> None:
+def test_real_single_metadrive_training_uses_sequential_dummy_environments(
+    tmp_path: Path,
+) -> None:
     payload = load_config("configs/train.yaml").model_dump(mode="python")
     payload["metadrive"]["horizon"] = 8
     payload["training"].update(
@@ -271,18 +278,24 @@ def test_real_single_metadrive_training_isolates_evaluation_engine(tmp_path: Pat
     )
     config = AppConfig.model_validate(payload)
 
-    CapturingSubprocVecEnv.latest = None
+    CapturingDummyVecEnv.created = []
+
+    def reject_subprocess_factory(
+        env_fns: list[Callable[[], gym.Env[Any, Any]]],
+    ) -> object:
+        del env_fns
+        raise AssertionError("single-environment training must not construct SubprocVecEnv")
+
     result = run_training(
         config,
         smoke=True,
         run_dir=tmp_path / "real-training",
-        subproc_vec_env_factory=CapturingSubprocVecEnv,
+        dummy_vec_env_factory=CapturingDummyVecEnv,
+        subproc_vec_env_factory=reject_subprocess_factory,
     )
 
     assert result.timesteps == 8
     assert zipfile.is_zipfile(result.best_checkpoint)
     assert zipfile.is_zipfile(result.final_checkpoint)
-    evaluation = CapturingSubprocVecEnv.latest
-    assert evaluation is not None
-    assert evaluation.closed is True
-    assert all(not process.is_alive() for process in evaluation.processes)
+    assert len(CapturingDummyVecEnv.created) == 2
+    assert all(vector.closed for vector in CapturingDummyVecEnv.created)

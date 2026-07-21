@@ -114,32 +114,29 @@ def test_smoke_and_resume_are_forwarded_and_success_is_json(
     }
 
 
-def test_omitted_run_dir_uses_configured_run_root(
+def test_run_dir_is_required_before_config_or_training_writes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text("seed: 42\n", encoding="utf-8")
-    configured_run_root = tmp_path / "configured-runs"
-    config = make_config(run_root=str(configured_run_root))
-    run_dirs: list[Path] = []
-    monkeypatch.setattr(train_module, "load_config", lambda path: config)
+    calls: list[str] = []
+    monkeypatch.setattr(train_module, "load_config", lambda path: calls.append("config"))
+    monkeypatch.setattr(
+        train_module,
+        "run_training",
+        lambda *args, **kwargs: calls.append("training"),
+    )
 
-    def fake_run_training(
-        received_config: AppConfig,
-        *,
-        smoke: bool,
-        run_dir: Path,
-        resume_from: Path | None,
-    ) -> TrainingResult:
-        del received_config, smoke, resume_from
-        run_dirs.append(run_dir)
-        return TrainingResult(run_dir, run_dir / "final.zip", run_dir / "best.zip", 500_000)
+    with pytest.raises(SystemExit) as exc_info:
+        main(["--config", str(config_path)])
 
-    monkeypatch.setattr(train_module, "run_training", fake_run_training)
-
-    assert main(["--config", str(config_path)]) == 0
-    assert run_dirs == [configured_run_root]
+    assert exc_info.value.code == 2
+    captured = capsys.readouterr()
+    assert "--run-dir" in captured.err
+    assert "required" in captured.err
+    assert calls == []
 
 
 @pytest.mark.parametrize("option", ["--config", "--resume-from"])
@@ -152,9 +149,10 @@ def test_missing_input_path_is_rejected_without_calling_training(
     config_path = tmp_path / "config.yaml"
     config_path.write_text("seed: 42\n", encoding="utf-8")
     args = ["--config", str(config_path)]
+    args.extend(["--run-dir", str(tmp_path / "run")])
     missing = tmp_path / "missing.file"
     if option == "--config":
-        args = ["--config", str(missing)]
+        args = ["--config", str(missing), "--run-dir", str(tmp_path / "run")]
     else:
         args.extend(["--resume-from", str(missing)])
     called = False
@@ -239,7 +237,18 @@ def test_operational_error_is_concise_and_traceback_free(
 
     monkeypatch.setattr(train_module, "run_training", failing_training)
 
-    assert main(["--config", str(config_path), "--smoke"]) == 2
+    assert (
+        main(
+            [
+                "--config",
+                str(config_path),
+                "--run-dir",
+                str(tmp_path / "failed-run"),
+                "--smoke",
+            ]
+        )
+        == 2
+    )
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "training failed: training exploded" in captured.err

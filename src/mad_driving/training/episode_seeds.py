@@ -14,8 +14,9 @@ import gymnasium as gym
 
 from mad_driving.scenarios import EnvironmentRole
 
-EPISODE_SEED_ARTIFACT_SCHEMA_VERSION: Final = 1
+EPISODE_SEED_ARTIFACT_SCHEMA_VERSION: Final = 2
 _ARTIFACT_DIRECTORY: Final = "episode_seeds"
+_HEADER_RECORD_TYPE: Final = "episode_seed_artifact"
 _RECORD_FIELDS: Final = frozenset(
     {
         "role",
@@ -89,6 +90,49 @@ def _validate_reset_info(
     }
 
 
+def _file_identity(stat_result: os.stat_result) -> tuple[int, int]:
+    device = int(stat_result.st_dev)
+    inode = int(stat_result.st_ino)
+    if device < 0 or inode <= 0:
+        raise RuntimeError("Episode seed artifact has no verifiable file identity")
+    return device, inode
+
+
+def _identity_payload(identity: tuple[int, int]) -> dict[str, int]:
+    return {"device": identity[0], "inode": identity[1]}
+
+
+def _encode_json_line(value: Mapping[str, object]) -> bytes:
+    return (
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def _strict_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON field: {key}")
+        result[key] = value
+    return result
+
+
+def _write_all(descriptor: int, payload: bytes) -> None:
+    remaining = memoryview(payload)
+    while remaining:
+        written = os.write(descriptor, remaining)
+        if written <= 0:
+            raise OSError("Episode seed artifact append made no progress")
+        remaining = remaining[written:]
+
+
 class EpisodeSeedRecordingWrapper(gym.Wrapper[Any, Any, Any, Any]):
     """Record the seed identities returned by every wrapped environment reset."""
 
@@ -107,15 +151,41 @@ class EpisodeSeedRecordingWrapper(gym.Wrapper[Any, Any, Any, Any]):
             normalized_role,
             normalized_worker,
         )
-        descriptor = os.open(artifact, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        descriptor = os.open(
+            artifact,
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_APPEND | getattr(os, "O_BINARY", 0),
+            0o600,
+        )
         try:
+            identity = _file_identity(os.fstat(descriptor))
+            _write_all(
+                descriptor,
+                _encode_json_line(
+                    {
+                        "file_identity": _identity_payload(identity),
+                        "record_type": _HEADER_RECORD_TYPE,
+                        "role": normalized_role,
+                        "schema_version": EPISODE_SEED_ARTIFACT_SCHEMA_VERSION,
+                        "worker_index": normalized_worker,
+                    }
+                ),
+            )
             os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+        except BaseException as primary_error:
+            try:
+                os.close(descriptor)
+            except BaseException as cleanup_error:
+                primary_error.add_note(
+                    f"Episode seed descriptor cleanup also failed: {cleanup_error}"
+                )
+            raise
         self._artifact_root = artifact_root
         self._artifact = artifact
         self._role = normalized_role
         self._worker_index = normalized_worker
+        self._descriptor: int | None = descriptor
+        self._identity = identity
+        self._closed = False
 
     def reset(
         self,
@@ -123,48 +193,130 @@ class EpisodeSeedRecordingWrapper(gym.Wrapper[Any, Any, Any, Any]):
         seed: int | None = None,
         options: dict[str, Any] | None = None,
     ) -> tuple[Any, dict[str, Any]]:
-        if options is None:
-            observation, info = self.env.reset(seed=seed)
-        else:
-            observation, info = self.env.reset(seed=seed, options=options)
-        record = _validate_reset_info(
-            info,
-            role=self._role,
-            worker_index=self._worker_index,
-        )
-        encoded = (
-            json.dumps(
-                record,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-                allow_nan=False,
+        descriptor = self._open_descriptor()
+        try:
+            self._assert_artifact_identity(descriptor)
+            if options is None:
+                observation, info = self.env.reset(seed=seed)
+            else:
+                observation, info = self.env.reset(seed=seed, options=options)
+            record = _validate_reset_info(
+                info,
+                role=self._role,
+                worker_index=self._worker_index,
             )
-            + "\n"
-        ).encode("utf-8")
-        resolved_artifact = self._artifact.resolve(strict=True)
-        if resolved_artifact.parent != self._artifact_root or not resolved_artifact.is_file():
-            raise RuntimeError(
-                f"Refusing seed artifact write outside workspace: {self._artifact_root.parent}"
-            )
-        with resolved_artifact.open("ab", buffering=0) as output:
-            output.write(encoded)
-            os.fsync(output.fileno())
+            self._assert_artifact_identity(descriptor)
+            _write_all(descriptor, _encode_json_line(record))
+            os.fsync(descriptor)
+        except BaseException as primary_error:
+            if isinstance(primary_error, RuntimeError) and "artifact identity" in str(
+                primary_error
+            ):
+                try:
+                    self.close()
+                except BaseException as cleanup_error:
+                    primary_error.add_note(
+                        f"Episode seed recorder cleanup also failed: {cleanup_error}"
+                    )
+            raise
         return observation, dict(info)
 
+    def close(self) -> None:
+        """Close the wrapped environment and writer once without retrying resources."""
 
-def _load_artifact_records(
+        if self._closed:
+            return
+        self._closed = True
+        descriptor = self._descriptor
+        self._descriptor = None
+        primary_error: BaseException | None = None
+        cleanup_errors: list[BaseException] = []
+        try:
+            self.env.close()
+        except BaseException as error:
+            primary_error = error
+        if descriptor is not None:
+            try:
+                self._assert_artifact_identity(descriptor)
+                os.fsync(descriptor)
+            except BaseException as error:
+                cleanup_errors.append(error)
+            try:
+                os.close(descriptor)
+            except BaseException as error:
+                cleanup_errors.append(error)
+        if primary_error is not None:
+            for cleanup_error in cleanup_errors:
+                primary_error.add_note(
+                    f"Episode seed artifact cleanup also failed: {cleanup_error}"
+                )
+            raise primary_error
+        if cleanup_errors:
+            first, *remaining = cleanup_errors
+            for cleanup_error in remaining:
+                first.add_note(f"Episode seed artifact cleanup also failed: {cleanup_error}")
+            raise first
+
+    def _open_descriptor(self) -> int:
+        descriptor = self._descriptor
+        if self._closed or descriptor is None:
+            raise RuntimeError("Episode seed recorder is closed")
+        return descriptor
+
+    def _assert_artifact_identity(self, descriptor: int) -> None:
+        descriptor_identity = _file_identity(os.fstat(descriptor))
+        try:
+            path_stat = os.stat(self._artifact, follow_symlinks=False)
+        except OSError as error:
+            raise RuntimeError(
+                "Episode seed artifact identity no longer matches its path"
+            ) from error
+        if (
+            descriptor_identity != self._identity
+            or _file_identity(path_stat) != self._identity
+            or not self._artifact.is_file()
+        ):
+            raise RuntimeError("Episode seed artifact identity no longer matches its path")
+
+
+def _parse_artifact_records(
+    payload: bytes,
     artifact: Path,
     *,
     role: EnvironmentRole,
     worker_index: int,
+    identity: tuple[int, int],
 ) -> list[dict[str, object]]:
     try:
-        lines = artifact.read_text(encoding="utf-8").splitlines()
-    except (OSError, UnicodeError) as exc:
+        text = payload.decode("utf-8")
+    except UnicodeError as exc:
         raise ValueError(f"Episode seed artifact is unreadable: {artifact}") from exc
+    if not payload.endswith(b"\n"):
+        raise ValueError(f"Episode seed artifact has an incomplete final record: {artifact}")
+    lines = text.splitlines()
+    if not lines:
+        raise ValueError(f"Episode seed artifact header is missing: {artifact}")
+    try:
+        header = json.loads(
+            lines[0],
+            parse_constant=lambda constant: (_ for _ in ()).throw(
+                ValueError(f"non-finite JSON number: {constant}")
+            ),
+            object_pairs_hook=_strict_json_object,
+        )
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise ValueError(f"Episode seed artifact header is malformed: {artifact}") from exc
+    expected_header = {
+        "file_identity": _identity_payload(identity),
+        "record_type": _HEADER_RECORD_TYPE,
+        "role": role,
+        "schema_version": EPISODE_SEED_ARTIFACT_SCHEMA_VERSION,
+        "worker_index": worker_index,
+    }
+    if header != expected_header:
+        raise ValueError(f"Episode seed artifact file identity header is malformed: {artifact}")
     records: list[dict[str, object]] = []
-    for line_number, line in enumerate(lines, start=1):
+    for line_number, line in enumerate(lines[1:], start=2):
         if not line:
             raise ValueError(f"Episode seed artifact contains a blank record: {artifact}")
         try:
@@ -173,6 +325,7 @@ def _load_artifact_records(
                 parse_constant=lambda constant: (_ for _ in ()).throw(
                     ValueError(f"non-finite JSON number: {constant}")
                 ),
+                object_pairs_hook=_strict_json_object,
             )
         except (json.JSONDecodeError, ValueError) as exc:
             raise ValueError(
@@ -189,6 +342,55 @@ def _load_artifact_records(
             )
         records.append(expected)
     return records
+
+
+def _stat_signature(stat_result: os.stat_result) -> tuple[tuple[int, int], int, int, int]:
+    return (
+        _file_identity(stat_result),
+        int(stat_result.st_size),
+        int(stat_result.st_mtime_ns),
+        int(stat_result.st_ctime_ns),
+    )
+
+
+def _path_identity(artifact: Path) -> tuple[int, int]:
+    try:
+        return _file_identity(os.stat(artifact, follow_symlinks=False))
+    except OSError as exc:
+        raise ValueError(f"Episode seed artifact identity is unreadable: {artifact}") from exc
+
+
+def _read_parse_and_hash_artifact(
+    artifact: Path,
+    *,
+    role: EnvironmentRole,
+    worker_index: int,
+) -> tuple[list[dict[str, object]], str, tuple[int, int]]:
+    try:
+        with artifact.open("rb", buffering=0) as source:
+            before = os.fstat(source.fileno())
+            identity = _file_identity(before)
+            if _path_identity(artifact) != identity:
+                raise ValueError(f"Episode seed artifact identity changed: {artifact}")
+            payload = source.read()
+            records = _parse_artifact_records(
+                payload,
+                artifact,
+                role=role,
+                worker_index=worker_index,
+                identity=identity,
+            )
+            digest = hashlib.sha256(payload).hexdigest()
+            after = os.fstat(source.fileno())
+            if _stat_signature(after) != _stat_signature(before):
+                raise ValueError(
+                    f"Episode seed artifact changed while being inventoried: {artifact}"
+                )
+            if _path_identity(artifact) != identity:
+                raise ValueError(f"Episode seed artifact identity changed: {artifact}")
+    except (OSError, RuntimeError) as exc:
+        raise ValueError(f"Episode seed artifact is unreadable: {artifact}") from exc
+    return records, digest, identity
 
 
 def summarize_episode_seed_artifacts(
@@ -208,15 +410,14 @@ def summarize_episode_seed_artifacts(
         if resolved_artifact.parent != artifact_root or not resolved_artifact.is_file():
             raise ValueError(f"Episode seed artifact is outside the run workspace: {artifact}")
         expected_paths.add(resolved_artifact)
-        records = _load_artifact_records(
+        records, digest, identity = _read_parse_and_hash_artifact(
             resolved_artifact,
             role=role,
             worker_index=worker_index,
         )
-        with resolved_artifact.open("rb") as source:
-            digest = hashlib.file_digest(source, "sha256").hexdigest()
         summaries.append(
             {
+                "file_identity": _identity_payload(identity),
                 "path": resolved_artifact.relative_to(workspace_root).as_posix(),
                 "record_count": len(records),
                 "role": role,

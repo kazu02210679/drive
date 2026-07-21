@@ -161,11 +161,13 @@ def test_real_ppo_writes_artifacts_and_resumes_transactionally(tmp_path: Path) -
     seed_records: dict[str, list[dict[str, object]]] = {}
     for summary in seed_summaries:
         artifact = run_dir / summary["path"]
-        records = [json.loads(line) for line in artifact.read_text(encoding="utf-8").splitlines()]
+        values = [json.loads(line) for line in artifact.read_text(encoding="utf-8").splitlines()]
+        header, *records = values
         seed_records[summary["role"]] = records
         assert summary["record_count"] == len(records)
         assert summary["sha256"] == checkpoint_hash(artifact)
-        assert summary["schema_version"] == 1
+        assert summary["schema_version"] == 2
+        assert summary["file_identity"] == header["file_identity"]
     train_seeds = [record["episode_rng_seed"] for record in seed_records["train"]]
     validation_seeds = [record["episode_rng_seed"] for record in seed_records["validation"]]
     assert len(set(train_seeds)) >= 2
@@ -202,7 +204,7 @@ def test_real_ppo_writes_artifacts_and_resumes_transactionally(tmp_path: Path) -
         "checkpoint_interval_steps": 8,
         "eval_interval_steps": 8,
     }
-    assert len(environments) == 1
+    assert len(environments) == 2
     assert all(environment.closed for environment in environments)
     source_files = {
         path.relative_to(run_dir).as_posix(): path.read_bytes()
@@ -261,5 +263,5 @@ def test_real_ppo_writes_artifacts_and_resumes_transactionally(tmp_path: Path) -
     assert resume_metadata["parent_run_dir"] == str(run_dir.resolve())
     assert resume_metadata["start_num_timesteps"] == 16
     assert resume_metadata["config_diff"] == {}
-    assert len(environments) == 2
+    assert len(environments) == 4
     assert all(environment.closed for environment in environments)

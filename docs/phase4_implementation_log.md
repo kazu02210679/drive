@@ -503,3 +503,71 @@ Both metadata files are byte-identical at SHA-256 `37dfdb2451cc2032ed4d56c3e2f65
 The final checkpoint SHA-256 values are `191b77cf7d471eb8850ffc1e130c427a0e46f194e258c892d6ef1a1ac761a4d4` for A and `d4b1c487e15730d8187889193ed325fb018808d7ee6560cb674d8b64bf444f19` for B. Each reloaded at `num_timesteps=6144` and completed 100 deterministic real MetaDrive decision steps with 101 finite observations, 100 finite rewards, no termination, and no truncation. Checkpoint ZIP byte equality is not the deterministic training contract.
 
 The Coordinator Observation remains 24-dimensional. `ttc_valid`, `claim_valid`, `agent_failed`, and `target_actor_present` remain deferred and unimplemented. No Phase 5 Actor/Curriculum or Phase 6 work was added. Nothing was pushed.
+
+## 2026-07-21 Phase 4.1 final whole-branch fix wave
+
+This final section supersedes all earlier Phase 4.1 verification and smoke evidence in this
+log. Historical runs remain preserved; no run or recovery directory was deleted or reused.
+
+Strict RED→GREEN tests closed the complete-transition timing race, typed privileged
+termination boundary, descriptor/path seed-artifact replacement races, cleanup exception
+semantics, genuine no-spawn fallback, required CLI destination, and cross-host chained
+resume provenance. Timing is checked after the simulator step and after the runtime hook
+immediately before next-frame construction. Off-road is terminating; unmatched raw
+termination is a consistency error. Seed schema 2 binds every writer and parent inventory
+to platform file identity and one parse/hash byte read. Cleanup failure prevents atomic
+publication unless it is attached as a note to an existing primary exception.
+
+For `num_envs=1`, train and validation now use sequential `DummyVecEnv` instances. Training
+closes before one deferred validation pass, satisfying MetaDrive's process-global engine
+constraint without invoking `SubprocVecEnv`. For `num_envs>1`, train remains subprocessed
+and validation worker 0 remains a parent-process `DummyVecEnv`. `--run-dir` is required
+before config loading, and historical parent paths are validated as provenance strings
+without current-host path parsing. Observation remains exactly 24-dimensional; Phase 5 and
+Phase 6 were not expanded.
+
+### Superseding gates
+
+- canonical full pytest: `655 passed, 16 warnings in 27.11s`;
+- Ruff lint: `All checks passed!`;
+- mypy: `Success: no issues found in 54 source files`;
+- strict coverage: `655 passed, 16 warnings in 33.72s`, 3,535 statements, 256 missed,
+  960 branches, 159 partial, exact `90.28%`;
+- real MetaDrive trio: `15 passed, 15 warnings in 13.80s`.
+
+The first strict coverage attempt after implementation ran 642 tests and failed at
+`89.69%`. Focused seed descriptor/parser boundaries plus the final one-shot logger and
+duplicate-key tests raised the suite to 655 and the passing `90.28%`; the failed result is
+not reported as a completion gate. No warning was suppressed.
+
+### Superseding fresh PPO smokes
+
+Read-only preflight checks proved both destinations absent:
+
+```text
+runs/phase4_1_final_fix_smoke_20260721_a exists=False
+runs/phase4_1_final_fix_smoke_20260721_b exists=False
+```
+
+Both standalone commands used required `--run-dir`, `configs/train.yaml`, smoke mode, and
+seed 42. A exited 0 in `36.7s`; B exited 0 in `36.8s`. Each requested 5,000 steps,
+completed 6,144 at the PPO rollout boundary, and performed five deferred 200-step
+validation episodes with mean reward `-104.51`.
+
+An independent strict parser verified config/metadata contracts, schema-2 file-identity
+headers, path `stat` identity, exact role/worker inventory, complete JSONL, record count,
+and SHA-256 from each artifact's single byte read. Both runs contain 31 train and 6
+validation records. Every A/B train and validation tuple is equal, train values stay in
+`[0, 10000)`, and validation values stay in `[10000, 11000)`. The first three train tuples
+are `(42, 948, 2314)`, `(191664963, 3546, 2463)`, and
+`(1662057957, 5299, 6974)`; the six validation tuples are `(42, 10746, 10418)`,
+`(191664963, 10103, 10696)`, `(1662057957, 10595, 10383)`,
+`(1405681631, 10643, 10445)`, `(942484272, 10361, 10833)`, and
+`(929893137, 10640, 10594)`. Each TensorBoard event file contains 62 finite scalar values.
+
+Final checkpoint hashes are
+`b4850408ad0447cb682bece00a77767e8e5258843e223280624cef85df87ba70` (A) and
+`0fbcf53ffa5b429480d267aba0d01207f003ed3b628bf1d7e7e40393fe73755a` (B).
+Each reloaded at `num_timesteps=6144` and completed 100 deterministic real MetaDrive steps
+with 101 finite observations, 100 finite rewards, no termination, and no truncation. The
+post-audit `python`/`pythonw` process count was 0. Nothing was pushed.

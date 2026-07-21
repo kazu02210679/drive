@@ -16,7 +16,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True, help="Path to the YAML configuration file")
     parser.add_argument("--smoke", action="store_true", help="Train for smoke_timesteps")
-    parser.add_argument("--run-dir", help="Artifact directory (defaults to training.run_root)")
+    parser.add_argument("--run-dir", required=True, help="Fresh artifact directory for this run")
     parser.add_argument("--resume-from", help="Existing PPO checkpoint to resume")
     return parser
 
@@ -38,7 +38,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             _require_file(resume_from, "Resume checkpoint")
 
         config = load_config(config_path)
-        run_dir = Path(args.run_dir) if args.run_dir is not None else Path(config.training.run_root)
+        run_dir = Path(args.run_dir)
         require_empty_run_directory(run_dir)
 
         result = run_training(

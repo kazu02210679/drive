@@ -583,8 +583,8 @@ class SafetyShield:
 1. PPO CoordinatorからActionを受け取る
 2. Safety ShieldでActionをfilter
 3. 低レベルPolicyへtarget speedを設定
-4. `ScenarioRuntime.before_step`を呼び、MetaDriveを1 decision step進め、`ScenarioRuntime.after_step`を呼ぶ
-5. 新SceneFrameを作成
+4. `ScenarioRuntime.before_step`を呼び、MetaDriveを1 decision step進め、authoritative decision intervalを再検証してから`ScenarioRuntime.after_step`を呼ぶ
+5. `after_step`とobservation context取得後にdecision intervalを再検証し、直後に新SceneFrameを作成する。不一致時はsnapshot、Agent分析、Reward、Trace、next stateへ進まずcloseして元の例外を送出する
 6. Agent可視ObservationからAgent分析とCriticReviewを実行
 7. rewardを計算
 8. terminated/truncatedを判定
@@ -600,7 +600,7 @@ obs, reward, terminated, truncated, info = env.step(action)
 
 `gymnasium.utils.env_checker.check_env()`を通すこと。
 
-自然なMDP結果はGymnasium semanticsに従う。衝突、到着、scenario success/failureは`terminated=True`、設定horizonは`truncated=True`とする。Simulator、ScenarioRuntime、snapshot、reward、observationなどの内部errorは所有resourceをcloseして元の例外を送出し、zero Observationや偽のtruncationへ変換しない。
+自然なMDP結果はGymnasium semanticsに従う。typed privileged stateの衝突、off-road、到着、scenario success/failureだけから`terminated=True`を導出し、設定horizonのraw truncationは`truncated=True`として保持する。Simulatorのraw terminationがtrueなら、少なくとも1つのtyped privileged termination outcomeとの一致を必須とし、不一致は内部consistency errorとする。typed outcomeがあるvalidな場合だけboth-trueを許す。Simulator、ScenarioRuntime、snapshot、reward、observationなどの内部errorは所有resourceをcloseして元の例外を送出し、zero Observationや偽のtruncationへ変換しない。
 
 ---
 
@@ -675,9 +675,9 @@ Phase 4.1ではSimulator非依存の`ScenarioRuntime` lifecycleとrole別seed al
 ### 共通要件
 
 - seedで完全再現可能
-- `episode_rng_seed`、`metadrive_scenario_index`、`scenario_parameter_seed`を別identityとしてreset infoとDecisionTraceへ記録する。学習では実際に消費した各reset infoをprivate run workspace内のrole/worker別JSONLへ同期・耐久書き込みし、VecEnvをcloseした後に件数とSHA-256を検証して`run_metadata.json`の`episode_seed_artifacts`から参照する
+- `episode_rng_seed`、`metadrive_scenario_index`、`scenario_parameter_seed`を別identityとしてreset infoとDecisionTraceへ記録する。学習ではrole/worker別JSONLをexclusive createし、wrapper lifetime中は同じdescriptorだけでappend/fsyncする。headerのplatform file identityとpathのidentityを各append前後に照合する。VecEnv close後は各fileを1回だけopen/readし、同一byte列でstrict JSONL parse、件数、SHA-256を確定する。置換、history injection、parse/hash raceはfail closedとし、`run_metadata.json`の`episode_seed_artifacts`にfile identityも記録する
 - `train=[0, 10000)`、`validation=[10000, 11000)`、`test=[20000, 21000)`を使い、空rangeと重複rangeを拒否する
-- train workerはroleとworker indexを明示し、validationは`EvalCallback`とbest-checkpoint選択だけに使う
+- train workerはroleとworker indexを明示する。`num_envs=1`ではtrain/validationとも`DummyVecEnv`を使い、train engine close後に1回のdeferred validationを行ってsubprocessを生成しない。`num_envs>1`ではtrainだけ`SubprocVecEnv`を使い、validation worker 0はparent processの単一`DummyVecEnv`でperiodic evaluationとbest-checkpoint選択に使う
 - test rangeはPhase 6の最終比較専用とし、学習、checkpoint選択、Curriculum進行に使用しない
 - Actor生成条件をJSONLへ記録
 - difficulty levelを持つ
@@ -827,7 +827,7 @@ runs/<run_id>/
    └─ episode_<id>.gif
 ```
 
-新規学習は存在しない、または空のrun destinationだけを受け付ける。非空directoryを再利用せず、overwrite optionを設けない。Resumeもsource runとは別の新しい空destinationへ書き、source checkpointのSHA-256、正規化path、親run/config、current configとの差分、開始`num_timesteps`、Observation/Action schemaを記録する。全runは`research_contract_version=2`と`observation_schema_version=1`を持つ。旧contractのcheckpointを正式比較へ混在させない。
+新規学習は必須の`--run-dir`で、存在しない、または空のrun destinationを明示した場合だけ受け付ける。`training.run_root`へのgeneric fallback、非空directoryの再利用、overwrite optionは設けない。Resumeもsource runとは別の新しい空destinationへ書き、source checkpointのSHA-256、source hostで正規化したpath、親run/config、current configとの差分、開始`num_timesteps`、Observation/Action schemaを記録する。current resume sourceはcurrent hostでcanonicalize/dereferenceするが、既存metadata内のhistorical parent pathはcross-host provenance文字列として保持し、current hostのPath flavorで再解釈しない。全runは`research_contract_version=2`と`observation_schema_version=1`を持つ。旧contractのcheckpointを正式比較へ混在させない。
 
 ### GIF Overlay
 
@@ -857,7 +857,9 @@ runs/<run_id>/
 python -m mad_driving.cli.smoke --config configs/base.yaml
 
 # 学習
-python -m mad_driving.cli.train --config configs/train.yaml
+python -m mad_driving.cli.train \
+  --config configs/train.yaml \
+  --run-dir runs/phase4_seed42_<unique_run_id>
 
 # 別runへresume
 python -m mad_driving.cli.train \
@@ -1052,9 +1054,10 @@ multi-agent-driving/
 - 複数Agentが失敗した場合はPREPARE_STOPまたはSTOP
 - ObservationにNaN・infがある場合はSTOP
 - MetaDrive、ScenarioRuntime、snapshot、Reward、Observationの内部例外は所有resourceをcloseして元の例外を送出する。zero Observationや`truncated=True`へ変換しない
+- primary exceptionがないcleanup/close failureはrun failureとして送出する。primary exceptionがある場合はcleanup failureをnoteへ付加してprimaryを保持する。train/validation closeとseed artifact finalizationが成功するまでrun destinationをsuccess artifactとしてpublishしない
 - 学習checkpointは一定間隔で保存し、別の新規destinationへ厳密なprovenance付きで再開可能にする
 - 設定不正は起動時に停止する
-- ログ書込失敗で運転判断を停止させない。ただしstderrへ明示する
+- best-effort運転ログの書込失敗はstderrへ明示する。研究provenanceであるseed artifact、metadata、checkpointの書込・identity検証失敗はfail closedとする
 
 ---
 

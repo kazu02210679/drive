@@ -135,8 +135,9 @@ def test_run_metadata_rejects_invalid_public_constructor_fields(
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [
-        ({"parent_checkpoint_path": "relative/model.zip"}, "canonical"),
-        ({"parent_run_dir": "relative/run"}, "canonical"),
+        ({"parent_checkpoint_path": ""}, "non-empty"),
+        ({"parent_run_dir": ""}, "non-empty"),
+        ({"parent_checkpoint_path": 7}, "non-empty"),
         ({"parent_checkpoint_sha256": "A" * 64}, "SHA-256"),
         ({"parent_checkpoint_sha256": "a" * 63}, "SHA-256"),
         ({"parent_checkpoint_sha256": "z" * 64}, "SHA-256"),
@@ -165,6 +166,48 @@ def test_resume_metadata_rejects_invalid_public_constructor_fields(
 
     with pytest.raises(ValueError, match=message):
         ResumeMetadata(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("checkpoint_path", "run_dir"),
+    [
+        pytest.param(
+            r"C:\research\foreign-host\checkpoints\final_model.zip",
+            r"C:\research\foreign-host",
+            id="windows-style-on-posix-compatible-parser",
+        ),
+        pytest.param(
+            "/mnt/research/foreign-host/checkpoints/final_model.zip",
+            "/mnt/research/foreign-host",
+            id="posix-style-on-windows-compatible-parser",
+        ),
+    ],
+)
+def test_historical_resume_provenance_is_parsed_without_current_host_path_semantics(
+    checkpoint_path: str,
+    run_dir: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class PathUseWouldDereferenceHistoricalProvenance:
+        def __init__(self, value: object) -> None:
+            raise AssertionError(f"historical provenance was reparsed as a local path: {value}")
+
+    monkeypatch.setattr(metadata_module, "Path", PathUseWouldDereferenceHistoricalProvenance)
+
+    parsed = metadata_module._parse_resume_metadata(
+        {
+            "parent_checkpoint_path": checkpoint_path,
+            "parent_checkpoint_sha256": "d" * 64,
+            "parent_run_dir": run_dir,
+            "parent_config": {"seed": 42},
+            "config_diff": {},
+            "start_num_timesteps": 500,
+        }
+    )
+
+    assert parsed is not None
+    assert parsed.parent_checkpoint_path == checkpoint_path
+    assert parsed.parent_run_dir == run_dir
 
 
 @pytest.mark.parametrize("failure", ["serialize", "replace"])

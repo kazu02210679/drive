@@ -117,13 +117,21 @@ class _OwnedEnvironments:
             role=role,
             worker_index=worker_index,
         )
-        self.created.append(environment)
-        return EpisodeSeedRecordingWrapper(
-            environment,
-            workspace=self.workspace,
-            role=role,
-            worker_index=worker_index,
-        )
+        try:
+            wrapped = EpisodeSeedRecordingWrapper(
+                environment,
+                workspace=self.workspace,
+                role=role,
+                worker_index=worker_index,
+            )
+        except BaseException as construction_error:
+            try:
+                environment.close()
+            except Exception as cleanup_error:
+                construction_error.add_note(f"Cleanup also failed: {cleanup_error}")
+            raise
+        self.created.append(wrapped)
+        return wrapped
 
     def thunks(
         self,
@@ -148,19 +156,18 @@ class _OwnedEnvironments:
     def close(self) -> None:
         environments = self.created
         self.created = []
+        errors: list[Exception] = []
         for environment in environments:
-            _safe_close(environment)
-
-
-def _safe_close(resource: object | None) -> None:
-    if resource is None:
-        return
-    close = getattr(resource, "close", None)
-    if callable(close):
-        try:
-            close()
-        except Exception:
-            pass
+            try:
+                environment.close()
+            except Exception as error:
+                errors.append(error)
+        if errors:
+            details = "; ".join(str(error) for error in errors)
+            combined = RuntimeError(f"Owned environment cleanup failed: {details}")
+            for additional_error in errors[1:]:
+                combined.add_note(f"Additional owner cleanup failure: {additional_error}")
+            raise combined from errors[0]
 
 
 def _close_model_logger(model: object | None) -> None:
@@ -220,29 +227,41 @@ def _close_vector_env(resource: object | None) -> None:
         return
 
     remotes = tuple(getattr(resource, "remotes", ()))
+    cleanup_errors: list[Exception] = []
     if not getattr(resource, "closed", False) and not getattr(resource, "waiting", False):
         for remote in remotes:
             send = getattr(remote, "send", None)
             if callable(send):
                 try:
                     send(("close", None))
-                except Exception:
-                    pass
+                except Exception as error:
+                    cleanup_errors.append(
+                        RuntimeError(f"Subprocess close request could not be confirmed: {error}")
+                    )
 
     workers_alive = _stop_processes(processes, graceful_join=True)
 
     for remote in remotes:
         try:
             remote.close()
-        except Exception:
-            pass
+        except Exception as error:
+            cleanup_errors.append(
+                RuntimeError(f"Subprocess remote cleanup could not be confirmed: {error}")
+            )
     try:
         resource.closed = True  # type: ignore[attr-defined]
-    except Exception:
-        pass
+    except Exception as error:
+        cleanup_errors.append(
+            RuntimeError(f"Subprocess close state could not be confirmed: {error}")
+        )
 
     if workers_alive:
-        raise _VectorEnvCleanupError("Subprocess worker cleanup could not be confirmed")
+        cleanup_errors.append(
+            _VectorEnvCleanupError("Subprocess worker cleanup could not be confirmed")
+        )
+    if cleanup_errors:
+        details = "; ".join(str(error) for error in cleanup_errors)
+        raise _VectorEnvCleanupError(details) from cleanup_errors[0]
 
 
 def _cleanup_partial_vector_env(
@@ -330,6 +349,34 @@ def _build_train_env(
 
 def _scaled_frequency(interval_steps: int, num_envs: int) -> int:
     return max(interval_steps // num_envs, 1)
+
+
+def _run_deferred_evaluation(callback: object, model: object, produced_timesteps: int) -> None:
+    """Run one validation pass after the single-process training engine is closed."""
+
+    fake_hook = getattr(callback, "on_fake_training", None)
+    if callable(fake_hook):
+        fake_hook(model, produced_timesteps)
+        return
+
+    init_callback = getattr(callback, "init_callback", None)
+    on_training_start = getattr(callback, "on_training_start", None)
+    on_step = getattr(callback, "on_step", None)
+    on_training_end = getattr(callback, "on_training_end", None)
+    if (
+        not callable(init_callback)
+        or not callable(on_training_start)
+        or not callable(on_step)
+        or not callable(on_training_end)
+    ):
+        raise TypeError("Deferred evaluation callback does not implement the callback lifecycle")
+    init_callback(model)
+    on_training_start({}, {})
+    try:
+        if on_step() is False:
+            raise RuntimeError("Deferred validation callback requested training termination")
+    finally:
+        on_training_end()
 
 
 def _write_resolved_config(config: AppConfig, destination: Path) -> None:
@@ -468,6 +515,7 @@ def run_training(
     model: Any = None
     model_logger_closed = False
     primary_error: BaseException | None = None
+    deferred_evaluation = config.training.num_envs == 1
     try:
         train_env = _build_train_env(
             config,
@@ -475,11 +523,8 @@ def run_training(
             dummy_vec_env_factory=dummy_vec_env_factory,
             subproc_vec_env_factory=subproc_vec_env_factory,
         )
-        eval_vec_env_factory = (
-            subproc_vec_env_factory if config.training.num_envs == 1 else dummy_vec_env_factory
-        )
         eval_env = _construct_vector_env(
-            eval_vec_env_factory,
+            dummy_vec_env_factory,
             eval_owner.thunks("validation", 1),
             eval_owner,
         )
@@ -559,27 +604,40 @@ def run_training(
         eval_callback = eval_callback_factory(
             eval_env=eval_env,
             best_model_save_path=str(staging_dir),
-            eval_freq=_scaled_frequency(
-                min(config.training.eval_interval_steps, requested_timesteps),
-                config.training.num_envs,
+            eval_freq=(
+                1
+                if deferred_evaluation
+                else _scaled_frequency(
+                    min(config.training.eval_interval_steps, requested_timesteps),
+                    config.training.num_envs,
+                )
             ),
             n_eval_episodes=config.training.eval_episodes,
             deterministic=True,
             render=False,
         )
         reward_callback = reward_callback_factory()
+        callbacks = [reward_callback, checkpoint_callback]
+        if not deferred_evaluation:
+            callbacks.append(eval_callback)
         model.learn(
             total_timesteps=requested_timesteps,
-            callback=[reward_callback, checkpoint_callback, eval_callback],
+            callback=callbacks,
             reset_num_timesteps=resume_source is None,
         )
         model.save(staged_final_checkpoint)
+        if deferred_evaluation:
+            closing_train_env = train_env
+            train_env = None
+            _close_vector_env(closing_train_env)
+            train_owner.close()
+            _run_deferred_evaluation(eval_callback, model, requested_timesteps)
         if not staged_best_checkpoint.is_file():
             raise FileNotFoundError(f"Best checkpoint was not produced: {staged_best_checkpoint}")
         if not staged_final_checkpoint.is_file():
             raise FileNotFoundError(f"Final checkpoint was not produced: {staged_final_checkpoint}")
-        _close_model_logger(model)
         model_logger_closed = True
+        _close_model_logger(model)
         _promote_checkpoint_artifacts(staging_dir, checkpoints_dir)
         try:
             _cleanup_checkpoint_staging(staging_dir, checkpoints_dir)
@@ -594,8 +652,8 @@ def run_training(
         closing_train_env = train_env
         train_env = None
         _close_vector_env(closing_train_env)
-        eval_owner.close()
-        train_owner.close()
+        for owner in (eval_owner, train_owner):
+            owner.close()
         expected_seed_identities: tuple[tuple[EnvironmentRole, int], ...] = (
             *(("train", worker_index) for worker_index in range(config.training.num_envs)),
             ("validation", 0),
@@ -627,6 +685,7 @@ def run_training(
     finally:
         cleanup_errors: list[Exception] = []
         if not model_logger_closed:
+            model_logger_closed = True
             try:
                 _close_model_logger(model)
             except Exception as exc:
@@ -636,8 +695,11 @@ def run_training(
                 _close_vector_env(vector_env)
             except Exception as exc:
                 cleanup_errors.append(exc)
-        eval_owner.close()
-        train_owner.close()
+        for owner in (eval_owner, train_owner):
+            try:
+                owner.close()
+            except Exception as exc:
+                cleanup_errors.append(exc)
         if cleanup_staging and staging_dir is not None:
             try:
                 _cleanup_checkpoint_staging(staging_dir, checkpoints_dir)

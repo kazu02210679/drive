@@ -105,7 +105,9 @@ Linux:
 .venv/bin/python -m mad_driving.cli.train --config configs/train.yaml --run-dir runs/phase4_standard_seed43_continued --resume-from runs/phase4_standard_seed42/checkpoints/final_model.zip
 ```
 
-新規学習とresumeは、存在しない、または空の`--run-dir`だけを受け付けます。`<UNIQUE_RUN_ID>`は毎回新しい識別子へ置換してください。非空directoryを上書きしません。Resume sourceはread-onlyとして扱い、checkpoint SHA-256、親run/config、config差分、開始step、Observation/Action schemaを新しいrunの`run_metadata.json`へ記録します。全runは`research_contract_version=2`、`observation_schema_version=1`です。各train/validation環境の実際のreset情報は`episode_seeds/<role>-worker-<index>.jsonl`へ耐久書き込みし、metadataの`episode_seed_artifacts`が相対path、role、worker、件数、schema version、SHA-256を示します。
+新規学習とresumeは必須の`--run-dir`で、存在しない、または空のdestinationを明示した場合だけ受け付けます。`<UNIQUE_RUN_ID>`は毎回新しい識別子へ置換してください。非空directoryを上書きしません。Resume sourceはread-onlyとして扱い、checkpoint SHA-256、親run/config、config差分、開始step、Observation/Action schemaを新しいrunの`run_metadata.json`へ記録します。source hostでcanonicalizeしたhistorical parent pathはcross-host provenance文字列として保持します。全runは`research_contract_version=2`、`observation_schema_version=1`です。各train/validation環境の実際のreset情報はdescriptor-boundな`episode_seeds/<role>-worker-<index>.jsonl`へ耐久書き込みし、metadataの`episode_seed_artifacts`が相対path、role、worker、件数、schema version、platform file identity、同一byte readのSHA-256を示します。
+
+`training.num_envs=1`ではtrainとvalidationの両方を`DummyVecEnv`にし、train engineをcloseした後に1回のvalidationを行うためsubprocessを生成しません。`num_envs>1`ではtrainだけを`SubprocVecEnv`にし、validation worker 0はparent processの単一`DummyVecEnv`でperiodic evaluationを行います。
 
 標準Stable-Baselines3 PPOは`n_steps * num_envs`単位でrolloutを完了するため、実step数は要求値を超える場合があります。更新をエピソード境界へ同期しません。出力構造は次のとおりです。periodic checkpointは設定したintervalに到達した場合だけ生成されます。
 

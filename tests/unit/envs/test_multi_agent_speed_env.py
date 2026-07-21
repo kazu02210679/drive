@@ -104,6 +104,7 @@ class FakeSimulator:
         fail_on_step: bool = False,
         fail_on_close: bool = False,
         physics_dt_after_reset: float | None = None,
+        physics_dt_after_step: float | None = None,
         events: list[str] | None = None,
     ) -> None:
         self.vehicle = FakeVehicle()
@@ -121,6 +122,7 @@ class FakeSimulator:
         self.fail_on_step = fail_on_step
         self.fail_on_close = fail_on_close
         self.physics_dt_after_reset = physics_dt_after_reset
+        self.physics_dt_after_step = physics_dt_after_step
         self.events = events
         self.reset_seeds: list[int | None] = []
         self.actions: list[int] = []
@@ -162,6 +164,8 @@ class FakeSimulator:
         self.vehicle.navigation.route_completion += 0.1
         self.vehicle.crash_vehicle = bool(info.get("crash_vehicle", False))
         self.vehicle.crash_human = bool(info.get("crash_human", False))
+        if self.physics_dt_after_step is not None:
+            self.config["physics_world_step_size"] = self.physics_dt_after_step
         return {}, 999.0, terminated, truncated, info
 
     def close(self) -> None:
@@ -270,6 +274,7 @@ class RecordingRuntime:
         invalid_context_result: bool = False,
         reset_state: ScenarioState | None = None,
         physics_dt_after_simulator_reset: float | None = None,
+        physics_dt_after_step: float | None = None,
     ) -> None:
         self.events = events
         self.context = context or ScenarioObservationContext(
@@ -281,6 +286,7 @@ class RecordingRuntime:
         self.invalid_context_result = invalid_context_result
         self.reset_state = reset_state
         self.physics_dt_after_simulator_reset = physics_dt_after_simulator_reset
+        self.physics_dt_after_step = physics_dt_after_step
         self.states: list[ScenarioState] = []
         self.after_step_calls = 0
 
@@ -321,9 +327,12 @@ class RecordingRuntime:
         step_index: int,
         raw_info: Mapping[str, object],
     ) -> ScenarioStepResult:
-        del environment, state, step_index, raw_info
+        del state, step_index, raw_info
         if self.events is not None:
             self.events.append("runtime.after_step")
+        if self.physics_dt_after_step is not None:
+            simulator = cast(FakeSimulator, environment)
+            simulator.config["physics_world_step_size"] = self.physics_dt_after_step
         if self.invalid_step_result:
             return object()  # type: ignore[return-value]
         index = min(self.after_step_calls, len(self.step_results) - 1)
@@ -1012,6 +1021,79 @@ def test_timing_change_after_reset_fails_before_transition_side_effects() -> Non
     assert simulator.close_calls == 1
 
 
+def test_simulator_step_timing_mutation_fails_before_post_step_consumers() -> None:
+    events: list[str] = []
+    simulator = FakeSimulator(
+        events=events,
+        fail_on_close=True,
+        physics_dt_after_step=0.03,
+    )
+    runtime = RecordingRuntime(events=events)
+    builder = RecordingSnapshotBuilder(events=events)
+    suite = SequenceSuite()
+    harness = make_env(
+        simulators=(simulator,),
+        runtime=runtime,
+        snapshot_builder=builder,
+        suite=suite,
+    )
+    harness.env.reset(seed=78)
+    events.clear()
+
+    with pytest.raises(
+        RuntimeError,
+        match="decision interval mismatch.*0.15.*0.1",
+    ) as captured:
+        harness.env.step(DrivingAction.KEEP)
+
+    assert events == [
+        "runtime.before_step",
+        "simulator.step",
+        "simulator.close",
+    ]
+    assert runtime.after_step_calls == 0
+    assert len(builder.calls) == 1
+    assert len(suite.observations) == 1
+    assert harness.reward.calculate_calls == 0
+    assert simulator.close_calls == 1
+    assert captured.value.__notes__ == ["simulator cleanup failed: simulator close failure"]
+    with pytest.raises(RuntimeError, match="reset"):
+        harness.env.step(DrivingAction.KEEP)
+
+
+def test_runtime_after_step_timing_mutation_fails_before_next_frame() -> None:
+    events: list[str] = []
+    simulator = FakeSimulator(events=events)
+    runtime = RecordingRuntime(events=events, physics_dt_after_step=0.03)
+    builder = RecordingSnapshotBuilder(events=events)
+    suite = SequenceSuite()
+    harness = make_env(
+        simulators=(simulator,),
+        runtime=runtime,
+        snapshot_builder=builder,
+        suite=suite,
+    )
+    harness.env.reset(seed=78)
+    events.clear()
+
+    with pytest.raises(RuntimeError, match="decision interval mismatch.*0.15.*0.1"):
+        harness.env.step(DrivingAction.KEEP)
+
+    assert events == [
+        "runtime.before_step",
+        "simulator.step",
+        "runtime.after_step",
+        "simulator.close",
+    ]
+    assert runtime.after_step_calls == 1
+    assert len(builder.calls) == 1
+    assert len(suite.observations) == 1
+    assert harness.reward.calculate_calls == 0
+    assert simulator.close_calls == 1
+    with pytest.raises(RuntimeError, match="reset"):
+        harness.env.step(DrivingAction.KEEP)
+
+
 @pytest.mark.parametrize("failure", ["simulator", "snapshot", "reward", "observation"])
 def test_internal_failure_closes_simulator_once_and_propagates(failure: str) -> None:
     simulator = FakeSimulator(fail_on_step=failure == "simulator")
@@ -1047,15 +1129,22 @@ def test_cleanup_failure_is_noted_without_masking_primary_exception() -> None:
 
 
 @pytest.mark.parametrize(
-    ("raw_terminated", "raw_truncated"),
-    [(False, True), (True, False), (True, True)],
+    ("raw_terminated", "raw_truncated", "raw_info", "scenario_result"),
+    [
+        (False, True, {}, ScenarioStepResult(False, False)),
+        (True, False, {"crash_vehicle": True}, ScenarioStepResult(False, False)),
+        (True, True, {}, ScenarioStepResult(True, False)),
+    ],
 )
-def test_raw_gymnasium_termination_flags_are_preserved(
+def test_raw_gymnasium_flags_are_preserved_when_termination_agrees_with_typed_outcome(
     raw_terminated: bool,
     raw_truncated: bool,
+    raw_info: dict[str, bool],
+    scenario_result: ScenarioStepResult,
 ) -> None:
-    simulator = FakeSimulator(step_results=((raw_terminated, raw_truncated, {}),))
-    harness = make_env(simulators=(simulator,))
+    simulator = FakeSimulator(step_results=((raw_terminated, raw_truncated, raw_info),))
+    runtime = RecordingRuntime(step_results=(scenario_result,))
+    harness = make_env(simulators=(simulator,), runtime=runtime)
     try:
         harness.env.reset(seed=81)
         _, _, terminated, truncated, _ = harness.env.step(DrivingAction.KEEP)
@@ -1063,6 +1152,23 @@ def test_raw_gymnasium_termination_flags_are_preserved(
         assert truncated is raw_truncated
     finally:
         harness.env.close()
+
+
+def test_unmatched_raw_termination_is_a_fatal_consistency_error() -> None:
+    simulator = FakeSimulator(step_results=((True, False, {}),), fail_on_close=True)
+    harness = make_env(simulators=(simulator,))
+    harness.env.reset(seed=81)
+
+    with pytest.raises(
+        RuntimeError,
+        match="raw simulator termination.*typed privileged outcome",
+    ) as captured:
+        harness.env.step(DrivingAction.KEEP)
+
+    assert simulator.close_calls == 1
+    assert captured.value.__notes__ == ["simulator cleanup failed: simulator close failure"]
+    with pytest.raises(RuntimeError, match="reset"):
+        harness.env.step(DrivingAction.KEEP)
 
 
 @pytest.mark.parametrize(
@@ -1080,6 +1186,18 @@ def test_collision_success_and_failure_are_terminated(
     simulator = FakeSimulator(step_results=((False, False, raw_info),))
     runtime = RecordingRuntime(step_results=(scenario_result,))
     harness = make_env(simulators=(simulator,), runtime=runtime)
+    try:
+        harness.env.reset(seed=82)
+        _, _, terminated, truncated, _ = harness.env.step(DrivingAction.KEEP)
+        assert terminated is True
+        assert truncated is False
+    finally:
+        harness.env.close()
+
+
+def test_privileged_off_road_terminates_without_raw_termination() -> None:
+    simulator = FakeSimulator(step_results=((False, False, {"out_of_road": True}),))
+    harness = make_env(simulators=(simulator,))
     try:
         harness.env.reset(seed=82)
         _, _, terminated, truncated, _ = harness.env.step(DrivingAction.KEEP)
@@ -1252,11 +1370,12 @@ def test_reward_context_validation_error_is_fatal() -> None:
     assert simulator.close_calls == 1
 
 
-def test_close_is_idempotent_and_reset_after_close_fails_fast() -> None:
+def test_close_propagates_simulator_failure_and_remains_idempotent() -> None:
     simulator = FakeSimulator(fail_on_close=True)
     harness = make_env(simulators=(simulator,))
     harness.env.reset(seed=92)
-    harness.env.close()
+    with pytest.raises(RuntimeError, match="simulator close failure"):
+        harness.env.close()
     harness.env.close()
     assert simulator.close_calls == 1
     with pytest.raises(RuntimeError, match="closed"):

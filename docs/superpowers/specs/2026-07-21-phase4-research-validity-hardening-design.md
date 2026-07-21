@@ -77,7 +77,10 @@ decision_dt_s == physics_dt_s * decision_repeat
 The adapter maps the first two values to MetaDrive's `physics_world_step_size` and
 `decision_repeat`. Runtime state must match the validated values. TTC, reaction delay,
 PID integration, jerk, standstill cost, scenario event time, and claim validity all use
-`decision_dt_s` from this single contract.
+`decision_dt_s` from this single contract. The environment revalidates the authoritative
+runtime interval after the simulator step and again after `after_step` plus observation
+context construction, immediately before the next `SceneFrame`. A mismatch closes the
+episode and raises before snapshot, analysis, reward, trace, or next-state publication.
 
 ### 4.2 Seed splits
 
@@ -149,11 +152,17 @@ environment error.
 
 Reset `info` and every decision trace record all three seed identities. Training wraps each
 train and validation environment and durably appends the actual reset identities plus role
-and worker index to a collision-free JSONL file inside the private run workspace. This
-captures the initial reset and VecEnv auto-resets. After all vector environments close, the
-runner validates each file and stores its relative path, role, worker, record count, artifact
-schema version, and SHA-256 in `run_metadata.json`. Existing version-2 metadata without this
-optional inventory remains valid for resume compatibility.
+and worker index to a collision-free JSONL file inside the private run workspace. Each
+writer keeps its exclusively created descriptor open for the wrapper lifetime, appends and
+fsyncs through that descriptor, and binds a platform file identity into the strict header.
+This captures the initial reset and VecEnv auto-resets without reopening a path that may
+have been replaced. After all vector environments close, the runner opens each path once,
+checks its `fstat` identity against the header, reads one stable byte sequence, and uses
+those same bytes for strict parsing, record count, and SHA-256. Replacement, injected
+history, malformed JSONL, or an identity/change race fails the run. Metadata stores the
+relative path, role, worker, record count, artifact schema version, file identity, and
+SHA-256. Existing version-2 run metadata without this optional inventory remains loadable
+for resume compatibility.
 
 ## 6. Scenario Runtime Boundary
 
@@ -350,13 +359,25 @@ Training uses standard Stable-Baselines3 PPO. Updates occur after `n_steps * num
 rollout transitions and are not synchronized to episode boundaries. The specification's
 old prohibition on mid-episode updates is removed; no custom rollout collector is added.
 
+With `num_envs=1`, both train and validation use `DummyVecEnv`; the training engine is
+closed before one deferred validation pass so MetaDrive's process-global engine is never
+shared concurrently and no `SubprocVecEnv` is constructed. With `num_envs>1`, train uses
+`SubprocVecEnv` while the single validation environment remains a parent-process
+`DummyVecEnv`, allowing periodic evaluation without placing two MetaDrive engines in one
+process.
+
 ## 12. Internal Errors and Gymnasium Semantics
 
 Natural MDP outcomes use Gymnasium semantics:
 
-- collision, scenario-defined failure, or success: `terminated=True`;
+- typed privileged collision, off-road, arrival, scenario failure, or scenario success:
+  `terminated=True`;
 - configured time horizon: `truncated=True`;
 - internal simulator or project error: close owned resources and raise the original error.
+
+Raw simulator termination is only a consistency signal. If asserted, it must agree with at
+least one typed privileged termination outcome; an unmatched raw termination is an internal
+error. Raw truncation retains horizon semantics, including a valid both-true transition.
 
 Internal errors never return an all-zero observation, reward zero, or a false time-limit
 transition. This prevents PPO from bootstrapping a software fault as though it were a valid
@@ -367,9 +388,11 @@ path in Section 9 and remains visible in trace metadata.
 
 ## 13. Training Artifact Ownership and Resume
 
-New training requires a nonexistent or empty run directory. A non-empty directory is
-rejected before config, TensorBoard events, or checkpoints are written. Phase 4.1 does not
-add an overwrite option; users choose a new run directory explicitly.
+New training requires a CLI `--run-dir` naming a nonexistent or empty run directory. The
+argument is required by `argparse`, before config loading or training writes. A non-empty
+directory is rejected before config, TensorBoard events, or checkpoints are written. Phase
+4.1 does not add an overwrite option or a generic `training.run_root` fallback; users choose
+a fresh run directory explicitly.
 
 Resume also writes to a new empty run directory. It records:
 
@@ -380,6 +403,11 @@ Resume also writes to a new empty run directory. It records:
 - a machine-readable parent/current config difference;
 - starting `model.num_timesteps`;
 - observation shape and action count.
+
+Current resume source paths are canonicalized and dereferenced on the current host before
+metadata creation. Once stored, historical parent checkpoint and run-directory paths are
+opaque non-empty provenance strings: chained resume loading does not reinterpret Windows
+paths with POSIX rules or POSIX paths with Windows rules.
 
 Every run records `research_contract_version=2` and `observation_schema_version=1`.
 Pre-hardening checkpoints have no compatible research-contract metadata and are rejected by
@@ -395,6 +423,11 @@ checkpoint retains incompatible values.
 
 Checkpoint promotion remains transactional. Existing historical run directories and
 checkpoints are never deleted by Phase 4.1.
+
+Environment, vector-environment, writer, logger, and ownership close failures are part of
+the training result. Without a primary error they fail the run; with a primary error they
+are attached as notes without masking it. The destination is not atomically published until
+train/evaluation closure and seed-artifact finalization have succeeded.
 
 ## 14. Comparison Protocol
 
@@ -433,6 +466,12 @@ Every behavior change follows red-green-refactor TDD. Required focused tests inc
 - resume SHA-256/provenance metadata and hyperparameter mismatch rejection;
 - Shield-enforced STOP reaching emergency deceleration;
 - simulation timing configuration and runtime mismatch rejection.
+- simulator-step and runtime-hook timing mutation before post-step consumers;
+- privileged off-road termination and unmatched raw-termination rejection;
+- seed-file replacement after create, between appends, and between parse/hash;
+- constructor, owner, vector-environment, and simulator close failures;
+- one-environment no-spawn training plus parent-process validation for multi-env training;
+- required fresh `--run-dir` and cross-host historical provenance parsing.
 
 After focused tests, verification runs the complete unit and integration suite, Ruff,
 mypy, coverage, a real headless MetaDrive smoke episode, and a PPO smoke-training run in a

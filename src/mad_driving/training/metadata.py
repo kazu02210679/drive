@@ -26,7 +26,7 @@ OBSERVATION_SHAPE: Final = (24,)
 OBSERVATION_DTYPE: Final = "float32"
 ACTION_SCHEMA_VERSION: Final = 1
 ACTION_ORDER: Final = ("KEEP", "SLOW", "PREPARE_STOP", "STOP")
-EPISODE_SEED_ARTIFACT_SCHEMA_VERSION: Final = 1
+EPISODE_SEED_ARTIFACT_SCHEMA_VERSION: Final = 2
 _ALLOWED_CONFIG_DIFFS: Final = frozenset(
     {
         "training.checkpoint_interval_steps",
@@ -140,13 +140,9 @@ def _validated_integral(value: object, name: str, *, expected: int | None = None
     return result
 
 
-def _canonical_path(value: object, name: str) -> str:
+def _provenance_string(value: object, name: str) -> str:
     if not isinstance(value, str) or not value:
-        raise ValueError(f"{name} must be a non-empty canonical path string")
-    candidate = Path(value)
-    resolved = candidate.resolve(strict=False)
-    if not candidate.is_absolute() or str(resolved) != value:
-        raise ValueError(f"{name} must be a canonical absolute path")
+        raise ValueError(f"{name} must be a non-empty provenance string")
     return value
 
 
@@ -165,7 +161,7 @@ class ResumeMetadata:
         object.__setattr__(
             self,
             "parent_checkpoint_path",
-            _canonical_path(self.parent_checkpoint_path, "parent_checkpoint_path"),
+            _provenance_string(self.parent_checkpoint_path, "parent_checkpoint_path"),
         )
         digest = self.parent_checkpoint_sha256
         if (
@@ -179,7 +175,7 @@ class ResumeMetadata:
             object.__setattr__(
                 self,
                 "parent_run_dir",
-                _canonical_path(self.parent_run_dir, "parent_run_dir"),
+                _provenance_string(self.parent_run_dir, "parent_run_dir"),
             )
         if not isinstance(self.parent_config, Mapping):
             raise ValueError("parent_config must be a required JSON mapping")
@@ -292,6 +288,7 @@ def _validated_episode_seed_artifacts(
     if not isinstance(value, list | tuple):
         raise ValueError("episode_seed_artifacts must be a list or tuple")
     required = {
+        "file_identity",
         "path",
         "record_count",
         "role",
@@ -320,6 +317,22 @@ def _validated_episode_seed_artifacts(
             f"{name}.schema_version",
             expected=EPISODE_SEED_ARTIFACT_SCHEMA_VERSION,
         )
+        raw_file_identity = raw_summary["file_identity"]
+        if not isinstance(raw_file_identity, Mapping) or set(raw_file_identity) != {
+            "device",
+            "inode",
+        }:
+            raise ValueError(f"{name}.file_identity is malformed")
+        device = _validated_integral(
+            raw_file_identity["device"],
+            f"{name}.file_identity.device",
+        )
+        inode = _validated_integral(
+            raw_file_identity["inode"],
+            f"{name}.file_identity.inode",
+        )
+        if device < 0 or inode <= 0:
+            raise ValueError(f"{name}.file_identity is not verifiable")
         path = raw_summary["path"]
         expected_path = f"episode_seeds/{role}-worker-{worker_index:03d}.jsonl"
         if not isinstance(path, str) or path != expected_path:
@@ -339,6 +352,7 @@ def _validated_episode_seed_artifacts(
         paths.add(path)
         frozen = _freeze_json(
             {
+                "file_identity": {"device": device, "inode": inode},
                 "path": path,
                 "record_count": record_count,
                 "role": role,
