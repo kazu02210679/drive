@@ -85,6 +85,21 @@ def test_metadata_recursively_detaches_and_freezes_caller_owned_values(tmp_path:
         metadata.resolved_config["training"]["layers"].append(8)
 
 
+def test_frozen_json_objects_reject_attribute_and_storage_reassignment() -> None:
+    metadata = RunMetadata(resolved_config={"nested": {"value": 7}})
+    root = metadata.resolved_config
+    nested = root["nested"]
+
+    with pytest.raises(AttributeError):
+        root._items = (("changed", True),)  # type: ignore[attr-defined]
+    with pytest.raises(AttributeError):
+        setattr(root, "extra", "foreign")  # noqa: B010 - explicit adversarial API test
+    with pytest.raises(AttributeError):
+        nested._items = (("value", 99),)  # type: ignore[attr-defined]
+
+    assert root == {"nested": {"value": 7}}
+
+
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [
@@ -92,6 +107,9 @@ def test_metadata_recursively_detaches_and_freezes_caller_owned_values(tmp_path:
         ({"research_contract_version": 1}, "research_contract_version"),
         ({"observation_schema_version": 2}, "observation_schema_version"),
         ({"observation_shape": (25,)}, "observation_shape"),
+        ({"observation_shape": (24.0,)}, "observation_shape"),
+        ({"observation_shape": (True,)}, "observation_shape"),
+        ({"observation_shape": ("24",)}, "observation_shape"),
         ({"observation_dtype": "float64"}, "observation_dtype"),
         ({"action_schema_version": False}, "action_schema_version"),
         ({"action_count": True}, "action_count"),

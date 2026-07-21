@@ -461,6 +461,22 @@ def test_existing_empty_run_directory_is_accepted(tmp_path: Path) -> None:
     assert (run_dir / "run_metadata.json").is_file()
 
 
+def test_success_retires_claim_as_explicit_recovery_without_marker_in_final_run(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "published"
+
+    run_with_fakes(make_config(), run_dir)
+
+    recoveries = list(tmp_path.glob(".published.ownership-recovery-*"))
+    assert len(recoveries) == 1
+    assert recoveries[0].is_dir()
+    marker = recoveries[0] / ".training-owner"
+    assert marker.is_file()
+    assert len(marker.read_bytes()) == 64
+    assert not (run_dir / ".training-owner").exists()
+
+
 def test_absent_destination_occupied_during_atomic_claim_preserves_foreign_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -468,17 +484,24 @@ def test_absent_destination_occupied_during_atomic_claim_preserves_foreign_file(
     run_dir = tmp_path / "raced-absent"
     foreign = run_dir / "competitor.bin"
     environments = EnvFactory()
-    real_mkdir = Path.mkdir
+    real_rename = ownership_module._rename_no_replace
     injected = False
 
-    def mkdir_then_compete(path: Path, *args: Any, **kwargs: Any) -> None:
+    def claim_then_compete(source: Path, destination: Path) -> None:
         nonlocal injected
-        real_mkdir(path, *args, **kwargs)
-        if path == run_dir and not injected:
+        source_path = Path(source)
+        destination_path = Path(destination)
+        if (
+            destination_path == run_dir
+            and ".ownership-recovery-" in source_path.name
+            and not injected
+        ):
             injected = True
+            run_dir.mkdir()
             foreign.write_bytes(b"competitor-owned\x00")
+        real_rename(source, destination)
 
-    monkeypatch.setattr(Path, "mkdir", mkdir_then_compete)
+    monkeypatch.setattr(ownership_module, "_rename_no_replace", claim_then_compete)
 
     with pytest.raises(FileExistsError) as raised:
         run_with_fakes(make_config(), run_dir, env_factory=environments)
@@ -498,21 +521,19 @@ def test_empty_destination_occupied_during_exclusive_marker_preserves_foreign_fi
     run_dir.mkdir()
     foreign = run_dir / "competitor.bin"
     environments = EnvFactory()
-    real_open = os.open
+    real_rename = ownership_module._rename_no_replace
     injected = False
 
-    def open_then_compete(
-        path: str | bytes | os.PathLike[str], flags: int, mode: int = 0o777
-    ) -> int:
+    def move_then_compete(source: Path, destination: Path) -> None:
         nonlocal injected
-        descriptor = real_open(path, flags, mode)
-        marker = Path(path)
-        if marker.parent == run_dir and flags & os.O_EXCL and not injected:
+        source_path = Path(source)
+        destination_path = Path(destination)
+        if source_path == run_dir and ".training-" in destination_path.name and not injected:
             injected = True
             foreign.write_bytes(b"competitor-owned\x00")
-        return descriptor
+        real_rename(source, destination)
 
-    monkeypatch.setattr(os, "open", open_then_compete)
+    monkeypatch.setattr(ownership_module, "_rename_no_replace", move_then_compete)
 
     with pytest.raises(FileExistsError) as raised:
         run_with_fakes(make_config(), run_dir, env_factory=environments)
@@ -600,6 +621,148 @@ def test_failed_marker_initialization_preserves_primary_error_and_cleans_owned_m
         assert not run_dir.exists()
 
 
+def test_foreign_entry_added_after_acquisition_blocks_all_final_artifact_publication(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "occupied-after-acquire"
+    foreign = run_dir / "foreign.bin"
+
+    class OccupyingFactory(EnvFactory):
+        def __call__(
+            self,
+            config: AppConfig,
+            *,
+            role: EnvironmentRole,
+            worker_index: int,
+        ) -> FakeEnv:
+            if not foreign.exists():
+                foreign.write_bytes(b"foreign-after-acquire\x00")
+            return super().__call__(config, role=role, worker_index=worker_index)
+
+    environments = OccupyingFactory()
+
+    with pytest.raises(FileExistsError, match="ownership|publication|non-empty"):
+        run_with_fakes(make_config(), run_dir, env_factory=environments)
+
+    assert foreign.read_bytes() == b"foreign-after-acquire\x00"
+    assert list(run_dir.iterdir()) == [foreign]
+    assert not (run_dir / "config_resolved.yaml").exists()
+    assert not (run_dir / "run_metadata.json").exists()
+    assert not (run_dir / "checkpoints").exists()
+
+
+@pytest.mark.parametrize("foreign_kind", ["file-entry", "empty-directory"])
+def test_foreign_destination_created_at_atomic_publish_boundary_wins_without_coexistence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    foreign_kind: str,
+) -> None:
+    run_dir = tmp_path / "occupied-at-publish"
+    foreign = run_dir / "foreign.bin"
+    real_rename = ownership_module._rename_no_replace
+    injected = False
+    foreign_directory_stat: os.stat_result | None = None
+
+    def occupy_before_publish(source: Path, destination: Path) -> None:
+        nonlocal foreign_directory_stat, injected
+        source_path = Path(source)
+        destination_path = Path(destination)
+        if destination_path == run_dir and ".training-" in source_path.name and not injected:
+            injected = True
+            run_dir.mkdir()
+            foreign_directory_stat = run_dir.stat()
+            if foreign_kind == "file-entry":
+                foreign.write_bytes(b"foreign-at-publication\x00")
+        real_rename(source, destination)
+
+    monkeypatch.setattr(ownership_module, "_rename_no_replace", occupy_before_publish)
+
+    with pytest.raises(FileExistsError, match="publication|ownership|non-empty"):
+        run_with_fakes(make_config(), run_dir)
+
+    assert injected is True
+    assert foreign_directory_stat is not None
+    assert os.path.samestat(foreign_directory_stat, run_dir.stat())
+    if foreign_kind == "file-entry":
+        assert foreign.read_bytes() == b"foreign-at-publication\x00"
+        assert list(run_dir.iterdir()) == [foreign]
+    else:
+        assert list(run_dir.iterdir()) == []
+
+
+def test_marker_replacement_during_failed_run_release_is_never_unlinked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = tmp_path / "marker-replaced-at-release"
+    marker = run_dir / ".training-owner"
+    real_rename = ownership_module._rename_no_replace
+    injected = False
+    FakePPO.fail_learn = True
+
+    def replace_marker_before_retirement(source: Path, destination: Path) -> None:
+        nonlocal injected
+        source_path = Path(source)
+        destination_path = Path(destination)
+        if (
+            source_path == run_dir
+            and ".ownership-recovery-" in destination_path.name
+            and not injected
+        ):
+            injected = True
+            marker.unlink()
+            marker.write_bytes(b"foreign-replacement\x00")
+        real_rename(source, destination)
+
+    monkeypatch.setattr(ownership_module, "_rename_no_replace", replace_marker_before_retirement)
+
+    with pytest.raises(RuntimeError, match="learn failed"):
+        run_with_fakes(make_config(), run_dir)
+
+    assert injected is True
+    assert marker.read_bytes() == b"foreign-replacement\x00"
+    assert list(run_dir.iterdir()) == [marker]
+
+
+@pytest.mark.parametrize("case", ["malformed-source", "inside-source"])
+def test_resume_read_only_preflight_performs_no_destination_write_attempts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+) -> None:
+    source = seed_compatible_source_run(tmp_path)
+    if case == "malformed-source":
+        (source.run_dir / "run_metadata.json").write_text("{malformed", encoding="utf-8")
+        destination = tmp_path / "never-touched"
+        expected = "metadata"
+    else:
+        destination = source.run_dir / "continued"
+        expected = "separate"
+    source_before = source_tree_bytes(source.run_dir)
+    write_attempts: list[str] = []
+    real_mkdir = Path.mkdir
+    real_open = ownership_module.os.open
+
+    def record_mkdir(path: Path, *args: Any, **kwargs: Any) -> None:
+        write_attempts.append(f"mkdir:{path}")
+        real_mkdir(path, *args, **kwargs)
+
+    def record_open(path: str | bytes | os.PathLike[str], flags: int, mode: int = 0o777) -> int:
+        if flags & (os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_RDWR):
+            write_attempts.append(f"open:{path}")
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr(Path, "mkdir", record_mkdir)
+    monkeypatch.setattr(ownership_module.os, "open", record_open)
+
+    with pytest.raises(ValueError, match=expected):
+        run_with_fakes(make_config(), destination, resume_from=source.checkpoint)
+
+    assert write_attempts == []
+    assert source_tree_bytes(source.run_dir) == source_before
+    assert not destination.exists()
+
+
 def test_run_directory_file_is_rejected_and_preserved_before_any_side_effect(
     tmp_path: Path,
 ) -> None:
@@ -640,6 +803,13 @@ def test_run_training_uses_only_configured_ppo_values_and_closes_envs(tmp_path: 
     model = FakePPO.instances[0]
     train_env = dummy.created[0]
     eval_env = evaluation.instances[0].eval_env
+    tensorboard_log = Path(model.init_kwargs["tensorboard_log"])
+    private_workspace = tensorboard_log.parent
+    assert tensorboard_log.name == "tensorboard"
+    assert private_workspace.parent == run_dir.parent
+    assert private_workspace.name.startswith(f".{run_dir.name}.training-")
+    assert not private_workspace.exists()
+    assert (run_dir / "tensorboard").is_dir()
     assert model.init_kwargs == {
         "policy": "MlpPolicy",
         "env": train_env,
@@ -654,7 +824,7 @@ def test_run_training_uses_only_configured_ppo_values_and_closes_envs(tmp_path: 
         "vf_coef": 0.4,
         "max_grad_norm": 0.7,
         "seed": 123,
-        "tensorboard_log": str(run_dir / "tensorboard"),
+        "tensorboard_log": str(tensorboard_log),
         "device": "cpu",
     }
     assert model.learn_kwargs is not None
@@ -822,6 +992,8 @@ def test_failed_final_validation_does_not_publish_a_final_checkpoint(
 
 def assert_no_invocation_staging(run_dir: Path) -> None:
     checkpoints_dir = run_dir / "checkpoints"
+    if not checkpoints_dir.exists():
+        return
     assert [path for path in checkpoints_dir.iterdir() if path.name.startswith(".training-")] == []
 
 
@@ -934,7 +1106,9 @@ def test_success_stages_then_promotes_best_final_and_periodic_checkpoints(
 
     staging_dir = Path(checkpoint.calls[0]["save_path"])
     assert staging_dir == Path(evaluation.calls[0]["best_model_save_path"])
-    assert staging_dir.parent == run_dir / "checkpoints"
+    private_workspace = staging_dir.parent.parent
+    assert private_workspace.parent == run_dir.parent
+    assert private_workspace.name.startswith(f".{run_dir.name}.training-")
     assert staging_dir.name.startswith(".training-")
     assert FakePPO.instances[0].saved_path == staging_dir / "final_model.zip"
     assert not staging_dir.exists()
@@ -1891,6 +2065,12 @@ def test_resume_loads_ppo_with_train_env_and_keeps_timesteps(tmp_path: Path) -> 
     assert len(FakePPO.load_calls) == 1
     assert len(FakePPO.instances) == 1
     model = FakePPO.instances[0]
+    tensorboard_log = Path(FakePPO.load_calls[0]["tensorboard_log"])
+    private_workspace = tensorboard_log.parent
+    assert private_workspace.parent == tmp_path
+    assert private_workspace.name.startswith(".resume.training-")
+    assert not private_workspace.exists()
+    assert (tmp_path / "resume" / "tensorboard").is_dir()
     assert FakePPO.load_calls[0] == {
         "path": source.checkpoint.resolve(),
         "source_bytes": source_bytes,
@@ -1899,7 +2079,7 @@ def test_resume_loads_ppo_with_train_env_and_keeps_timesteps(tmp_path: Path) -> 
         "custom_objects": None,
         "print_system_info": False,
         "force_reset": True,
-        "tensorboard_log": str(tmp_path / "resume" / "tensorboard"),
+        "tensorboard_log": str(tensorboard_log),
     }
     assert model.learn_kwargs is not None
     assert model.learn_kwargs["reset_num_timesteps"] is False

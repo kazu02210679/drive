@@ -148,6 +148,14 @@ def _safe_close(resource: object | None) -> None:
             pass
 
 
+def _close_model_logger(model: object | None) -> None:
+    logger = getattr(model, "logger", None)
+    for output_format in tuple(getattr(logger, "output_formats", ())):
+        close = getattr(output_format, "close", None)
+        if callable(close):
+            close()
+
+
 def _process_is_alive(process: object) -> bool:
     try:
         return bool(process.is_alive())  # type: ignore[attr-defined]
@@ -409,35 +417,32 @@ def run_training(
     """Train or resume one PPO policy and close every environment on exit."""
 
     destination = Path(run_dir)
-    ownership = RunDirectoryOwnership.acquire(destination)
+    require_empty_run_directory(destination)
     resume_path = None if resume_from is None else Path(resume_from)
-    try:
-        if resume_path is not None and not resume_path.is_file():
-            raise FileNotFoundError(f"Resume checkpoint not found: {resume_path}")
-        resume_source = None if resume_path is None else resolve_resume_source(resume_path, config)
-        if resume_source is not None:
-            canonical_destination = destination.resolve()
-            if (
-                canonical_destination == resume_source.run_dir
-                or resume_source.run_dir in canonical_destination.parents
-            ):
-                raise ValueError(
-                    f"Resume destination must be separate from the source run: {destination}"
-                )
-    except BaseException as source_error:
-        try:
-            ownership.release()
-        except Exception as ownership_cleanup_error:
-            source_error.add_note(f"Ownership cleanup also failed: {ownership_cleanup_error}")
-        raise
+    if resume_path is not None and not resume_path.is_file():
+        raise FileNotFoundError(f"Resume checkpoint not found: {resume_path}")
+    resume_source = None if resume_path is None else resolve_resume_source(resume_path, config)
+    if resume_source is not None:
+        canonical_destination = destination.resolve()
+        if (
+            canonical_destination == resume_source.run_dir
+            or resume_source.run_dir in canonical_destination.parents
+        ):
+            raise ValueError(
+                f"Resume destination must be separate from the source run: {destination}"
+            )
 
-    checkpoints_dir = destination / "checkpoints"
-    tensorboard_dir = destination / "tensorboard"
+    ownership = RunDirectoryOwnership.acquire(destination)
+    workspace = ownership.workspace
+    checkpoints_dir = workspace / "checkpoints"
+    tensorboard_dir = workspace / "tensorboard"
     requested_timesteps = (
         config.training.smoke_timesteps if smoke else config.training.total_timesteps
     )
     final_checkpoint = checkpoints_dir / "final_model.zip"
     best_checkpoint = checkpoints_dir / "best_model.zip"
+    published_final_checkpoint = destination / "checkpoints" / final_checkpoint.name
+    published_best_checkpoint = destination / "checkpoints" / best_checkpoint.name
     staging_dir: Path | None = None
     cleanup_staging = True
 
@@ -445,6 +450,8 @@ def run_training(
     eval_owner = _OwnedEnvironments.create(config, env_factory)
     train_env: Any = None
     eval_env: Any = None
+    model: Any = None
+    model_logger_closed = False
     primary_error: BaseException | None = None
     try:
         train_env = _build_train_env(
@@ -515,13 +522,13 @@ def run_training(
 
         checkpoints_dir.mkdir(parents=True)
         tensorboard_dir.mkdir()
-        _write_resolved_config(config, destination / "config_resolved.yaml")
+        _write_resolved_config(config, workspace / "config_resolved.yaml")
         write_run_metadata(
             RunMetadata(
                 resolved_config=config.model_dump(mode="json"),
                 resume=resume_metadata,
             ),
-            destination / "run_metadata.json",
+            workspace / "run_metadata.json",
         )
         staging_dir = _create_checkpoint_staging(checkpoints_dir)
         staged_final_checkpoint = staging_dir / final_checkpoint.name
@@ -556,12 +563,21 @@ def run_training(
             raise FileNotFoundError(f"Best checkpoint was not produced: {staged_best_checkpoint}")
         if not staged_final_checkpoint.is_file():
             raise FileNotFoundError(f"Final checkpoint was not produced: {staged_final_checkpoint}")
+        _close_model_logger(model)
+        model_logger_closed = True
         _promote_checkpoint_artifacts(staging_dir, checkpoints_dir)
+        try:
+            _cleanup_checkpoint_staging(staging_dir, checkpoints_dir)
+        except Exception as exc:
+            cleanup_staging = False
+            raise RuntimeError(f"Training resource cleanup failed: {exc}") from exc
+        staging_dir = None
         timesteps = int(model.num_timesteps) - start_timesteps
+        ownership.publish()
         return TrainingResult(
             run_dir=destination,
-            final_checkpoint=final_checkpoint,
-            best_checkpoint=best_checkpoint,
+            final_checkpoint=published_final_checkpoint,
+            best_checkpoint=published_best_checkpoint,
             timesteps=timesteps,
         )
     except BaseException as exc:
@@ -571,6 +587,11 @@ def run_training(
         raise
     finally:
         cleanup_errors: list[Exception] = []
+        if not model_logger_closed:
+            try:
+                _close_model_logger(model)
+            except Exception as exc:
+                cleanup_errors.append(exc)
         for vector_env in (eval_env, train_env):
             try:
                 _close_vector_env(vector_env)

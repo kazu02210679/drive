@@ -96,8 +96,8 @@ all five findings without entering Task 11.
   progress `0.25`; bool and fractional `num_timesteps` were silently converted. The
   adversarial subset exposed `5 failed, 4 passed`. GREEN: `9 passed` after structural SB3
   schedule validation and raw integral validation.
-- Final focused training/CLI/checkpoint gate: `135 passed, 17 warnings`, including the real
-  PPO checkpoint continuation integration.
+- Historical first-remediation focused gate: `135 passed, 17 warnings`, before the second
+  re-review regressions below were added.
 
 ### Remediation implementation
 
@@ -137,3 +137,71 @@ all five findings without entering Task 11.
   checked before and immediately after `PPO.load`. A hostile writer that changes and then
   restores byte-identical content entirely between those reads is outside this contract.
   Destination ownership itself is exclusive and held for the complete artifact transaction.
+
+---
+
+## Second independent re-review remediation
+
+The second re-review also returned **CHANGES REQUIRED**. This follow-up replaces direct
+run-directory writes and marker unlink cleanup with a private whole-directory transaction.
+
+### RED / GREEN evidence
+
+- Combined second-review RED subset: `7 failed, 3 passed`. Failures proved direct final-run
+  writes after acquisition, the marker stat/unlink race, destination writes before malformed
+  or inside-source resume rejection, mutable `_items`, and acceptance of `24.0` as a shape.
+- Metadata GREEN: `5 passed` for direct/nested frozen-object mutation and strict
+  non-bool-Integral observation shape values.
+- Atomic/concurrency GREEN: `7 passed` for post-acquisition occupation, both final publish
+  races, marker replacement during failed-run release, two compliant writers, read-only
+  resume preflight, and explicit recovery behavior.
+- Canonical focused gate (the reproducible current count):
+  `.venv\Scripts\python.exe -m pytest tests\unit\training tests\unit\cli\test_train.py tests\unit\cli\test_smoke.py tests\integration\test_ppo_checkpoint.py -q`
+  completed with `148 passed, 17 warnings`.
+
+### Atomic publication and Windows behavior
+
+- Resume checkpoint/metadata/config resolution, canonical source/destination separation,
+  and all other read-only source checks now complete before any destination, marker, or
+  staging mkdir/open. Instrumented malformed-source and inside-source tests observe zero
+  write attempts and byte-identical source trees.
+- A run uses an unpredictable private sibling workspace. Config, metadata, TensorBoard,
+  callback checkpoints, best checkpoint, and final checkpoint are completed there. SB3
+  logger formats are closed before publication so Windows does not retain an open event-file
+  handle across the directory move.
+- An absent destination is claimed by atomically renaming a prepared non-empty claim
+  directory into place. A pre-existing empty destination is atomically moved into the
+  private workspace and remains supported. A second compliant writer sees the non-empty
+  claim and cannot train or publish.
+- Publication atomically retires the entire claim directory, validates its marker identity,
+  token, and exact contents, then performs one no-replace rename of the complete workspace
+  to the final run path. Foreign entries inserted after acquisition are restored without
+  config/metadata/checkpoint coexistence; occupation immediately before the final rename
+  wins and causes publication failure.
+- Windows uses native `os.rename`, whose directory destination operation does not replace an
+  existing path. Linux uses `renameat2(RENAME_NOREPLACE)` and macOS uses
+  `renamex_np(RENAME_EXCL)`. Unsupported platforms fail closed with `ENOTSUP`; no
+  check-then-replace fallback can overwrite an empty foreign directory.
+- Ownership code performs no unlink, recursive delete, or identity-check-then-delete.
+  Retired claims remain as random `.RUN.ownership-recovery-*` siblings containing the owned
+  marker; failed private workspaces remain `.RUN.training-*`. These are deliberately
+  inspectable/recoverable instead of risking deletion of a path replaced by foreign data.
+  The published run contains no ownership marker or partial artifacts.
+
+### Metadata hardening
+
+- `FrozenJsonObject` now overrides ordinary attribute assignment/deletion; `_items`, unknown
+  attributes, and nested frozen objects cannot be reassigned after initialization while
+  mapping equality, deterministic traversal, JSON conversion, and strict mypy remain intact.
+- Every observation-shape element must be a non-bool `Integral` before normalization.
+  `24.0`, `True`, strings, and wrong integer values are rejected.
+
+### Final verification after second re-review
+
+- Full pytest: `608 passed, 19 warnings`.
+- Ruff lint: `All checks passed!` across `src` and `tests`.
+- Ruff format: all 5 touched Python files formatted.
+- mypy strict: `Success: no issues found in 53 source files`.
+- The real PPO checkpoint continuation test passed and retained byte-identical source-run
+  files while publishing TensorBoard and checkpoint artifacts at their final contract paths.
+- No Task 11 documentation/smoke work, Phase 5+ work, or push was performed.

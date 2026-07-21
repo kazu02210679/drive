@@ -42,9 +42,18 @@ class FrozenJsonObject(Mapping[str, Any]):
     """A detached, deterministic, recursively immutable JSON object."""
 
     __slots__ = ("_items",)
+    _items: tuple[tuple[str, Any], ...]
 
     def __init__(self, items: Sequence[tuple[str, Any]]) -> None:
-        self._items = tuple(items)
+        object.__setattr__(self, "_items", tuple(items))
+
+    def __setattr__(self, name: str, value: object) -> None:
+        del name, value
+        raise AttributeError("FrozenJsonObject is immutable")
+
+    def __delattr__(self, name: str) -> None:
+        del name
+        raise AttributeError("FrozenJsonObject is immutable")
 
     def __getitem__(self, key: str) -> Any:
         for candidate, value in self._items:
@@ -224,10 +233,13 @@ class RunMetadata:
                 expected=OBSERVATION_SCHEMA_VERSION,
             ),
         )
-        if (
-            not isinstance(self.observation_shape, list | tuple)
-            or tuple(self.observation_shape) != OBSERVATION_SHAPE
+        if not isinstance(self.observation_shape, list | tuple) or any(
+            isinstance(item, bool) or not isinstance(item, Integral)
+            for item in self.observation_shape
         ):
+            raise ValueError(f"observation_shape must equal {OBSERVATION_SHAPE}")
+        normalized_shape = tuple(int(item) for item in self.observation_shape)
+        if normalized_shape != OBSERVATION_SHAPE:
             raise ValueError(f"observation_shape must equal {OBSERVATION_SHAPE}")
         object.__setattr__(self, "observation_shape", OBSERVATION_SHAPE)
         if self.observation_dtype != OBSERVATION_DTYPE:
