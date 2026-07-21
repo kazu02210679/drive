@@ -1,3 +1,5 @@
+import dataclasses
+import json
 import math
 import zipfile
 from collections.abc import Callable
@@ -6,11 +8,14 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 import cloudpickle
+import numpy as np
 import pytest
 import yaml
+from gymnasium import spaces
 
 from mad_driving.config.models import AppConfig
 from mad_driving.scenarios import EnvironmentRole
+from mad_driving.training import RunMetadata, sha256_file
 from mad_driving.training import train as train_module
 from mad_driving.training.train import TrainingResult, run_training
 
@@ -178,6 +183,24 @@ class FakePPO:
     rollout_overshoot: ClassVar[int] = 0
     resume_num_timesteps: ClassVar[int] = 12_500
 
+    @staticmethod
+    def default_contract() -> dict[str, Any]:
+        return {
+            "policy": "MlpPolicy",
+            "learning_rate": 0.0003,
+            "n_steps": 2048,
+            "batch_size": 64,
+            "n_epochs": 10,
+            "gamma": 0.99,
+            "gae_lambda": 0.95,
+            "clip_range": 0.2,
+            "ent_coef": 0.01,
+            "vf_coef": 0.5,
+            "max_grad_norm": 0.5,
+            "observation_shape": [24],
+            "action_count": 4,
+        }
+
     def __init__(self, policy: str, env: FakeVecEnv, **kwargs: Any) -> None:
         if type(self).fail_init:
             raise RuntimeError("PPO construction failed")
@@ -185,7 +208,45 @@ class FakePPO:
         self.learn_kwargs: dict[str, Any] | None = None
         self.saved_path: Path | None = None
         self.num_timesteps = 0
+        self._set_contract({"policy": policy, **kwargs})
         type(self).instances.append(self)
+
+    def _set_contract(self, values: dict[str, Any]) -> None:
+        contract = {**self.default_contract(), **values}
+        policy_name = str(contract["policy"])
+        self.policy_class = type(
+            "ActorCriticPolicy" if policy_name == "MlpPolicy" else policy_name,
+            (),
+            {},
+        )
+        self.learning_rate = contract["learning_rate"]
+        if isinstance(self.learning_rate, int | float) and not isinstance(
+            self.learning_rate, bool
+        ):
+            self.lr_schedule = lambda _: float(self.learning_rate)
+        else:
+            self.lr_schedule = self.learning_rate
+        self.n_steps = contract["n_steps"]
+        self.batch_size = contract["batch_size"]
+        self.n_epochs = contract["n_epochs"]
+        self.gamma = contract["gamma"]
+        self.gae_lambda = contract["gae_lambda"]
+        clip_range = contract["clip_range"]
+        self.clip_range = (
+            (lambda _: float(clip_range))
+            if isinstance(clip_range, int | float) and not isinstance(clip_range, bool)
+            else clip_range
+        )
+        self.ent_coef = contract["ent_coef"]
+        self.vf_coef = contract["vf_coef"]
+        self.max_grad_norm = contract["max_grad_norm"]
+        self.observation_space = spaces.Box(
+            low=-1.0,
+            high=1.0,
+            shape=tuple(contract["observation_shape"]),
+            dtype=np.float32,
+        )
+        self.action_space = spaces.Discrete(contract["action_count"])
 
     @classmethod
     def reset(cls) -> None:
@@ -230,6 +291,12 @@ class FakePPO:
         model.learn_kwargs = None
         model.saved_path = None
         model.num_timesteps = cls.resume_num_timesteps
+        contract = cls.default_contract()
+        if zipfile.is_zipfile(path):
+            with zipfile.ZipFile(path) as checkpoint:
+                if "ppo_contract.json" in checkpoint.namelist():
+                    contract.update(json.loads(checkpoint.read("ppo_contract.json")))
+        model._set_contract(contract)
         cls.instances.append(model)
         return model
 
@@ -253,9 +320,18 @@ class FakePPO:
             self.write_checkpoint(self.saved_path, "final")
 
     @staticmethod
-    def write_checkpoint(path: Path, marker: str) -> None:
+    def write_checkpoint(
+        path: Path,
+        marker: str,
+        ppo_contract: dict[str, Any] | None = None,
+    ) -> None:
         with zipfile.ZipFile(path, "w") as checkpoint:
             checkpoint.writestr("marker.txt", marker)
+            if ppo_contract is not None:
+                checkpoint.writestr(
+                    "ppo_contract.json",
+                    json.dumps(ppo_contract, sort_keys=True),
+                )
 
 
 @pytest.fixture(autouse=True)
@@ -280,6 +356,42 @@ def make_config(*, num_envs: int = 1, **training_overrides: Any) -> AppConfig:
             "training": training,
         }
     )
+
+
+@dataclass(frozen=True)
+class CompatibleSourceRun:
+    run_dir: Path
+    checkpoint: Path
+
+
+def seed_compatible_source_run(
+    tmp_path: Path,
+    **ppo_overrides: Any,
+) -> CompatibleSourceRun:
+    index = 0
+    while (tmp_path / f"source-run-{index}").exists():
+        index += 1
+    run_dir = tmp_path / f"source-run-{index}"
+    checkpoints_dir = run_dir / "checkpoints"
+    checkpoints_dir.mkdir(parents=True)
+    config = make_config()
+    resolved_config = config.model_dump(mode="json")
+    (run_dir / "config_resolved.yaml").write_text(
+        yaml.safe_dump(resolved_config, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    metadata = RunMetadata(resolved_config=resolved_config)
+    (run_dir / "run_metadata.json").write_text(
+        json.dumps(dataclasses.asdict(metadata), ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    checkpoint = checkpoints_dir / "final_model.zip"
+    FakePPO.write_checkpoint(
+        checkpoint,
+        "resume-source",
+        {**FakePPO.default_contract(), **ppo_overrides},
+    )
+    return CompatibleSourceRun(run_dir=run_dir, checkpoint=checkpoint)
 
 
 def run_with_fakes(
@@ -321,6 +433,49 @@ def run_with_fakes(
         reward_callback_factory=reward,
     )
     return result, environments, dummy, checkpoint, evaluation
+
+
+def test_nonempty_run_directory_is_rejected_before_any_side_effect(tmp_path: Path) -> None:
+    run_dir = tmp_path / "occupied"
+    run_dir.mkdir()
+    marker = run_dir / "keep.txt"
+    marker.write_bytes(b"original\x00bytes")
+    environments = EnvFactory()
+
+    with pytest.raises(FileExistsError) as raised:
+        run_with_fakes(make_config(), run_dir, env_factory=environments)
+
+    assert str(raised.value) == f"Run directory is non-empty: {run_dir}"
+    assert marker.read_bytes() == b"original\x00bytes"
+    assert list(run_dir.iterdir()) == [marker]
+    assert environments.calls == []
+    assert FakePPO.instances == []
+
+
+def test_existing_empty_run_directory_is_accepted(tmp_path: Path) -> None:
+    run_dir = tmp_path / "empty"
+    run_dir.mkdir()
+
+    result, *_ = run_with_fakes(make_config(), run_dir)
+
+    assert result.run_dir == run_dir
+    assert (run_dir / "run_metadata.json").is_file()
+
+
+def test_run_directory_file_is_rejected_and_preserved_before_any_side_effect(
+    tmp_path: Path,
+) -> None:
+    run_file = tmp_path / "occupied.bin"
+    run_file.write_bytes(b"do-not-overwrite\x00")
+    environments = EnvFactory()
+
+    with pytest.raises(NotADirectoryError) as raised:
+        run_with_fakes(make_config(), run_file, env_factory=environments)
+
+    assert str(raised.value) == f"Run directory is not a directory: {run_file}"
+    assert run_file.read_bytes() == b"do-not-overwrite\x00"
+    assert environments.calls == []
+    assert FakePPO.instances == []
 
 
 def test_run_training_uses_only_configured_ppo_values_and_closes_envs(tmp_path: Path) -> None:
@@ -419,6 +574,25 @@ def test_writes_exact_stably_ordered_resolved_yaml(tmp_path: Path) -> None:
     assert (run_dir / "config_resolved.yaml").read_text(encoding="utf-8") == expected
 
 
+def test_fresh_run_writes_complete_research_contract_metadata(tmp_path: Path) -> None:
+    config = make_config()
+    run_dir = tmp_path / "metadata"
+
+    run_with_fakes(config, run_dir)
+
+    metadata = json.loads((run_dir / "run_metadata.json").read_text(encoding="utf-8"))
+    assert metadata == {
+        "research_contract_version": 2,
+        "observation_schema_version": 1,
+        "observation_shape": [24],
+        "action_schema_version": 1,
+        "action_count": 4,
+        "action_order": ["KEEP", "SLOW", "PREPARE_STOP", "STOP"],
+        "resolved_config": config.model_dump(mode="json"),
+        "resume": None,
+    }
+
+
 def test_callback_frequencies_are_scaled_by_num_envs(tmp_path: Path) -> None:
     checkpoint = CallbackFactory()
     evaluation = EvalCallbackFactory()
@@ -461,13 +635,11 @@ def test_callback_frequencies_have_a_minimum_of_one(tmp_path: Path) -> None:
     assert evaluation.calls[0]["eval_freq"] == 1
 
 
-def test_failed_best_validation_preserves_existing_best_checkpoint(
+def test_failed_best_validation_does_not_publish_a_best_checkpoint(
     tmp_path: Path,
 ) -> None:
-    run_dir = tmp_path / "stale-best"
+    run_dir = tmp_path / "missing-best"
     best_checkpoint = run_dir / "checkpoints" / "best_model.zip"
-    best_checkpoint.parent.mkdir(parents=True)
-    best_checkpoint.write_bytes(b"stale")
     environments = EnvFactory()
 
     with pytest.raises(FileNotFoundError, match="Best checkpoint"):
@@ -478,15 +650,13 @@ def test_failed_best_validation_preserves_existing_best_checkpoint(
             eval_factory=CallbackFactory(),
         )
 
-    assert best_checkpoint.read_bytes() == b"stale"
+    assert not best_checkpoint.exists()
     assert all(env.close_calls == 1 for env in environments.created)
 
 
-def test_scheduled_evaluation_overwrites_stale_best_checkpoint(tmp_path: Path) -> None:
+def test_scheduled_evaluation_publishes_best_checkpoint(tmp_path: Path) -> None:
     run_dir = tmp_path / "fresh-best"
     best_checkpoint = run_dir / "checkpoints" / "best_model.zip"
-    best_checkpoint.parent.mkdir(parents=True)
-    best_checkpoint.write_bytes(b"stale")
 
     result, *_ = run_with_fakes(make_config(), run_dir)
 
@@ -496,34 +666,19 @@ def test_scheduled_evaluation_overwrites_stale_best_checkpoint(tmp_path: Path) -
         assert checkpoint.read("marker.txt") == b"best"
 
 
-def test_failed_final_validation_preserves_existing_final_checkpoint(
+def test_failed_final_validation_does_not_publish_a_final_checkpoint(
     tmp_path: Path,
 ) -> None:
-    run_dir = tmp_path / "stale-final"
+    run_dir = tmp_path / "missing-final"
     final_checkpoint = run_dir / "checkpoints" / "final_model.zip"
-    final_checkpoint.parent.mkdir(parents=True)
-    final_checkpoint.write_bytes(b"stale")
     FakePPO.skip_save = True
     environments = EnvFactory()
 
     with pytest.raises(FileNotFoundError, match="Final checkpoint"):
         run_with_fakes(make_config(), run_dir, env_factory=environments)
 
-    assert final_checkpoint.read_bytes() == b"stale"
+    assert not final_checkpoint.exists()
     assert all(env.close_calls == 1 for env in environments.created)
-
-
-def seed_existing_checkpoints(run_dir: Path) -> dict[Path, bytes]:
-    checkpoints_dir = run_dir / "checkpoints"
-    checkpoints_dir.mkdir(parents=True, exist_ok=True)
-    paths = {
-        "final": checkpoints_dir / "final_model.zip",
-        "best": checkpoints_dir / "best_model.zip",
-        "periodic": checkpoints_dir / "ppo_checkpoint_17500_steps.zip",
-    }
-    for marker, path in paths.items():
-        FakePPO.write_checkpoint(path, f"old-{marker}")
-    return {path: path.read_bytes() for path in paths.values()}
 
 
 def assert_no_invocation_staging(run_dir: Path) -> None:
@@ -554,14 +709,14 @@ class FailingEnvFactory:
         ("final_validation", "Final checkpoint"),
     ],
 )
-def test_failed_run_preserves_all_existing_checkpoint_artifacts(
+def test_failed_resume_preserves_all_source_run_artifacts(
     tmp_path: Path,
     failure: str,
     message: str,
 ) -> None:
+    source = seed_compatible_source_run(tmp_path)
+    source_before = source_tree_bytes(source.run_dir)
     run_dir = tmp_path / failure
-    original_artifacts = seed_existing_checkpoints(run_dir)
-    resume_from = run_dir / "checkpoints" / "final_model.zip"
     env_factory: Any = EnvFactory()
     eval_factory: EvalCallbackFactory | CallbackFactory = EvalCallbackFactory()
     if failure == "environment":
@@ -581,14 +736,15 @@ def test_failed_run_preserves_all_existing_checkpoint_artifacts(
         run_with_fakes(
             make_config(),
             run_dir,
-            resume_from=resume_from,
+            resume_from=source.checkpoint,
             env_factory=env_factory,
             dummy_factory=VecFactory(),
             eval_factory=eval_factory,
         )
 
-    assert {path: path.read_bytes() for path in original_artifacts} == original_artifacts
-    assert_no_invocation_staging(run_dir)
+    assert source_tree_bytes(source.run_dir) == source_before
+    if (run_dir / "checkpoints").exists():
+        assert_no_invocation_staging(run_dir)
 
 
 def test_staging_cleanup_failure_does_not_mask_training_error(
@@ -657,30 +813,21 @@ def test_success_stages_then_promotes_best_final_and_periodic_checkpoints(
 
 
 @pytest.mark.parametrize("failure_at", [2, 3])
-def test_promotion_failure_restores_all_originals_and_removes_new_destinations(
+def test_promotion_failure_removes_every_new_canonical_destination(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     failure_at: int,
 ) -> None:
     run_dir = tmp_path / f"replace-{failure_at}"
     checkpoints_dir = run_dir / "checkpoints"
-    checkpoints_dir.mkdir(parents=True)
-    original_paths = [
-        checkpoints_dir / "ppo_checkpoint_2500_steps.zip",
-        checkpoints_dir / "best_model.zip",
-        checkpoints_dir / "final_model.zip",
-    ]
-    for index, path in enumerate(original_paths):
-        path.write_bytes(f"original-{index}".encode())
-    originals = {path: path.read_bytes() for path in original_paths}
-    new_periodic = checkpoints_dir / "ppo_checkpoint_5000_steps.zip"
     real_replace = train_module.os.replace
-    replace_calls = 0
+    promotion_calls = 0
 
     def fail_selected_replace(source: Path, destination: Path) -> None:
-        nonlocal replace_calls
-        replace_calls += 1
-        if replace_calls == failure_at:
+        nonlocal promotion_calls
+        if Path(source).parent.name.startswith(".training-"):
+            promotion_calls += 1
+        if promotion_calls == failure_at:
             raise OSError(f"replacement {failure_at} failed")
         real_replace(source, destination)
 
@@ -692,33 +839,23 @@ def test_promotion_failure_restores_all_originals_and_removes_new_destinations(
             run_dir,
         )
 
-    assert {path: path.read_bytes() for path in original_paths} == originals
-    assert not new_periodic.exists()
+    assert not list(checkpoints_dir.glob("*.zip"))
     assert_no_invocation_staging(run_dir)
 
 
-@pytest.mark.parametrize("resume_name", ["final_model.zip", "best_model.zip"])
-def test_same_run_checkpoint_remains_readable_through_ppo_load(
+def test_resume_destination_inside_source_run_is_rejected_without_source_changes(
     tmp_path: Path,
-    resume_name: str,
 ) -> None:
-    run_dir = tmp_path / resume_name.removesuffix(".zip")
-    resume_path = run_dir / "checkpoints" / resume_name
-    resume_path.parent.mkdir(parents=True)
-    FakePPO.write_checkpoint(resume_path, "resume-source")
-    source_bytes = resume_path.read_bytes()
+    source = seed_compatible_source_run(tmp_path)
+    source_before = source_tree_bytes(source.run_dir)
+    destination = source.run_dir / "continued"
 
-    result, *_ = run_with_fakes(
-        make_config(),
-        run_dir,
-        resume_from=resume_path,
-    )
+    with pytest.raises(ValueError, match="separate"):
+        run_with_fakes(make_config(), destination, resume_from=source.checkpoint)
 
-    assert FakePPO.load_calls[0]["path"] == resume_path
-    assert FakePPO.load_calls[0]["source_bytes"] == source_bytes
-    assert result.final_checkpoint.is_file()
-    assert result.best_checkpoint.is_file()
-    assert_no_invocation_staging(run_dir)
+    assert source_tree_bytes(source.run_dir) == source_before
+    assert not destination.exists()
+    assert FakePPO.load_calls == []
 
 
 def test_num_envs_above_one_uses_subprocess_train_env_and_separate_dummy_eval(
@@ -1251,23 +1388,272 @@ def test_cloudpickle_round_trip_preserves_each_role_and_worker_without_shared_co
     assert len({id(config) for config in configs}) == 4
 
 
+def source_tree_bytes(run_dir: Path) -> dict[str, bytes]:
+    return {
+        path.relative_to(run_dir).as_posix(): path.read_bytes()
+        for path in sorted(run_dir.rglob("*"))
+        if path.is_file()
+    }
+
+
+def test_resume_records_provenance_preserves_source_and_keeps_timesteps(
+    tmp_path: Path,
+) -> None:
+    source = seed_compatible_source_run(tmp_path)
+    source_before = source_tree_bytes(source.run_dir)
+    destination = tmp_path / "continued"
+    config = make_config()
+    FakePPO.rollout_overshoot = 96
+
+    result, *_ = run_with_fakes(config, destination, resume_from=source.checkpoint)
+
+    metadata = json.loads((destination / "run_metadata.json").read_text(encoding="utf-8"))
+    assert metadata["resume"] == {
+        "parent_checkpoint_path": str(source.checkpoint.resolve()),
+        "parent_checkpoint_sha256": sha256_file(source.checkpoint),
+        "parent_run_dir": str(source.run_dir.resolve()),
+        "parent_config": config.model_dump(mode="json"),
+        "config_diff": {},
+        "start_num_timesteps": 12_500,
+    }
+    assert FakePPO.load_calls[0]["path"] == source.checkpoint.resolve()
+    assert FakePPO.instances[0].learn_kwargs is not None
+    assert FakePPO.instances[0].learn_kwargs["reset_num_timesteps"] is False
+    assert FakePPO.instances[0].num_timesteps == 17_596
+    assert result.timesteps == 5_096
+    assert source_tree_bytes(source.run_dir) == source_before
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    ["missing", "malformed", "legacy", "wrong-observation", "wrong-action-order"],
+)
+def test_resume_rejects_invalid_source_metadata_before_destination_or_environment(
+    tmp_path: Path,
+    corruption: str,
+) -> None:
+    source = seed_compatible_source_run(tmp_path)
+    metadata_path = source.run_dir / "run_metadata.json"
+    if corruption == "missing":
+        metadata_path.unlink()
+    elif corruption == "malformed":
+        metadata_path.write_text("{not-json", encoding="utf-8")
+    else:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        if corruption == "legacy":
+            metadata["research_contract_version"] = 1
+        elif corruption == "wrong-observation":
+            metadata["observation_schema_version"] = 99
+        else:
+            metadata["action_order"] = ["STOP", "SLOW", "PREPARE_STOP", "KEEP"]
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    destination = tmp_path / "rejected"
+    environments = EnvFactory()
+
+    with pytest.raises(ValueError, match="metadata|contract|schema|action"):
+        run_with_fakes(
+            make_config(),
+            destination,
+            resume_from=source.checkpoint,
+            env_factory=environments,
+        )
+
+    assert not destination.exists()
+    assert environments.calls == []
+    assert FakePPO.load_calls == []
+
+
+@pytest.mark.parametrize(
+    ("field", "source_value"),
+    [
+        ("policy", "CnnPolicy"),
+        ("learning_rate", 0.001),
+        ("learning_rate", "0.0003"),
+        ("n_steps", 1024),
+        ("batch_size", 32),
+        ("n_epochs", 3),
+        ("gamma", 0.9),
+        ("gae_lambda", 0.8),
+        ("clip_range", 0.1),
+        ("clip_range", "0.2"),
+        ("ent_coef", 0.2),
+        ("vf_coef", 0.7),
+        ("max_grad_norm", 0.9),
+    ],
+)
+def test_resume_rejects_loaded_ppo_hyperparameter_mismatch_before_writes_or_learning(
+    tmp_path: Path,
+    field: str,
+    source_value: object,
+) -> None:
+    source = seed_compatible_source_run(tmp_path, **{field: source_value})
+    destination = tmp_path / "incompatible"
+
+    with pytest.raises(ValueError, match=field):
+        run_with_fakes(make_config(), destination, resume_from=source.checkpoint)
+
+    assert not destination.exists()
+    assert FakePPO.instances[0].learn_kwargs is None
+
+
+def test_resume_rejects_nonconstant_effective_learning_rate_schedule(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = seed_compatible_source_run(tmp_path)
+    destination = tmp_path / "scheduled-learning-rate"
+    original_load = FakePPO.load.__func__
+
+    def scheduled_load(cls: type[FakePPO], path: Path, **kwargs: Any) -> FakePPO:
+        model = original_load(cls, path, **kwargs)
+        model.lr_schedule = lambda progress: 0.0003 if progress == 1.0 else 0.0001
+        return model
+
+    monkeypatch.setattr(FakePPO, "load", classmethod(scheduled_load))
+
+    with pytest.raises(ValueError, match="learning_rate"):
+        run_with_fakes(make_config(), destination, resume_from=source.checkpoint)
+
+    assert not destination.exists()
+    assert FakePPO.instances[0].learn_kwargs is None
+
+
+@pytest.mark.parametrize(
+    ("override", "message"),
+    [({"observation_shape": [25]}, "observation"), ({"action_count": 5}, "action")],
+)
+def test_resume_rejects_loaded_space_mismatch_before_writes_or_learning(
+    tmp_path: Path,
+    override: dict[str, object],
+    message: str,
+) -> None:
+    source = seed_compatible_source_run(tmp_path, **override)
+    destination = tmp_path / "space-mismatch"
+
+    with pytest.raises(ValueError, match=message):
+        run_with_fakes(make_config(), destination, resume_from=source.checkpoint)
+
+    assert not destination.exists()
+    assert FakePPO.instances[0].learn_kwargs is None
+
+
+def test_resume_config_diff_contains_only_changed_allowed_fields_in_sorted_order(
+    tmp_path: Path,
+) -> None:
+    source = seed_compatible_source_run(tmp_path)
+    config = make_config(
+        seed=43,
+        smoke_timesteps=6_000,
+        total_timesteps=600_000,
+        checkpoint_interval_steps=11_000,
+        eval_interval_steps=12_000,
+        run_root="continued-runs",
+    )
+    destination = tmp_path / "allowed-diff"
+
+    run_with_fakes(config, destination, resume_from=source.checkpoint)
+
+    resume = json.loads((destination / "run_metadata.json").read_text(encoding="utf-8"))[
+        "resume"
+    ]
+    expected = {
+        "training.checkpoint_interval_steps": {"parent": 10_000, "current": 11_000},
+        "training.eval_interval_steps": {"parent": 10_000, "current": 12_000},
+        "training.run_root": {"parent": "runs", "current": "continued-runs"},
+        "training.seed": {"parent": 42, "current": 43},
+        "training.smoke_timesteps": {"parent": 5_000, "current": 6_000},
+        "training.total_timesteps": {"parent": 500_000, "current": 600_000},
+    }
+    assert resume["config_diff"] == expected
+    assert list(resume["config_diff"]) == sorted(expected)
+
+
+def test_resume_rejects_disallowed_config_difference_before_environment_or_destination(
+    tmp_path: Path,
+) -> None:
+    source = seed_compatible_source_run(tmp_path)
+    payload = make_config().model_dump(mode="json")
+    payload["reward"]["offroad"] = 101.0
+    config = AppConfig.model_validate(payload)
+    destination = tmp_path / "different-reward"
+    environments = EnvFactory()
+
+    with pytest.raises(ValueError, match="reward.offroad"):
+        run_with_fakes(
+            config,
+            destination,
+            resume_from=source.checkpoint,
+            env_factory=environments,
+        )
+
+    assert not destination.exists()
+    assert environments.calls == []
+    assert FakePPO.load_calls == []
+
+
+@pytest.mark.parametrize("corruption", ["missing", "malformed", "inconsistent"])
+def test_resume_rejects_invalid_resolved_source_config_before_destination(
+    tmp_path: Path,
+    corruption: str,
+) -> None:
+    source = seed_compatible_source_run(tmp_path)
+    config_path = source.run_dir / "config_resolved.yaml"
+    if corruption == "missing":
+        config_path.unlink()
+    elif corruption == "malformed":
+        config_path.write_text("training: [", encoding="utf-8")
+    else:
+        payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        payload["training"]["seed"] = 99
+        config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    destination = tmp_path / "invalid-config"
+
+    with pytest.raises(ValueError, match="resolved config|metadata"):
+        run_with_fakes(make_config(), destination, resume_from=source.checkpoint)
+
+    assert not destination.exists()
+    assert FakePPO.load_calls == []
+
+
+def test_resume_detects_checkpoint_change_during_load_before_destination_or_learning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = seed_compatible_source_run(tmp_path)
+    destination = tmp_path / "changed-source"
+    original_load = FakePPO.load.__func__
+
+    def changing_load(cls: type[FakePPO], path: Path, **kwargs: Any) -> FakePPO:
+        model = original_load(cls, path, **kwargs)
+        path.write_bytes(b"changed-during-load")
+        return model
+
+    monkeypatch.setattr(FakePPO, "load", classmethod(changing_load))
+
+    with pytest.raises(ValueError, match="changed"):
+        run_with_fakes(make_config(), destination, resume_from=source.checkpoint)
+
+    assert not destination.exists()
+    assert FakePPO.instances[0].learn_kwargs is None
+
+
 def test_resume_loads_ppo_with_train_env_and_keeps_timesteps(tmp_path: Path) -> None:
-    resume_from = tmp_path / "source.zip"
-    resume_from.write_bytes(b"checkpoint")
+    source = seed_compatible_source_run(tmp_path)
+    source_bytes = source.checkpoint.read_bytes()
 
     FakePPO.rollout_overshoot = 96
     result, *_ = run_with_fakes(
         make_config(),
         tmp_path / "resume",
-        resume_from=resume_from,
+        resume_from=source.checkpoint,
     )
 
     assert len(FakePPO.load_calls) == 1
     assert len(FakePPO.instances) == 1
     model = FakePPO.instances[0]
     assert FakePPO.load_calls[0] == {
-        "path": resume_from,
-        "source_bytes": b"checkpoint",
+        "path": source.checkpoint.resolve(),
+        "source_bytes": source_bytes,
         "env": model.init_kwargs["env"],
         "device": "cpu",
         "custom_objects": None,

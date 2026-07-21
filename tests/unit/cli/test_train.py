@@ -190,6 +190,37 @@ def test_existing_file_cannot_be_used_as_run_directory(
     assert "Traceback" not in captured.err
 
 
+def test_nonempty_run_directory_is_rejected_without_calling_training(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("seed: 42\n", encoding="utf-8")
+    run_dir = tmp_path / "occupied"
+    run_dir.mkdir()
+    marker = run_dir / "keep.bin"
+    marker.write_bytes(b"preserve-me\x00")
+    monkeypatch.setattr(train_module, "load_config", lambda path: make_config())
+    called = False
+
+    def unexpected_training(*args: object, **kwargs: object) -> None:
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(train_module, "run_training", unexpected_training)
+
+    assert main(["--config", str(config_path), "--run-dir", str(run_dir)]) == 2
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert f"training failed: Run directory is non-empty: {run_dir}" in captured.err
+    assert "Traceback" not in captured.err
+    assert marker.read_bytes() == b"preserve-me\x00"
+    assert list(run_dir.iterdir()) == [marker]
+    assert called is False
+
+
 def test_operational_error_is_concise_and_traceback_free(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -197,7 +228,11 @@ def test_operational_error_is_concise_and_traceback_free(
 ) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text("seed: 42\n", encoding="utf-8")
-    monkeypatch.setattr(train_module, "load_config", lambda path: make_config())
+    monkeypatch.setattr(
+        train_module,
+        "load_config",
+        lambda path: make_config(run_root=str(tmp_path / "failed-run")),
+    )
 
     def failing_training(*args: object, **kwargs: object) -> None:
         raise RuntimeError("training exploded")

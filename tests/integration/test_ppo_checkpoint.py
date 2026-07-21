@@ -1,4 +1,5 @@
 import hashlib
+import json
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -127,9 +128,6 @@ def test_real_ppo_writes_artifacts_and_resumes_transactionally(tmp_path: Path) -
     ]
     assert first_result.timesteps == 16
     assert all(path.is_file() and zipfile.is_zipfile(path) for path in all_checkpoints)
-    initial_periodic_hashes = {
-        name: checkpoint_hash(path) for name, path in periodic_checkpoints.items()
-    }
     for name, expected_timesteps in expected_initial_timesteps.items():
         assert (
             load_and_predict_policy(periodic_checkpoints[name]).num_timesteps == expected_timesteps
@@ -162,22 +160,29 @@ def test_real_ppo_writes_artifacts_and_resumes_transactionally(tmp_path: Path) -
     }
     assert len(environments) == 1
     assert all(environment.closed for environment in environments)
+    source_files = {
+        path.relative_to(run_dir).as_posix(): path.read_bytes()
+        for path in run_dir.rglob("*")
+        if path.is_file()
+    }
+    continued_dir = tmp_path / "continued"
 
     resumed_result = run_training(
         config,
         smoke=False,
-        run_dir=run_dir,
+        run_dir=continued_dir,
         resume_from=first_result.final_checkpoint,
         env_factory=env_factory,
     )
 
-    assert resumed_result.final_checkpoint == first_result.final_checkpoint
+    assert resumed_result.final_checkpoint == continued_dir / "checkpoints" / "final_model.zip"
     assert resumed_result.timesteps == 16
+    resumed_checkpoints_dir = continued_dir / "checkpoints"
     resumed_periodic_checkpoints = {
-        path.name: path for path in checkpoints_dir.glob("ppo_checkpoint_*_steps.zip")
+        path.name: path
+        for path in resumed_checkpoints_dir.glob("ppo_checkpoint_*_steps.zip")
     }
     expected_resumed_timesteps = {
-        **expected_initial_timesteps,
         "ppo_checkpoint_24_steps.zip": 24,
         "ppo_checkpoint_32_steps.zip": 32,
     }
@@ -190,8 +195,6 @@ def test_real_ppo_writes_artifacts_and_resumes_transactionally(tmp_path: Path) -
             resumed_result.final_checkpoint,
         ]
     )
-    for name, initial_hash in initial_periodic_hashes.items():
-        assert checkpoint_hash(resumed_periodic_checkpoints[name]) == initial_hash
     for name, expected_timesteps in expected_resumed_timesteps.items():
         resumed_periodic = load_and_predict_policy(resumed_periodic_checkpoints[name])
         assert resumed_periodic.num_timesteps == expected_timesteps
@@ -201,6 +204,21 @@ def test_real_ppo_writes_artifacts_and_resumes_transactionally(tmp_path: Path) -
     resumed_final = load_and_predict_policy(resumed_result.final_checkpoint)
     assert resumed_final.num_timesteps == 32
     assert checkpoint_hash(resumed_result.final_checkpoint) != initial_final_hash
-    assert not list(checkpoints_dir.glob(".training-*"))
+    assert not list(resumed_checkpoints_dir.glob(".training-*"))
+    assert {
+        path.relative_to(run_dir).as_posix(): path.read_bytes()
+        for path in run_dir.rglob("*")
+        if path.is_file()
+    } == source_files
+    resume_metadata = json.loads(
+        (continued_dir / "run_metadata.json").read_text(encoding="utf-8")
+    )["resume"]
+    assert resume_metadata["parent_checkpoint_sha256"] == initial_final_hash
+    assert resume_metadata["parent_checkpoint_path"] == str(
+        first_result.final_checkpoint.resolve()
+    )
+    assert resume_metadata["parent_run_dir"] == str(run_dir.resolve())
+    assert resume_metadata["start_num_timesteps"] == 16
+    assert resume_metadata["config_diff"] == {}
     assert len(environments) == 2
     assert all(environment.closed for environment in environments)

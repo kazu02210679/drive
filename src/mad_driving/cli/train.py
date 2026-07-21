@@ -9,7 +9,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from mad_driving.config.loader import load_config
-from mad_driving.training.train import run_training
+from mad_driving.training.train import require_empty_run_directory, run_training
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -39,8 +39,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         config = load_config(config_path)
         run_dir = Path(args.run_dir) if args.run_dir is not None else Path(config.training.run_root)
-        if run_dir.exists() and not run_dir.is_dir():
-            raise NotADirectoryError(f"Run directory is not a directory: {run_dir}")
+        require_empty_run_directory(run_dir)
 
         result = run_training(
             config,

@@ -21,6 +21,14 @@ from mad_driving.config.models import AppConfig
 from mad_driving.envs.multi_agent_speed_env import MultiAgentSpeedEnv
 from mad_driving.scenarios import EnvironmentRole
 from mad_driving.training.callbacks import RewardComponentsCallback
+from mad_driving.training.metadata import (
+    ResumeMetadata,
+    RunMetadata,
+    resolve_resume_source,
+    sha256_file,
+    validate_resume_contract,
+    write_run_metadata,
+)
 
 
 class EnvironmentFactory(Protocol):
@@ -55,6 +63,15 @@ class TrainingResult:
     final_checkpoint: Path
     best_checkpoint: Path
     timesteps: int
+
+
+def require_empty_run_directory(path: Path) -> None:
+    """Reject destinations that could contain user-owned artifacts."""
+
+    if path.exists() and not path.is_dir():
+        raise NotADirectoryError(f"Run directory is not a directory: {path}")
+    if path.exists() and any(path.iterdir()):
+        raise FileExistsError(f"Run directory is non-empty: {path}")
 
 
 def _default_env_factory(
@@ -390,26 +407,33 @@ def run_training(
     """Train or resume one PPO policy and close every environment on exit."""
 
     destination = Path(run_dir)
-    if destination.exists() and not destination.is_dir():
-        raise NotADirectoryError(f"Run directory is not a directory: {destination}")
+    require_empty_run_directory(destination)
     resume_path = None if resume_from is None else Path(resume_from)
     if resume_path is not None and not resume_path.is_file():
         raise FileNotFoundError(f"Resume checkpoint not found: {resume_path}")
+    resume_source = (
+        None if resume_path is None else resolve_resume_source(resume_path, config)
+    )
+    if resume_source is not None:
+        canonical_destination = destination.resolve()
+        if (
+            canonical_destination == resume_source.run_dir
+            or resume_source.run_dir in canonical_destination.parents
+        ):
+            raise ValueError(
+                "Resume destination must be separate from the source run: "
+                f"{destination}"
+            )
 
     checkpoints_dir = destination / "checkpoints"
     tensorboard_dir = destination / "tensorboard"
-    checkpoints_dir.mkdir(parents=True, exist_ok=True)
-    tensorboard_dir.mkdir(parents=True, exist_ok=True)
-    _write_resolved_config(config, destination / "config_resolved.yaml")
     requested_timesteps = (
         config.training.smoke_timesteps if smoke else config.training.total_timesteps
     )
     final_checkpoint = checkpoints_dir / "final_model.zip"
     best_checkpoint = checkpoints_dir / "best_model.zip"
-    staging_dir = _create_checkpoint_staging(checkpoints_dir)
+    staging_dir: Path | None = None
     cleanup_staging = True
-    staged_final_checkpoint = staging_dir / final_checkpoint.name
-    staged_best_checkpoint = staging_dir / best_checkpoint.name
 
     train_owner = _OwnedEnvironments.create(config, env_factory)
     eval_owner = _OwnedEnvironments.create(config, env_factory)
@@ -432,6 +456,66 @@ def run_training(
             eval_owner,
         )
 
+        if resume_source is None:
+            model = ppo_factory(
+                config.training.policy,
+                train_env,
+                learning_rate=config.training.learning_rate,
+                n_steps=config.training.n_steps,
+                batch_size=config.training.batch_size,
+                n_epochs=config.training.n_epochs,
+                gamma=config.training.gamma,
+                gae_lambda=config.training.gae_lambda,
+                clip_range=config.training.clip_range,
+                ent_coef=config.training.ent_coef,
+                vf_coef=config.training.vf_coef,
+                max_grad_norm=config.training.max_grad_norm,
+                seed=config.training.seed,
+                tensorboard_log=str(tensorboard_dir),
+                device="cpu",
+            )
+        else:
+            model = ppo_factory.load(  # type: ignore[attr-defined]
+                resume_source.checkpoint,
+                env=train_env,
+                device="cpu",
+                tensorboard_log=str(tensorboard_dir),
+            )
+            if sha256_file(resume_source.checkpoint) != resume_source.checkpoint_sha256:
+                raise ValueError(
+                    "Resume checkpoint changed while it was being validated and loaded: "
+                    f"{resume_source.checkpoint}"
+                )
+            validate_resume_contract(model, config, resume_source.metadata)
+
+        start_timesteps = int(model.num_timesteps)
+        if start_timesteps < 0:
+            raise ValueError("Resume start_num_timesteps must be non-negative")
+        resume_metadata = None
+        if resume_source is not None:
+            resume_metadata = ResumeMetadata(
+                parent_checkpoint_path=str(resume_source.checkpoint),
+                parent_checkpoint_sha256=resume_source.checkpoint_sha256,
+                parent_run_dir=str(resume_source.run_dir),
+                parent_config=resume_source.resolved_config,
+                config_diff=resume_source.config_diff,
+                start_num_timesteps=start_timesteps,
+            )
+
+        require_empty_run_directory(destination)
+        checkpoints_dir.mkdir(parents=True)
+        tensorboard_dir.mkdir()
+        _write_resolved_config(config, destination / "config_resolved.yaml")
+        write_run_metadata(
+            RunMetadata(
+                resolved_config=config.model_dump(mode="json"),
+                resume=resume_metadata,
+            ),
+            destination / "run_metadata.json",
+        )
+        staging_dir = _create_checkpoint_staging(checkpoints_dir)
+        staged_final_checkpoint = staging_dir / final_checkpoint.name
+        staged_best_checkpoint = staging_dir / best_checkpoint.name
         checkpoint_callback = checkpoint_callback_factory(
             save_freq=_scaled_frequency(
                 config.training.checkpoint_interval_steps,
@@ -452,38 +536,10 @@ def run_training(
             render=False,
         )
         reward_callback = reward_callback_factory()
-
-        if resume_path is None:
-            model = ppo_factory(
-                config.training.policy,
-                train_env,
-                learning_rate=config.training.learning_rate,
-                n_steps=config.training.n_steps,
-                batch_size=config.training.batch_size,
-                n_epochs=config.training.n_epochs,
-                gamma=config.training.gamma,
-                gae_lambda=config.training.gae_lambda,
-                clip_range=config.training.clip_range,
-                ent_coef=config.training.ent_coef,
-                vf_coef=config.training.vf_coef,
-                max_grad_norm=config.training.max_grad_norm,
-                seed=config.training.seed,
-                tensorboard_log=str(tensorboard_dir),
-                device="cpu",
-            )
-        else:
-            model = ppo_factory.load(  # type: ignore[attr-defined]
-                resume_path,
-                env=train_env,
-                device="cpu",
-                tensorboard_log=str(tensorboard_dir),
-            )
-
-        start_timesteps = int(model.num_timesteps)
         model.learn(
             total_timesteps=requested_timesteps,
             callback=[reward_callback, checkpoint_callback, eval_callback],
-            reset_num_timesteps=resume_path is None,
+            reset_num_timesteps=resume_source is None,
         )
         model.save(staged_final_checkpoint)
         if not staged_best_checkpoint.is_file():
@@ -512,7 +568,7 @@ def run_training(
                 cleanup_errors.append(exc)
         eval_owner.close()
         train_owner.close()
-        if cleanup_staging:
+        if cleanup_staging and staging_dir is not None:
             try:
                 _cleanup_checkpoint_staging(staging_dir, checkpoints_dir)
             except Exception as exc:
