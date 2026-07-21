@@ -434,3 +434,72 @@ Each TensorBoard run contains one event file with 63 scalar events across evalua
 The current Coordinator observation remains 24-dimensional. Explicit `ttc_valid`, `claim_valid`, `agent_failed`, and `target_actor_present` features are deferred and unimplemented; no documentation claims that these slots exist. Adding them requires a versioned observation-schema change and retraining.
 
 Phase 4.1 adds no Phase 5 Lead Brake, Cut-in, or Occluded Crossing Actor and no Curriculum. It adds no Phase 6 baseline execution, reports, plots, or GIFs. Task 11 changed documentation/evidence only and did not push; the parent performs the final whole-branch review and PR #4 push.
+
+## Phase 4.1 Task 11 review remediation: actual reset seed artifacts
+
+The original Task 11 smoke evidence above regenerated seed sequences after training. It did not prove which reset identities the PPO train and validation environments actually consumed. That seed-table evidence is superseded. The old run directories remain preserved and were not modified or deleted.
+
+Training now wraps every train and validation environment at the actual Gymnasium reset boundary. Each initial reset and VecEnv auto-reset durably appends strict finite JSON to a private-workspace file named `episode_seeds/<role>-worker-<index>.jsonl`. Per-role/worker files avoid writer collisions for `num_envs>1`. Invalid or incomplete seed info raises without writing a record. The runner closes all VecEnv workers before validating file identity, count, schema, and SHA-256, rewrites `run_metadata.json` with `episode_seed_artifacts`, and only then atomically publishes the private workspace. The research contract remains version 2; version-2 resume metadata that predates the optional inventory loads with an empty artifact tuple.
+
+Strict TDD began with `ModuleNotFoundError: No module named 'mad_driving.training.episode_seeds'`. After the first integration implementation, three orchestration tests still failed because cleanup assertions had to inspect the wrapped environment and one failed worker close was retried. The final focused training set passed `144 passed, 17 warnings`. Added coverage-branch tests brought the final full count to 628. No production change was made after the implementation became GREEN.
+
+The checkout-local non-editable package was refreshed without changing global Python:
+
+```powershell
+.venv\Scripts\uv.exe sync --no-editable --group dev --extra training --reinstall-package mad-driving
+```
+
+`uv 0.8.0` rebuilt and reinstalled `mad-driving==0.1.0`. Source and installed `episode_seeds.py` both had SHA-256 `1fa57f56c98f7ed2fd3dc6e8194a06988ab34e2a6b8dcfb72eb9721561495e00`.
+
+### Fresh remediation gates
+
+- `.venv\Scripts\python.exe -m pytest -q`: `628 passed, 19 warnings in 38.67s`
+- `.venv\Scripts\ruff.exe check .`: `All checks passed!`
+- `.venv\Scripts\mypy.exe src`: `Success: no issues found in 54 source files`
+- coverage with `--cov-fail-under=90`: `628 passed, 19 warnings in 50.48s`; 3,368 statements, 244 missed, 902 branches, 147 partial branches, exact total `90.19%`
+- real MetaDrive trio: `15 passed, 16 warnings in 16.64s`
+
+The warning inventory remains 14 upstream Matplotlib/PyParsing deprecations plus five Stable-Baselines3 advisories in the full runs, and the same 14 deprecations plus two Stable-Baselines3 advisories in the real trio. No warning was suppressed. A first direct `pytest.exe -q` attempt stopped during collection with 12 `ModuleNotFoundError: tests` errors because that launcher omitted the checkout root; the canonical `python -m pytest` invocation above passed. The first coverage attempt ran all 622 then-current tests but failed the strict threshold at `89.91%`; added artifact-boundary tests produced the passing `90.19%` result.
+
+Process checks reported `python_process_count=0` before verification, after the real trio, and after both smoke reloads. No Python or MetaDrive process attributable to the gates remained.
+
+### Fresh persisted-artifact smoke pair
+
+Read-only checks confirmed both destinations absent before use:
+
+```text
+runs/phase4_1_seed_artifact_smoke_20260721_a exists=False
+runs/phase4_1_seed_artifact_smoke_20260721_b exists=False
+```
+
+Both standalone CLI commands used `configs/train.yaml`, smoke mode, and seed 42. Run A completed in `40.562s`; run B completed in `40.217s`. Each requested 5,000 steps, completed 6,144 at the PPO rollout boundary, selected the best checkpoint at 5,000 steps, and evaluated five 200-step episodes at mean reward `-64.71`.
+
+The parser read only the newly persisted artifacts. Both runs contain 31 train records and 6 validation records; the complete train and validation triple sequences are byte-identical across A and B. The shared train `episode_rng_seed` sequence is:
+
+```text
+[42, 191664963, 1662057957, 1405681631, 942484272, 929893137,
+ 1843824992, 184566854, 1497586438, 432652533, 202244314, 1130604997,
+ 2095133045, 1580016183, 1634535062, 1540770719, 1688060240,
+ 1102145672, 275121930, 1803345590, 967196436, 1074497555, 796282693,
+ 392022359, 1990212658, 1678403330, 1382689815, 864178266, 1766867109,
+ 1171300112, 952224740]
+```
+
+The shared validation sequence contains six triples:
+
+```text
+(42, 10746, 10418)
+(191664963, 10103, 10696)
+(1662057957, 10595, 10383)
+(1405681631, 10643, 10445)
+(942484272, 10361, 10833)
+(929893137, 10640, 10594)
+```
+
+The first three train triples are `(42, 948, 2314)`, `(191664963, 3546, 2463)`, and `(1662057957, 5299, 6974)`. Every train scenario and parameter identity is in `[0, 10000)`; every validation scenario and parameter identity is in `[10000, 11000)`, disjoint from train. All records contain the three integer identities, role, and worker index. The train JSONL SHA-256 is `a27983d91ae73cb406209fe8ef7d17e3cbaf98912728249cad90321f06f35093`; validation is `cf2c51fef0bb731a6c579f4a06964ba67608fc18d2e6093c91a5777e48dcd445`. Each value matches its metadata descriptor.
+
+Both metadata files are byte-identical at SHA-256 `37dfdb2451cc2032ed4d56c3e2f65dfdb3381dd2c763ec2ff45f14d7fc7a2489`; configs remain byte-identical at `682942f33278ee5e515129b717a984afd4ca3bb9442eab06a062e99f12fe66d6`. Each metadata file records research contract 2, observation schema 1, shape `[24]`, dtype `float32`, action schema 1, `resume=null`, and seed artifact schema 1. Each TensorBoard event file contains 63 finite scalar values.
+
+The final checkpoint SHA-256 values are `191b77cf7d471eb8850ffc1e130c427a0e46f194e258c892d6ef1a1ac761a4d4` for A and `d4b1c487e15730d8187889193ed325fb018808d7ee6560cb674d8b64bf444f19` for B. Each reloaded at `num_timesteps=6144` and completed 100 deterministic real MetaDrive decision steps with 101 finite observations, 100 finite rewards, no termination, and no truncation. Checkpoint ZIP byte equality is not the deterministic training contract.
+
+The Coordinator Observation remains 24-dimensional. `ttc_valid`, `claim_valid`, `agent_failed`, and `target_actor_present` remain deferred and unimplemented. No Phase 5 Actor/Curriculum or Phase 6 work was added. Nothing was pushed.

@@ -23,9 +23,12 @@ class TinyDeterministicEnv(gym.Env[NDArray[np.float32], int]):
     observation_space = spaces.Box(low=-1.0, high=1.0, shape=(24,), dtype=np.float32)
     action_space = spaces.Discrete(4)
 
-    def __init__(self) -> None:
+    def __init__(self, *, role: EnvironmentRole, worker_index: int) -> None:
         self.steps = 0
         self.closed = False
+        self.role = role
+        self.worker_index = worker_index
+        self.reset_count = 0
 
     def reset(
         self,
@@ -36,7 +39,14 @@ class TinyDeterministicEnv(gym.Env[NDArray[np.float32], int]):
         super().reset(seed=seed)
         del options
         self.steps = 0
-        return np.zeros(24, dtype=np.float32), {}
+        role_offset = 100 if self.role == "train" else 10_000
+        episode_seed = role_offset + self.worker_index * 100 + self.reset_count
+        self.reset_count += 1
+        return np.zeros(24, dtype=np.float32), {
+            "episode_rng_seed": episode_seed,
+            "metadrive_scenario_index": episode_seed + 20_000,
+            "scenario_parameter_seed": episode_seed + 30_000,
+        }
 
     def step(
         self,
@@ -101,7 +111,7 @@ def test_real_ppo_writes_artifacts_and_resumes_transactionally(tmp_path: Path) -
         assert received_config is not config
         assert role in {"train", "validation"}
         assert worker_index == 0
-        environment = TinyDeterministicEnv()
+        environment = TinyDeterministicEnv(role=role, worker_index=worker_index)
         environments.append(environment)
         return environment
 
@@ -139,6 +149,40 @@ def test_real_ppo_writes_artifacts_and_resumes_transactionally(tmp_path: Path) -
     initial_final = load_and_predict_policy(first_result.final_checkpoint)
     assert initial_final.num_timesteps == 16
     assert list((run_dir / "tensorboard").rglob("events.out.tfevents.*"))
+
+    seed_metadata = json.loads((run_dir / "run_metadata.json").read_text(encoding="utf-8"))
+    assert seed_metadata["research_contract_version"] == 2
+    assert seed_metadata["observation_schema_version"] == 1
+    seed_summaries = seed_metadata["episode_seed_artifacts"]
+    assert [(summary["role"], summary["worker_index"]) for summary in seed_summaries] == [
+        ("train", 0),
+        ("validation", 0),
+    ]
+    seed_records: dict[str, list[dict[str, object]]] = {}
+    for summary in seed_summaries:
+        artifact = run_dir / summary["path"]
+        records = [json.loads(line) for line in artifact.read_text(encoding="utf-8").splitlines()]
+        seed_records[summary["role"]] = records
+        assert summary["record_count"] == len(records)
+        assert summary["sha256"] == checkpoint_hash(artifact)
+        assert summary["schema_version"] == 1
+    train_seeds = [record["episode_rng_seed"] for record in seed_records["train"]]
+    validation_seeds = [record["episode_rng_seed"] for record in seed_records["validation"]]
+    assert len(set(train_seeds)) >= 2
+    assert all(seed < 10_000 for seed in train_seeds)
+    assert all(seed >= 10_000 for seed in validation_seeds)
+    assert all(
+        set(record)
+        == {
+            "episode_rng_seed",
+            "metadrive_scenario_index",
+            "role",
+            "scenario_parameter_seed",
+            "worker_index",
+        }
+        for records in seed_records.values()
+        for record in records
+    )
 
     resolved_config = yaml.safe_load((run_dir / "config_resolved.yaml").read_text(encoding="utf-8"))
     assert resolved_config == config.model_dump(mode="json")
@@ -179,8 +223,7 @@ def test_real_ppo_writes_artifacts_and_resumes_transactionally(tmp_path: Path) -
     assert resumed_result.timesteps == 16
     resumed_checkpoints_dir = continued_dir / "checkpoints"
     resumed_periodic_checkpoints = {
-        path.name: path
-        for path in resumed_checkpoints_dir.glob("ppo_checkpoint_*_steps.zip")
+        path.name: path for path in resumed_checkpoints_dir.glob("ppo_checkpoint_*_steps.zip")
     }
     expected_resumed_timesteps = {
         "ppo_checkpoint_24_steps.zip": 24,
@@ -210,13 +253,11 @@ def test_real_ppo_writes_artifacts_and_resumes_transactionally(tmp_path: Path) -
         for path in run_dir.rglob("*")
         if path.is_file()
     } == source_files
-    resume_metadata = json.loads(
-        (continued_dir / "run_metadata.json").read_text(encoding="utf-8")
-    )["resume"]
+    resume_metadata = json.loads((continued_dir / "run_metadata.json").read_text(encoding="utf-8"))[
+        "resume"
+    ]
     assert resume_metadata["parent_checkpoint_sha256"] == initial_final_hash
-    assert resume_metadata["parent_checkpoint_path"] == str(
-        first_result.final_checkpoint.resolve()
-    )
+    assert resume_metadata["parent_checkpoint_path"] == str(first_result.final_checkpoint.resolve())
     assert resume_metadata["parent_run_dir"] == str(run_dir.resolve())
     assert resume_metadata["start_num_timesteps"] == 16
     assert resume_metadata["config_diff"] == {}

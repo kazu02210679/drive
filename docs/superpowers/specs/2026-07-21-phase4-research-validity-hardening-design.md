@@ -147,8 +147,13 @@ actual MetaDrive index; the outer environment never reports an unwrapped request
 the actual road scenario. A mismatch between requested and returned scenario index is an
 environment error.
 
-Reset `info`, every decision trace, and training metadata record all three seed identities
-plus environment role and worker index.
+Reset `info` and every decision trace record all three seed identities. Training wraps each
+train and validation environment and durably appends the actual reset identities plus role
+and worker index to a collision-free JSONL file inside the private run workspace. This
+captures the initial reset and VecEnv auto-resets. After all vector environments close, the
+runner validates each file and stores its relative path, role, worker, record count, artifact
+schema version, and SHA-256 in `run_metadata.json`. Existing version-2 metadata without this
+optional inventory remains valid for resume compatibility.
 
 ## 6. Scenario Runtime Boundary
 

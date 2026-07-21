@@ -388,6 +388,8 @@ class CriticAgent:
         self,
         observation: SceneObservation,
         claims: Sequence[RiskClaim],
+        *,
+        failed_agent_ids: Sequence[str],
     ) -> CriticReview:
         ...
 ```
@@ -673,7 +675,7 @@ Phase 4.1ではSimulator非依存の`ScenarioRuntime` lifecycleとrole別seed al
 ### 共通要件
 
 - seedで完全再現可能
-- `episode_rng_seed`、`metadrive_scenario_index`、`scenario_parameter_seed`を別identityとしてreset info、DecisionTrace、学習metadataへ記録する
+- `episode_rng_seed`、`metadrive_scenario_index`、`scenario_parameter_seed`を別identityとしてreset infoとDecisionTraceへ記録する。学習では実際に消費した各reset infoをprivate run workspace内のrole/worker別JSONLへ同期・耐久書き込みし、VecEnvをcloseした後に件数とSHA-256を検証して`run_metadata.json`の`episode_seed_artifacts`から参照する
 - `train=[0, 10000)`、`validation=[10000, 11000)`、`test=[20000, 21000)`を使い、空rangeと重複rangeを拒否する
 - train workerはroleとworker indexを明示し、validationは`EvalCallback`とbest-checkpoint選択だけに使う
 - test rangeはPhase 6の最終比較専用とし、学習、checkpoint選択、Curriculum進行に使用しない

@@ -22,6 +22,10 @@ from mad_driving.config.models import AppConfig
 from mad_driving.envs.multi_agent_speed_env import MultiAgentSpeedEnv
 from mad_driving.scenarios import EnvironmentRole
 from mad_driving.training.callbacks import RewardComponentsCallback
+from mad_driving.training.episode_seeds import (
+    EpisodeSeedRecordingWrapper,
+    summarize_episode_seed_artifacts,
+)
 from mad_driving.training.metadata import (
     ResumeMetadata,
     RunMetadata,
@@ -89,11 +93,17 @@ def _default_env_factory(
 class _OwnedEnvironments:
     config: AppConfig
     factory: EnvironmentFactory
+    workspace: Path
     created: list[gym.Env[Any, Any]]
 
     @classmethod
-    def create(cls, config: AppConfig, factory: EnvironmentFactory) -> _OwnedEnvironments:
-        return cls(config=config, factory=factory, created=[])
+    def create(
+        cls,
+        config: AppConfig,
+        factory: EnvironmentFactory,
+        workspace: Path,
+    ) -> _OwnedEnvironments:
+        return cls(config=config, factory=factory, workspace=workspace, created=[])
 
     def new(
         self,
@@ -108,7 +118,12 @@ class _OwnedEnvironments:
             worker_index=worker_index,
         )
         self.created.append(environment)
-        return environment
+        return EpisodeSeedRecordingWrapper(
+            environment,
+            workspace=self.workspace,
+            role=role,
+            worker_index=worker_index,
+        )
 
     def thunks(
         self,
@@ -446,8 +461,8 @@ def run_training(
     staging_dir: Path | None = None
     cleanup_staging = True
 
-    train_owner = _OwnedEnvironments.create(config, env_factory)
-    eval_owner = _OwnedEnvironments.create(config, env_factory)
+    train_owner = _OwnedEnvironments.create(config, env_factory, workspace)
+    eval_owner = _OwnedEnvironments.create(config, env_factory, workspace)
     train_env: Any = None
     eval_env: Any = None
     model: Any = None
@@ -573,6 +588,30 @@ def run_training(
             raise RuntimeError(f"Training resource cleanup failed: {exc}") from exc
         staging_dir = None
         timesteps = int(model.num_timesteps) - start_timesteps
+        closing_eval_env = eval_env
+        eval_env = None
+        _close_vector_env(closing_eval_env)
+        closing_train_env = train_env
+        train_env = None
+        _close_vector_env(closing_train_env)
+        eval_owner.close()
+        train_owner.close()
+        expected_seed_identities: tuple[tuple[EnvironmentRole, int], ...] = (
+            *(("train", worker_index) for worker_index in range(config.training.num_envs)),
+            ("validation", 0),
+        )
+        episode_seed_artifacts = summarize_episode_seed_artifacts(
+            workspace,
+            expected_identities=expected_seed_identities,
+        )
+        write_run_metadata(
+            RunMetadata(
+                resolved_config=config.model_dump(mode="json"),
+                resume=resume_metadata,
+                episode_seed_artifacts=episode_seed_artifacts,
+            ),
+            workspace / "run_metadata.json",
+        )
         ownership.publish()
         return TrainingResult(
             run_dir=destination,

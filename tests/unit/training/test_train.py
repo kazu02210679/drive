@@ -1,3 +1,4 @@
+import hashlib
 import json
 import math
 import os
@@ -9,6 +10,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 import cloudpickle
+import gymnasium as gym
 import numpy as np
 import pytest
 import yaml
@@ -24,7 +26,10 @@ from mad_driving.training import train as train_module
 from mad_driving.training.train import TrainingResult, run_training
 
 
-class FakeEnv:
+class FakeEnv(gym.Env[np.ndarray, int]):
+    observation_space = spaces.Box(low=-1.0, high=1.0, shape=(24,), dtype=np.float32)
+    action_space = spaces.Discrete(4)
+
     def __init__(
         self,
         identifier: int,
@@ -39,6 +44,31 @@ class FakeEnv:
         self.worker_index = worker_index
         self.closed = False
         self.close_calls = 0
+        self.reset_calls = 0
+
+    def reset(
+        self,
+        *,
+        seed: int | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> tuple[np.ndarray, dict[str, int]]:
+        super().reset(seed=seed)
+        del options
+        role_offset = 0 if self.role == "train" else 10_000
+        episode_seed = role_offset + self.worker_index * 100 + self.reset_calls
+        self.reset_calls += 1
+        return np.zeros(24, dtype=np.float32), {
+            "episode_rng_seed": episode_seed,
+            "metadrive_scenario_index": episode_seed + 20_000,
+            "scenario_parameter_seed": episode_seed + 30_000,
+        }
+
+    def step(
+        self,
+        action: int,
+    ) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
+        del action
+        return np.zeros(24, dtype=np.float32), 0.0, False, False, {}
 
     def close(self) -> None:
         self.closed = True
@@ -336,6 +366,22 @@ class FakePPO:
                 )
 
 
+class ResettingFakePPO(FakePPO):
+    """Exercise initial and auto-reset-like calls at the real VecEnv boundary."""
+
+    def learn(self, **kwargs: Any) -> FakePPO:
+        train_env = self.init_kwargs["env"]
+        for environment in train_env.envs:
+            environment.reset()
+            environment.reset()
+        for callback in kwargs["callback"]:
+            eval_env = getattr(callback, "eval_env", None)
+            if eval_env is not None:
+                for environment in eval_env.envs:
+                    environment.reset()
+        return super().learn(**kwargs)
+
+
 @pytest.fixture(autouse=True)
 def reset_fake_ppo() -> None:
     FakePPO.reset()
@@ -405,6 +451,7 @@ def run_with_fakes(
     checkpoint_factory: CheckpointCallbackFactory | CallbackFactory | None = None,
     eval_factory: EvalCallbackFactory | CallbackFactory | None = None,
     reward_factory: RewardCallbackFactory | None = None,
+    ppo_factory: type[FakePPO] = FakePPO,
 ) -> tuple[
     TrainingResult,
     EnvFactory,
@@ -424,7 +471,7 @@ def run_with_fakes(
         run_dir=run_dir,
         resume_from=resume_from,
         env_factory=environments,
-        ppo_factory=FakePPO,
+        ppo_factory=ppo_factory,
         dummy_vec_env_factory=dummy,
         subproc_vec_env_factory=subproc,
         checkpoint_callback_factory=checkpoint,
@@ -899,7 +946,92 @@ def test_fresh_run_writes_complete_research_contract_metadata(tmp_path: Path) ->
         "action_order": ["KEEP", "SLOW", "PREPARE_STOP", "STOP"],
         "resolved_config": config.model_dump(mode="json"),
         "resume": None,
+        "episode_seed_artifacts": [
+            {
+                "path": "episode_seeds/train-worker-000.jsonl",
+                "record_count": 0,
+                "role": "train",
+                "schema_version": 1,
+                "sha256": hashlib.sha256(b"").hexdigest(),
+                "worker_index": 0,
+            },
+            {
+                "path": "episode_seeds/validation-worker-000.jsonl",
+                "record_count": 0,
+                "role": "validation",
+                "schema_version": 1,
+                "sha256": hashlib.sha256(b"").hexdigest(),
+                "worker_index": 0,
+            },
+        ],
     }
+
+
+def test_training_persists_actual_reset_seed_artifacts_by_role_and_worker(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "actual-reset-seeds"
+
+    _, environments, *_ = run_with_fakes(
+        make_config(num_envs=2),
+        run_dir,
+        subproc_factory=VecFactory(),
+        ppo_factory=ResettingFakePPO,
+    )
+
+    metadata = json.loads((run_dir / "run_metadata.json").read_text(encoding="utf-8"))
+    summaries = metadata["episode_seed_artifacts"]
+    assert [(item["role"], item["worker_index"], item["record_count"]) for item in summaries] == [
+        ("train", 0, 2),
+        ("train", 1, 2),
+        ("validation", 0, 1),
+    ]
+    records = {
+        item["path"]: [
+            json.loads(line)
+            for line in (run_dir / item["path"]).read_text(encoding="utf-8").splitlines()
+        ]
+        for item in summaries
+    }
+    train_worker_0 = records["episode_seeds/train-worker-000.jsonl"]
+    train_worker_1 = records["episode_seeds/train-worker-001.jsonl"]
+    assert [record["episode_rng_seed"] for record in train_worker_0] == [0, 1]
+    assert [record["episode_rng_seed"] for record in train_worker_1] == [100, 101]
+    assert records["episode_seeds/validation-worker-000.jsonl"][0]["episode_rng_seed"] == 10_000
+    assert all(environment.closed for environment in environments.created)
+    assert not list(tmp_path.glob(".actual-reset-seeds.training-*"))
+
+
+def test_seed_artifacts_are_closed_and_summarized_before_atomic_publish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environments = EnvFactory()
+    original_publish = ownership_module.RunDirectoryOwnership.publish
+    observations: list[tuple[bool, list[int]]] = []
+
+    def observe_publish(ownership: ownership_module.RunDirectoryOwnership) -> None:
+        metadata = json.loads(
+            (ownership.workspace / "run_metadata.json").read_text(encoding="utf-8")
+        )
+        observations.append(
+            (
+                all(environment.closed for environment in environments.created),
+                [item["record_count"] for item in metadata["episode_seed_artifacts"]],
+            )
+        )
+        original_publish(ownership)
+
+    monkeypatch.setattr(ownership_module.RunDirectoryOwnership, "publish", observe_publish)
+
+    run_with_fakes(
+        make_config(),
+        tmp_path / "publish-order",
+        env_factory=environments,
+        ppo_factory=ResettingFakePPO,
+    )
+
+    assert observations == [(True, [2, 1])]
 
 
 def test_callback_frequencies_are_scaled_by_num_envs(tmp_path: Path) -> None:
@@ -1285,8 +1417,8 @@ def test_subprocess_failure_closes_partial_resources_and_fails_without_dummy_fal
 
     assert FailingSubprocVecEnv.latest is not None
     assert FailingSubprocVecEnv.latest.closed is True
-    assert FailingSubprocVecEnv.latest.envs[0].closed is True
-    assert FailingSubprocVecEnv.latest.envs[0].close_calls == 1
+    assert FailingSubprocVecEnv.latest.envs[0].unwrapped.closed is True
+    assert FailingSubprocVecEnv.latest.envs[0].unwrapped.close_calls == 1
     assert dummy.created == []
     assert len(environments.created) == 1
     assert all(env.closed for env in environments.created)
@@ -1691,13 +1823,15 @@ def test_cloudpickle_round_trip_preserves_each_role_and_worker_without_shared_co
 
     train_envs = subproc.created[0].envs
     eval_envs = dummy.created[0].envs
-    assert [(env.role, env.worker_index) for env in train_envs] == [
+    assert [(env.unwrapped.role, env.unwrapped.worker_index) for env in train_envs] == [
         ("train", 0),
         ("train", 1),
         ("train", 2),
     ]
-    assert [(env.role, env.worker_index) for env in eval_envs] == [("validation", 0)]
-    configs = [env.config for env in (*train_envs, *eval_envs)]
+    assert [(env.unwrapped.role, env.unwrapped.worker_index) for env in eval_envs] == [
+        ("validation", 0)
+    ]
+    configs = [env.unwrapped.config for env in (*train_envs, *eval_envs)]
     assert len({id(config) for config in configs}) == 4
 
 
@@ -2159,6 +2293,6 @@ def test_eval_construction_failure_closes_train_and_partial_eval_env(tmp_path: P
         )
 
     assert dummy.partial is not None
-    assert dummy.partial.closed is True
+    assert dummy.partial.unwrapped.closed is True
     assert all(env.closed for env in environments.created)
     assert all(env.close_calls == 1 for env in environments.created)

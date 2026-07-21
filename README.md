@@ -82,8 +82,8 @@ JSONには最終Snapshot・Claims・Reviewに加え、`final_trace`、4 Action�
 Windows PowerShell:
 
 ```powershell
-# Canonical headless CPU smoke (5,000 requested timesteps)
-.venv\Scripts\python.exe -m mad_driving.cli.train --config configs/train.yaml --smoke --run-dir runs/phase4_smoke_seed42
+# Headless CPU smoke (replace <UNIQUE_RUN_ID>; destination must be fresh)
+.venv\Scripts\python.exe -m mad_driving.cli.train --config configs/train.yaml --smoke --run-dir runs/phase4_smoke_seed42_<UNIQUE_RUN_ID>
 
 # Standard 500,000-timestep run
 .venv\Scripts\python.exe -m mad_driving.cli.train --config configs/train.yaml --run-dir runs/phase4_standard_seed42
@@ -95,8 +95,8 @@ Windows PowerShell:
 Linux:
 
 ```bash
-# Canonical headless CPU smoke (5,000 requested timesteps)
-.venv/bin/python -m mad_driving.cli.train --config configs/train.yaml --smoke --run-dir runs/phase4_smoke_seed42
+# Headless CPU smoke (replace <UNIQUE_RUN_ID>; destination must be fresh)
+.venv/bin/python -m mad_driving.cli.train --config configs/train.yaml --smoke --run-dir runs/phase4_smoke_seed42_<UNIQUE_RUN_ID>
 
 # Standard 500,000-timestep run
 .venv/bin/python -m mad_driving.cli.train --config configs/train.yaml --run-dir runs/phase4_standard_seed42
@@ -105,7 +105,7 @@ Linux:
 .venv/bin/python -m mad_driving.cli.train --config configs/train.yaml --run-dir runs/phase4_standard_seed43_continued --resume-from runs/phase4_standard_seed42/checkpoints/final_model.zip
 ```
 
-新規学習とresumeは、存在しない、または空の`--run-dir`だけを受け付けます。非空directoryを上書きしません。Resume sourceはread-onlyとして扱い、checkpoint SHA-256、親run/config、config差分、開始step、Observation/Action schemaを新しいrunの`run_metadata.json`へ記録します。全runは`research_contract_version=2`、`observation_schema_version=1`です。
+新規学習とresumeは、存在しない、または空の`--run-dir`だけを受け付けます。`<UNIQUE_RUN_ID>`は毎回新しい識別子へ置換してください。非空directoryを上書きしません。Resume sourceはread-onlyとして扱い、checkpoint SHA-256、親run/config、config差分、開始step、Observation/Action schemaを新しいrunの`run_metadata.json`へ記録します。全runは`research_contract_version=2`、`observation_schema_version=1`です。各train/validation環境の実際のreset情報は`episode_seeds/<role>-worker-<index>.jsonl`へ耐久書き込みし、metadataの`episode_seed_artifacts`が相対path、role、worker、件数、schema version、SHA-256を示します。
 
 標準Stable-Baselines3 PPOは`n_steps * num_envs`単位でrolloutを完了するため、実step数は要求値を超える場合があります。更新をエピソード境界へ同期しません。出力構造は次のとおりです。periodic checkpointは設定したintervalに到達した場合だけ生成されます。
 
@@ -113,6 +113,9 @@ Linux:
 <run-dir>/
 ├── config_resolved.yaml
 ├── run_metadata.json
+├── episode_seeds/
+│   ├── train-worker-000.jsonl
+│   └── validation-worker-000.jsonl
 ├── checkpoints/
 │   ├── best_model.zip
 │   ├── final_model.zip
@@ -122,7 +125,7 @@ Linux:
         └── events.out.tfevents.*
 ```
 
-Phase 4.1のfresh reproducibility smokeは`runs/phase4_1_smoke_seed42_a`と`runs/phase4_1_smoke_seed42_b`で実行しました。両runとも5,000 requested / 6,144 actual training stepsを完了し、wall timeはAが43.1秒、Bが42.1秒でした。train episode RNG seed列の先頭3件は両方とも`[42, 191664963, 1662057957]`で、対応するtrain MetaDrive indexは`[948, 3546, 5299]`、validation indexは`[10746, 10103, 10595]`です。両final checkpointは6,144 stepで再読込でき、100 decision stepsのObservationとRewardは全て有限でした。詳細は [`docs/phase4_implementation_log.md`](docs/phase4_implementation_log.md) にあります。
+`runs/phase4_1_smoke_seed42_a`と`runs/phase4_1_smoke_seed42_b`の旧Task 11 seed列は学習後に再生成したため、実run証拠としては廃止しました。後続のfresh smokeは`runs/phase4_1_seed_artifact_smoke_20260721_a`と`runs/phase4_1_seed_artifact_smoke_20260721_b`です。両runは5,000 requested / 6,144 actual stepsを完了し、実reset JSONLの全31 train recordsと全6 validation recordsが一致しました。両final checkpointは6,144 stepで再読込でき、各100 decision stepsのObservationとRewardは全て有限でした。詳細は [`docs/phase4_implementation_log.md`](docs/phase4_implementation_log.md) にあります。
 
 ## Verify
 

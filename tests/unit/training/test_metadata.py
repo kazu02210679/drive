@@ -1,5 +1,6 @@
 import dataclasses
 import hashlib
+import json
 import math
 from pathlib import Path
 from typing import Any
@@ -209,3 +210,58 @@ def test_metadata_writer_rejects_non_finite_nested_value_without_destination(
 
     assert not destination.exists()
     assert list(tmp_path.iterdir()) == []
+
+
+def test_version_2_metadata_without_seed_artifacts_remains_loadable(tmp_path: Path) -> None:
+    destination = tmp_path / "run_metadata.json"
+    metadata_module.write_run_metadata(
+        RunMetadata(resolved_config={"seed": 42}),
+        destination,
+    )
+    payload = json.loads(destination.read_text(encoding="utf-8"))
+    payload.pop("episode_seed_artifacts")
+    destination.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = metadata_module._load_run_metadata(destination)
+
+    assert loaded.research_contract_version == 2
+    assert loaded.episode_seed_artifacts == ()
+
+
+@pytest.mark.parametrize(
+    "summary",
+    [
+        {
+            "path": "../outside.jsonl",
+            "record_count": 1,
+            "role": "train",
+            "schema_version": 1,
+            "sha256": "a" * 64,
+            "worker_index": 0,
+        },
+        {
+            "path": "episode_seeds/train-worker-000.jsonl",
+            "record_count": -1,
+            "role": "train",
+            "schema_version": 1,
+            "sha256": "a" * 64,
+            "worker_index": 0,
+        },
+        {
+            "path": "episode_seeds/train-worker-000.jsonl",
+            "record_count": 1,
+            "role": "train",
+            "schema_version": 2,
+            "sha256": "a" * 64,
+            "worker_index": 0,
+        },
+    ],
+)
+def test_metadata_rejects_malformed_episode_seed_artifact_summary(
+    summary: dict[str, object],
+) -> None:
+    with pytest.raises(ValueError, match="episode_seed_artifacts"):
+        RunMetadata(
+            resolved_config={"seed": 42},
+            episode_seed_artifacts=(summary,),
+        )

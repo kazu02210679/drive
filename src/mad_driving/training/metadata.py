@@ -26,6 +26,7 @@ OBSERVATION_SHAPE: Final = (24,)
 OBSERVATION_DTYPE: Final = "float32"
 ACTION_SCHEMA_VERSION: Final = 1
 ACTION_ORDER: Final = ("KEEP", "SLOW", "PREPARE_STOP", "STOP")
+EPISODE_SEED_ARTIFACT_SCHEMA_VERSION: Final = 1
 _ALLOWED_CONFIG_DIFFS: Final = frozenset(
     {
         "training.checkpoint_interval_steps",
@@ -213,6 +214,7 @@ class RunMetadata:
     action_schema_version: int = ACTION_SCHEMA_VERSION
     action_count: int = len(ACTION_ORDER)
     action_order: tuple[str, ...] = ACTION_ORDER
+    episode_seed_artifacts: tuple[Mapping[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -277,6 +279,77 @@ class RunMetadata:
         )
         if self.resume is not None and not isinstance(self.resume, ResumeMetadata):
             raise ValueError("resume must be ResumeMetadata or null")
+        object.__setattr__(
+            self,
+            "episode_seed_artifacts",
+            _validated_episode_seed_artifacts(self.episode_seed_artifacts),
+        )
+
+
+def _validated_episode_seed_artifacts(
+    value: object,
+) -> tuple[Mapping[str, Any], ...]:
+    if not isinstance(value, list | tuple):
+        raise ValueError("episode_seed_artifacts must be a list or tuple")
+    required = {
+        "path",
+        "record_count",
+        "role",
+        "schema_version",
+        "sha256",
+        "worker_index",
+    }
+    validated: list[Mapping[str, Any]] = []
+    identities: set[tuple[str, int]] = set()
+    paths: set[str] = set()
+    for index, raw_summary in enumerate(value):
+        name = f"episode_seed_artifacts[{index}]"
+        if not isinstance(raw_summary, Mapping) or set(raw_summary) != required:
+            raise ValueError(f"{name} fields are malformed")
+        role = raw_summary["role"]
+        if role not in ("train", "validation", "test"):
+            raise ValueError(f"{name}.role is malformed")
+        worker_index = _validated_integral(raw_summary["worker_index"], f"{name}.worker_index")
+        if worker_index < 0:
+            raise ValueError(f"{name}.worker_index must be non-negative")
+        record_count = _validated_integral(raw_summary["record_count"], f"{name}.record_count")
+        if record_count < 0:
+            raise ValueError(f"{name}.record_count must be non-negative")
+        schema_version = _validated_integral(
+            raw_summary["schema_version"],
+            f"{name}.schema_version",
+            expected=EPISODE_SEED_ARTIFACT_SCHEMA_VERSION,
+        )
+        path = raw_summary["path"]
+        expected_path = f"episode_seeds/{role}-worker-{worker_index:03d}.jsonl"
+        if not isinstance(path, str) or path != expected_path:
+            raise ValueError(f"{name}.path must equal {expected_path!r}")
+        digest = raw_summary["sha256"]
+        if (
+            not isinstance(digest, str)
+            or len(digest) != 64
+            or digest != digest.lower()
+            or any(character not in "0123456789abcdef" for character in digest)
+        ):
+            raise ValueError(f"{name}.sha256 must be a lowercase SHA-256 digest")
+        identity = (str(role), worker_index)
+        if identity in identities or path in paths:
+            raise ValueError("episode_seed_artifacts must not contain duplicates")
+        identities.add(identity)
+        paths.add(path)
+        frozen = _freeze_json(
+            {
+                "path": path,
+                "record_count": record_count,
+                "role": role,
+                "schema_version": schema_version,
+                "sha256": digest,
+                "worker_index": worker_index,
+            },
+            name,
+        )
+        validated.append(cast(Mapping[str, Any], frozen))
+    return tuple(validated)
 
 
 @dataclass(frozen=True)
@@ -366,7 +439,8 @@ def _parse_run_metadata(payload: object) -> RunMetadata:
         "resolved_config",
         "resume",
     }
-    if set(values) != required:
+    optional = {"episode_seed_artifacts"}
+    if not required <= set(values) or set(values) - required - optional:
         raise ValueError("Resume metadata fields are malformed")
     observation_shape_value = values["observation_shape"]
     action_order_value = values["action_order"]
@@ -394,6 +468,7 @@ def _parse_run_metadata(payload: object) -> RunMetadata:
         ),
         action_count=_require_int(values["action_count"], "action_count"),
         action_order=tuple(action_order_value),
+        episode_seed_artifacts=values.get("episode_seed_artifacts", ()),
     )
 
 
@@ -564,6 +639,7 @@ def write_run_metadata(metadata: RunMetadata, destination: Path) -> None:
         action_schema_version=metadata.action_schema_version,
         action_count=metadata.action_count,
         action_order=metadata.action_order,
+        episode_seed_artifacts=metadata.episode_seed_artifacts,
     )
     payload = {
         "resolved_config": _thaw_json(validated.resolved_config, "resolved_config"),
@@ -575,6 +651,10 @@ def write_run_metadata(metadata: RunMetadata, destination: Path) -> None:
         "action_schema_version": validated.action_schema_version,
         "action_count": validated.action_count,
         "action_order": list(validated.action_order),
+        "episode_seed_artifacts": _thaw_json(
+            validated.episode_seed_artifacts,
+            "episode_seed_artifacts",
+        ),
     }
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{destination.name}.",

@@ -10,7 +10,7 @@
 
 ## Implementation status
 
-Tasks 1-10 are complete at commits `41a584f` through `c668f6f`; their exact RED/GREEN and measured evidence is preserved in `.superpowers/sdd/task-1-report.md` through `task-10-report.md`. Task 11 completed the active-document migration, fresh `608 passed` full/coverage gates, `15 passed` real MetaDrive trio, two fresh 5,000-requested/6,144-actual PPO smokes, independent artifact/reload checks, and the documentation/evidence commit on 2026-07-21.
+Tasks 1-10 are complete at commits `41a584f` through `c668f6f`; their exact RED/GREEN and measured evidence is preserved in `.superpowers/sdd/task-1-report.md` through `task-10-report.md`. Task 11 completed the active-document migration and then addressed review findings by persisting actual train/validation reset identities. The final remediation gates report `628 passed`, `90.19%` coverage, `15 passed` real MetaDrive checks, and two new 5,000-requested/6,144-actual PPO smokes whose persisted seed artifacts match exactly.
 
 The parent retains the final whole-branch review and PR #4 push. Task 11 Step 9 is therefore intentionally not run in this task and is not a completion prerequisite here. Phase 5 actors/Curriculum, Phase 6 work, and the explicit `ttc_valid`, `claim_valid`, `agent_failed`, and `target_actor_present` Observation features remain unimplemented.
 
@@ -968,6 +968,7 @@ git commit -m "feat: enforce training artifact provenance"
 **Interfaces:**
 - Documents: three specialists plus one Critic, explicit timing, standard PPO update semantics, seed identities/splits, ScenarioRuntime, privileged-state boundary, current reward, Shield comparison contracts, coordinates, and fresh-run requirements.
 - Records: 24-dimensional validity flags as a deferred versioned observation-schema change.
+- Persists: actual initial and VecEnv auto-reset seed identities in role/worker JSONL artifacts, with validated metadata inventory and version-2 resume compatibility.
 
 - [x] **Step 1: Update the top-level specification and README**
 
@@ -1016,6 +1017,8 @@ Expected: all real integration tests pass with no leaked simulator process.
 
 - [x] **Step 5: Run two reproducible PPO smoke trainings in fresh directories**
 
+> **Historical completed commands:** These destinations are occupied and must not be reused. The review-remediation replacement runs use the new `phase4_1_seed_artifact_smoke_20260721_a` and `_b` destinations recorded below.
+
 ```powershell
 .venv\Scripts\python.exe -m mad_driving.cli.train --config configs/train.yaml --smoke --run-dir runs/phase4_1_smoke_seed42_a
 .venv\Scripts\python.exe -m mad_driving.cli.train --config configs/train.yaml --smoke --run-dir runs/phase4_1_smoke_seed42_b
@@ -1043,6 +1046,8 @@ git log --oneline origin/feat/phase4-rl-environment..HEAD
 ```
 
 Expected: no unintended files, no whitespace errors, and only Phase 4.1 commits.
+
+Review remediation added strict TDD coverage for actual reset persistence, train/validation separation, collision-free multi-worker paths, malformed-info fail-closed behavior, cloudpickle-safe construction, source/destination ownership, close-before-publish ordering, and optional inventory compatibility for existing version-2 metadata. The old post-training regenerated seed evidence is superseded by the two persisted-artifact smoke runs documented in `docs/phase4_implementation_log.md`.
 
 - [ ] **Step 9: Push and verify Draft PR #4 (delegated to parent; intentionally not run here)**
 
