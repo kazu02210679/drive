@@ -10,7 +10,7 @@
 
 ## Implementation status
 
-Tasks 1-10 are complete at commits `41a584f` through `c668f6f`; their exact RED/GREEN and measured evidence is preserved in `.superpowers/sdd/task-1-report.md` through `task-10-report.md`. Task 11 completed the active-document migration and then addressed review findings by persisting actual train/validation reset identities. The final remediation gates report `628 passed`, `90.19%` coverage, `15 passed` real MetaDrive checks, and two new 5,000-requested/6,144-actual PPO smokes whose persisted seed artifacts match exactly.
+Tasks 1-10 are complete at commits `41a584f` through `c668f6f`; their exact RED/GREEN and measured evidence is preserved in `.superpowers/sdd/task-1-report.md` through `task-10-report.md`. Task 11 completed the active-document migration and review remediation. The final parent-held identity follow-up gates report `678 passed`, `90.33%` coverage, `15 passed` real MetaDrive checks, and two new 5,000-requested/6,144-actual PPO smokes whose persisted seed artifacts match exactly. Each writer identity is transferred to parent memory while its descriptor remains open; path occupants and artifact headers are not trust anchors.
 
 The parent retains the final whole-branch review and PR #4 push. Task 11 Step 9 is therefore intentionally not run in this task and is not a completion prerequisite here. Phase 5 actors/Curriculum, Phase 6 work, and the explicit `ttc_valid`, `claim_valid`, `agent_failed`, and `target_actor_present` Observation features remain unimplemented.
 

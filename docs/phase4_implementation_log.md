@@ -571,3 +571,83 @@ Final checkpoint hashes are
 Each reloaded at `num_timesteps=6144` and completed 100 deterministic real MetaDrive steps
 with 101 finite observations, 100 finite rewards, no termination, and no truncation. The
 post-audit `python`/`pythonw` process count was 0. Nothing was pushed.
+
+## Phase 4.1 parent-held worker identity follow-up
+
+This section supersedes every earlier Phase 4.1 gate and smoke result in this log. All old
+run directories remain preserved. The final reviewer demonstrated that a post-close
+replacement could write a valid schema-2 header containing its own new file identity, so
+header/path agreement was still self-attestation rather than worker provenance.
+
+Strict RED→GREEN remediation now exposes an immutable JSON/pickle-safe descriptor from
+each still-open writer. Train and validation descriptors carry role, worker, workspace-
+relative path, device, and inode through `DummyVecEnv.get_attr` or
+`SubprocVecEnv.get_attr`. The parent validates exact expected workers and retains those
+descriptors before either VecEnv closes. Inventory then requires each opened `fstat`, path,
+strict header, role, and worker to match parent memory before one stable read supplies
+parse/count/SHA-256. Self-recomputed replacement headers, replacement before or after
+close, missing/extra artifacts, duplicate descriptors, and mismatched workers fail closed.
+Descriptor collection failure prevents inventory and publication.
+
+Subprocess close now performs bounded join and inspects every worker `exitcode`. Nonzero,
+malformed, or unconfirmed exit status, any terminate/kill escalation, and any surviving
+worker are cleanup failures. A worker-side `env.close()` failure that exits 1 without a
+pipe error is therefore detected. Without a primary exception the failure blocks
+publication; with a primary exception it is attached as a note. Successful and failed
+first closes detach resources, so later closes do not retry them. A real two-worker SB3
+integration fetched both descriptors with `closed=False` and observed exit codes `[0, 0]`.
+
+### Superseding verification
+
+- focused adversarial identity/close set: `29 passed, 16 warnings in 10.35s`;
+- canonical full pytest: `678 passed, 18 warnings in 33.58s`;
+- Ruff: `All checks passed!`; changed-file format check: `5 files already formatted`;
+- mypy: `Success: no issues found in 54 source files`;
+- strict coverage: `678 passed, 18 warnings in 45.51s`, 3,636 statements, 266 missed,
+  1,016 branches, 162 partial branches, exact `90.33%`;
+- real MetaDrive trio: `15 passed, 15 warnings in 14.62s`.
+
+The first post-change coverage run completed 666 tests but failed the required threshold
+at exact `89.94%`. Requirement-specific malformed/duplicate/mismatched descriptor and
+unconfirmed exit-code cases raised the final passing gate above threshold. No warning was
+suppressed. Process audits were 0 before the gates, after the real trio, and after smoke
+artifact reload.
+
+### New parent-held identity PPO smokes
+
+Read-only preflight proved both new destinations absent and both prior final-fix runs still
+present:
+
+```text
+runs/phase4_1_worker_identity_final_smoke_20260721_a exists=False
+runs/phase4_1_worker_identity_final_smoke_20260721_b exists=False
+runs/phase4_1_worker_identity_smoke_20260721_a exists=True
+runs/phase4_1_worker_identity_smoke_20260721_b exists=True
+```
+
+Both required-`--run-dir` CLI commands exited 0. A completed in `44.4s`; B completed in
+`43.6s`. Each requested 5,000 steps, completed 6,144 at the PPO rollout boundary, and ran
+five deferred 200-step validation episodes at mean reward `-104.51`.
+
+An independent one-read parser verified exact inventory, strict JSON without duplicate
+keys, schema-2 headers, metadata/header/path identity agreement, role/worker, complete
+records, counts, and SHA-256. Parent-held provenance is established by the RED→GREEN
+control-channel tests and real two-worker integration; the smoke metadata records the
+validated resulting identities. A has train identity
+`(2393062996, 77687093572382381)` and validation identity
+`(2393062996, 99079191802415328)`; B has train identity
+`(2393062996, 20547673300163201)` and validation identity
+`(2393062996, 55732045388995816)`. Each run contains 31 train and 6 validation records,
+and every A/B seed tuple matches. The first three train tuples are `(42, 948, 2314)`,
+`(191664963, 3546, 2463)`, and `(1662057957, 5299, 6974)`; validation tuples remain
+`(42, 10746, 10418)`, `(191664963, 10103, 10696)`,
+`(1662057957, 10595, 10383)`, `(1405681631, 10643, 10445)`,
+`(942484272, 10361, 10833)`, and `(929893137, 10640, 10594)`. Each TensorBoard event file
+contains 62 finite scalar values.
+
+Final checkpoint SHA-256 is
+`429bd30bb2b715710c7f1b531330d1613b427580f7785ef36dd9f50cf4b7cfc0` for A and
+`1e0e9673c4e81160f6bd756922f5bbd368dfef5caace8aa8b7607eb0ce4edeca` for B. Each
+reloaded at `num_timesteps=6144` and completed 100 deterministic real MetaDrive steps with
+101 finite observations, 100 finite rewards, no termination, and no truncation. The final
+`python`/`pythonw` process count was 0. Nothing was pushed.

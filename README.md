@@ -105,7 +105,7 @@ Linux:
 .venv/bin/python -m mad_driving.cli.train --config configs/train.yaml --run-dir runs/phase4_standard_seed43_continued --resume-from runs/phase4_standard_seed42/checkpoints/final_model.zip
 ```
 
-新規学習とresumeは必須の`--run-dir`で、存在しない、または空のdestinationを明示した場合だけ受け付けます。`<UNIQUE_RUN_ID>`は毎回新しい識別子へ置換してください。非空directoryを上書きしません。Resume sourceはread-onlyとして扱い、checkpoint SHA-256、親run/config、config差分、開始step、Observation/Action schemaを新しいrunの`run_metadata.json`へ記録します。source hostでcanonicalizeしたhistorical parent pathはcross-host provenance文字列として保持します。全runは`research_contract_version=2`、`observation_schema_version=1`です。各train/validation環境の実際のreset情報はdescriptor-boundな`episode_seeds/<role>-worker-<index>.jsonl`へ耐久書き込みし、metadataの`episode_seed_artifacts`が相対path、role、worker、件数、schema version、platform file identity、同一byte readのSHA-256を示します。
+新規学習とresumeは必須の`--run-dir`で、存在しない、または空のdestinationを明示した場合だけ受け付けます。`<UNIQUE_RUN_ID>`は毎回新しい識別子へ置換してください。非空directoryを上書きしません。Resume sourceはread-onlyとして扱い、checkpoint SHA-256、親run/config、config差分、開始step、Observation/Action schemaを新しいrunの`run_metadata.json`へ記録します。source hostでcanonicalizeしたhistorical parent pathはcross-host provenance文字列として保持します。全runは`research_contract_version=2`、`observation_schema_version=1`です。各train/validation環境の実際のreset情報はdescriptor-boundな`episode_seeds/<role>-worker-<index>.jsonl`へ耐久書き込みします。parentはwriterがopenな間にVecEnv control channelからrole/worker/path/platform identityを保持し、close後のinventoryはそのparent-held identityに対して検証します。metadataの`episode_seed_artifacts`は相対path、role、worker、件数、schema version、検証済みplatform file identity、同一byte readのSHA-256を示します。
 
 `training.num_envs=1`ではtrainとvalidationの両方を`DummyVecEnv`にし、train engineをcloseした後に1回のvalidationを行うためsubprocessを生成しません。`num_envs>1`ではtrainだけを`SubprocVecEnv`にし、validation worker 0はparent processの単一`DummyVecEnv`でperiodic evaluationを行います。
 
@@ -127,7 +127,7 @@ Linux:
         └── events.out.tfevents.*
 ```
 
-`runs/phase4_1_smoke_seed42_a`と`runs/phase4_1_smoke_seed42_b`の旧Task 11 seed列は学習後に再生成したため、実run証拠としては廃止しました。後続のfresh smokeは`runs/phase4_1_seed_artifact_smoke_20260721_a`と`runs/phase4_1_seed_artifact_smoke_20260721_b`です。両runは5,000 requested / 6,144 actual stepsを完了し、実reset JSONLの全31 train recordsと全6 validation recordsが一致しました。両final checkpointは6,144 stepで再読込でき、各100 decision stepsのObservationとRewardは全て有限でした。詳細は [`docs/phase4_implementation_log.md`](docs/phase4_implementation_log.md) にあります。
+旧Task 11の再生成seed列と、path occupantをidentity trust sourceにした後続runは実run証拠として廃止しました。最新のparent-held worker identity evidenceは`runs/phase4_1_worker_identity_final_smoke_20260721_a`と`runs/phase4_1_worker_identity_final_smoke_20260721_b`です。両runは5,000 requested / 6,144 actual stepsを完了し、実reset JSONLの全31 train recordsと全6 validation recordsが一致しました。両final checkpointは6,144 stepで再読込でき、各100 decision stepsのObservationとRewardは全て有限でした。詳細は [`docs/phase4_implementation_log.md`](docs/phase4_implementation_log.md) にあります。
 
 ## Verify
 

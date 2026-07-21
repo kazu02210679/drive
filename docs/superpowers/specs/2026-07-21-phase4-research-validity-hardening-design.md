@@ -156,11 +156,16 @@ and worker index to a collision-free JSONL file inside the private run workspace
 writer keeps its exclusively created descriptor open for the wrapper lifetime, appends and
 fsyncs through that descriptor, and binds a platform file identity into the strict header.
 This captures the initial reset and VecEnv auto-resets without reopening a path that may
-have been replaced. After all vector environments close, the runner opens each path once,
-checks its `fstat` identity against the header, reads one stable byte sequence, and uses
-those same bytes for strict parsing, record count, and SHA-256. Replacement, injected
-history, malformed JSONL, or an identity/change race fails the run. Metadata stores the
-relative path, role, worker, record count, artifact schema version, file identity, and
+have been replaced. Before either train or validation VecEnv closes, the parent retrieves
+an immutable role/worker/path/platform-identity descriptor from each still-open writer over
+the SB3 VecEnv control channel and retains those descriptors in parent memory. After all
+vector environments close, inventory opens each expected relative path once and requires
+its `fstat` identity, strict header, role, worker, and path to match the parent-held
+descriptor. One stable byte sequence supplies strict parsing, record count, and SHA-256.
+The current path occupant and any replaceable sidecar are never a trust source.
+Replacement, injected history, missing/extra artifacts, duplicate/mismatched descriptors,
+malformed JSONL, or an identity/change race fails the run. Metadata stores the relative
+path, role, worker, record count, artifact schema version, validated file identity, and
 SHA-256. Existing version-2 run metadata without this optional inventory remains loadable
 for resume compatibility.
 
@@ -427,7 +432,10 @@ checkpoints are never deleted by Phase 4.1.
 Environment, vector-environment, writer, logger, and ownership close failures are part of
 the training result. Without a primary error they fail the run; with a primary error they
 are attached as notes without masking it. The destination is not atomically published until
-train/evaluation closure and seed-artifact finalization have succeeded.
+train/evaluation closure and seed-artifact finalization have succeeded. Subprocess closure
+checks every worker exit code after bounded join; nonzero or unconfirmed exit, or any
+terminate/kill escalation, is a cleanup failure. A successful or failed first close detaches
+the resources so later close calls are idempotent and do not retry them.
 
 ## 14. Comparison Protocol
 

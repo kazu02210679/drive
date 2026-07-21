@@ -2,7 +2,7 @@ import hashlib
 import json
 import zipfile
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import gymnasium as gym
 import numpy as np
@@ -11,6 +11,7 @@ import yaml
 from gymnasium import spaces
 from numpy.typing import NDArray
 from stable_baselines3 import PPO
+from stable_baselines3.common.vec_env import SubprocVecEnv
 
 from mad_driving.config.models import AppConfig
 from mad_driving.scenarios import EnvironmentRole
@@ -62,6 +63,30 @@ class TinyDeterministicEnv(gym.Env[NDArray[np.float32], int]):
         self.closed = True
 
 
+class CapturingSubprocVecEnv(SubprocVecEnv):
+    created: ClassVar[list["CapturingSubprocVecEnv"]] = []
+
+    def __init__(self, env_fns: list[Any]) -> None:
+        self.identity_events: list[str] = []
+        super().__init__(env_fns)
+        type(self).created.append(self)
+
+    def get_attr(self, attr_name: str, indices: Any = None) -> list[Any]:
+        if attr_name == "episode_seed_artifact_descriptor":
+            self.identity_events.append(f"identity:closed={self.closed}")
+        return super().get_attr(attr_name, indices)
+
+
+def tiny_env_factory(
+    received_config: AppConfig,
+    *,
+    role: EnvironmentRole,
+    worker_index: int,
+) -> TinyDeterministicEnv:
+    del received_config
+    return TinyDeterministicEnv(role=role, worker_index=worker_index)
+
+
 def make_real_ppo_config() -> AppConfig:
     return AppConfig.model_validate(
         {
@@ -93,6 +118,48 @@ def load_and_predict_policy(checkpoint: Path) -> PPO:
 def checkpoint_hash(checkpoint: Path) -> str:
     with checkpoint.open("rb") as checkpoint_file:
         return hashlib.file_digest(checkpoint_file, "sha256").hexdigest()
+
+
+@pytest.mark.integration
+def test_parent_collects_seed_identity_through_real_subproc_control_channel(
+    tmp_path: Path,
+) -> None:
+    base_config = make_real_ppo_config()
+    config = base_config.model_copy(
+        update={
+            "training": base_config.training.model_copy(update={"num_envs": 2}),
+        }
+    )
+    run_dir = tmp_path / "subproc-identities"
+    CapturingSubprocVecEnv.created = []
+
+    run_training(
+        config,
+        smoke=False,
+        run_dir=run_dir,
+        env_factory=tiny_env_factory,
+        subproc_vec_env_factory=CapturingSubprocVecEnv,
+    )
+
+    assert len(CapturingSubprocVecEnv.created) == 1
+    vector_env = CapturingSubprocVecEnv.created[0]
+    assert vector_env.identity_events == ["identity:closed=False"]
+    assert vector_env.closed is True
+    assert [process.exitcode for process in vector_env.processes] == [0, 0]
+    metadata = json.loads((run_dir / "run_metadata.json").read_text(encoding="utf-8"))
+    summaries = metadata["episode_seed_artifacts"]
+    assert [(item["role"], item["worker_index"]) for item in summaries] == [
+        ("train", 0),
+        ("train", 1),
+        ("validation", 0),
+    ]
+    for summary in summaries:
+        artifact = run_dir / summary["path"]
+        stat_result = artifact.stat()
+        assert summary["file_identity"] == {
+            "device": stat_result.st_dev,
+            "inode": stat_result.st_ino,
+        }
 
 
 @pytest.mark.integration

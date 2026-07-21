@@ -143,6 +143,9 @@ class FakeVecEnv:
         for env in self.envs:
             env.close()
 
+    def get_attr(self, attr_name: str) -> list[object]:
+        return [env.get_wrapper_attr(attr_name) for env in self.envs]
+
 
 class VecFactory:
     def __init__(self) -> None:
@@ -1170,6 +1173,167 @@ def test_seed_artifacts_are_closed_and_summarized_before_atomic_publish(
     assert observations == [(True, [2, 1])]
 
 
+class DescriptorTrackingVecEnv(FakeVecEnv):
+    def __init__(self, env_fns: list[Callable[[], FakeEnv]]) -> None:
+        super().__init__(env_fns)
+        self.events: list[str] = []
+
+    def get_attr(self, attr_name: str) -> list[object]:
+        self.events.append(f"get_attr:{attr_name}:closed={self.closed}")
+        return super().get_attr(attr_name)
+
+    def close(self) -> None:
+        self.events.append(f"close:closed={self.closed}")
+        super().close()
+
+
+class DescriptorTrackingVecFactory:
+    def __init__(self) -> None:
+        self.created: list[DescriptorTrackingVecEnv] = []
+
+    def __call__(self, env_fns: list[Callable[[], FakeEnv]]) -> DescriptorTrackingVecEnv:
+        vector_env = DescriptorTrackingVecEnv(env_fns)
+        self.created.append(vector_env)
+        return vector_env
+
+
+class DescriptorFailingVecEnv(FakeVecEnv):
+    def get_attr(self, attr_name: str) -> list[object]:
+        del attr_name
+        raise EOFError("worker descriptor channel closed")
+
+
+class DescriptorFailingVecFactory:
+    def __call__(self, env_fns: list[Callable[[], FakeEnv]]) -> DescriptorFailingVecEnv:
+        return DescriptorFailingVecEnv(env_fns)
+
+
+class DescriptorResponseVecEnv(FakeVecEnv):
+    def __init__(self, env_fns: list[Callable[[], FakeEnv]], *, mode: str) -> None:
+        super().__init__(env_fns)
+        self.mode = mode
+
+    def get_attr(self, attr_name: str) -> Any:
+        descriptors = super().get_attr(attr_name)
+        if self.mode == "nonsequence":
+            return object()
+        if self.mode == "incomplete":
+            return descriptors[:-1]
+        if self.mode == "malformed":
+            return [object(), *descriptors[1:]]
+        if self.mode == "mismatched":
+            return [descriptors[0]._replace(worker_index=99), *descriptors[1:]]
+        if self.mode == "duplicate":
+            return [descriptors[0], descriptors[0]]
+        raise AssertionError(f"unknown descriptor response mode: {self.mode}")
+
+
+class DescriptorResponseVecFactory:
+    def __init__(self, mode: str) -> None:
+        self.mode = mode
+
+    def __call__(self, env_fns: list[Callable[[], FakeEnv]]) -> DescriptorResponseVecEnv:
+        return DescriptorResponseVecEnv(env_fns, mode=self.mode)
+
+
+def test_training_passes_parent_held_open_writer_descriptors_to_inventory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    train_vectors = DescriptorTrackingVecFactory()
+    validation_vectors = DescriptorTrackingVecFactory()
+    received_descriptors: list[object] = []
+
+    def capture_inventory(
+        workspace: Path,
+        *,
+        expected_descriptors: tuple[object, ...],
+    ) -> tuple[dict[str, object], ...]:
+        del workspace
+        received_descriptors.extend(expected_descriptors)
+        return ()
+
+    monkeypatch.setattr(
+        train_module,
+        "summarize_episode_seed_artifacts",
+        capture_inventory,
+    )
+
+    run_with_fakes(
+        make_config(num_envs=2),
+        tmp_path / "parent-held-descriptors",
+        dummy_factory=validation_vectors,
+        subproc_factory=train_vectors,
+    )
+
+    assert [descriptor.role for descriptor in received_descriptors] == [
+        "train",
+        "train",
+        "validation",
+    ]
+    assert [descriptor.worker_index for descriptor in received_descriptors] == [0, 1, 0]
+    for vector_env in (*train_vectors.created, *validation_vectors.created):
+        assert vector_env.events[0] == ("get_attr:episode_seed_artifact_descriptor:closed=False")
+        assert vector_env.events[1] == "close:closed=False"
+
+
+def test_descriptor_collection_failure_blocks_inventory_and_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = tmp_path / "descriptor-channel-failed"
+    inventory_called = False
+
+    def unexpected_inventory(*args: object, **kwargs: object) -> tuple[object, ...]:
+        del args, kwargs
+        nonlocal inventory_called
+        inventory_called = True
+        return ()
+
+    monkeypatch.setattr(
+        train_module,
+        "summarize_episode_seed_artifacts",
+        unexpected_inventory,
+    )
+
+    with pytest.raises(RuntimeError, match="failed to report"):
+        run_with_fakes(
+            make_config(),
+            run_dir,
+            dummy_factory=DescriptorFailingVecFactory(),  # type: ignore[arg-type]
+        )
+
+    assert inventory_called is False
+    assert not run_dir.exists()
+
+
+@pytest.mark.parametrize(
+    ("mode", "message"),
+    [
+        ("nonsequence", "malformed seed artifact identities"),
+        ("incomplete", "incomplete seed artifact inventory"),
+        ("malformed", "malformed seed artifact descriptor"),
+        ("mismatched", "mismatched seed artifact descriptor"),
+        ("duplicate", "duplicate seed artifact descriptors"),
+    ],
+)
+def test_malformed_parent_descriptor_collection_blocks_publication(
+    tmp_path: Path,
+    mode: str,
+    message: str,
+) -> None:
+    run_dir = tmp_path / f"bad-parent-descriptor-{mode}"
+
+    with pytest.raises(RuntimeError, match=message):
+        run_with_fakes(
+            make_config(num_envs=2),
+            run_dir,
+            subproc_factory=DescriptorResponseVecFactory(mode),
+        )
+
+    assert not run_dir.exists()
+
+
 def test_callback_frequencies_are_scaled_by_num_envs(tmp_path: Path) -> None:
     checkpoint = CallbackFactory()
     evaluation = EvalCallbackFactory()
@@ -1584,6 +1748,7 @@ class FakeProcess:
         initially_alive: bool = True,
     ) -> None:
         self.alive = initially_alive
+        self.exitcode: int | None = None if initially_alive else 0
         self.exits_on_terminate = exits_on_terminate
         self.exits_on_kill = exits_on_kill
         self.terminate_calls = 0
@@ -1599,11 +1764,13 @@ class FakeProcess:
         self.terminate_calls += 1
         if self.exits_on_terminate:
             self.alive = False
+            self.exitcode = -15
 
     def kill(self) -> None:
         self.kill_calls += 1
         if self.exits_on_kill:
             self.alive = False
+            self.exitcode = -9
 
     def join(self, timeout: float | None = None) -> None:
         self.join_calls.append(timeout)
@@ -1786,6 +1953,39 @@ class GracefulRemote(FakeRemote):
             for environment in self.environments:
                 environment.close()
             self.process.alive = False
+            self.process.exitcode = 0
+
+
+class SilentWorkerCloseFailureRemote(GracefulRemote):
+    def send(self, message: tuple[str, None]) -> None:
+        self.sent.append(message)
+        if message == ("close", None):
+            for environment in self.environments:
+                try:
+                    environment.close()
+                except OSError:
+                    pass
+            self.process.alive = False
+            self.process.exitcode = 1
+
+
+class ControlledExitCodeRemote(GracefulRemote):
+    def __init__(self, process: FakeProcess, *, exitcode: object) -> None:
+        super().__init__(process)
+        self.controlled_exitcode = exitcode
+
+    def send(self, message: tuple[str, None]) -> None:
+        super().send(message)
+        self.process.exitcode = self.controlled_exitcode  # type: ignore[assignment]
+
+
+class UnconfirmedEscalatedProcess(FakeProcess):
+    def __init__(self) -> None:
+        super().__init__(exits_on_terminate=False, exits_on_kill=False)
+
+    def terminate(self) -> None:
+        self.terminate_calls += 1
+        self.alive = False
 
 
 class RuntimeCloseFailingRemote(GracefulRemote):
@@ -1841,6 +2041,19 @@ class RuntimeProcessVecFactory:
         return vector_env
 
 
+class NonzeroExitRuntimeProcessVecFactory:
+    def __init__(self) -> None:
+        self.created: list[RuntimeProcessVecEnv] = []
+
+    def __call__(self, env_fns: list[Callable[[], FakeEnv]]) -> RuntimeProcessVecEnv:
+        vector_env = RuntimeProcessVecEnv(env_fns)
+        vector_env.remotes = (
+            SilentWorkerCloseFailureRemote(vector_env.processes[0], vector_env.envs),
+        )
+        self.created.append(vector_env)
+        return vector_env
+
+
 def test_successful_training_confirms_subprocess_training_worker_exited(
     tmp_path: Path,
 ) -> None:
@@ -1864,7 +2077,156 @@ def test_successful_training_confirms_subprocess_training_worker_exited(
     assert training.closed is True
 
 
-def test_runtime_cleanup_continues_to_kill_after_join_and_terminate_fail() -> None:
+def test_subprocess_nonzero_exit_without_pipe_error_is_a_cleanup_failure() -> None:
+    vector_env = RuntimeProcessVecEnv(
+        [
+            lambda: CloseFailingEnv(
+                0,
+                config=make_config(),
+                role="train",
+                worker_index=0,
+            )
+        ]
+    )
+    process = vector_env.processes[0]
+    remote = SilentWorkerCloseFailureRemote(process, vector_env.envs)
+    vector_env.remotes = (remote,)
+
+    with pytest.raises(RuntimeError, match="exit code 1"):
+        train_module._close_vector_env(vector_env)
+
+    assert remote.sent == [("close", None)]
+    assert remote.close_calls == 1
+    assert process.is_alive() is False
+    assert process.exitcode == 1
+    assert vector_env.closed is True
+
+
+def test_preclosed_subprocess_still_requires_first_exitcode_audit() -> None:
+    vector_env = RuntimeProcessVecEnv(
+        [
+            lambda: FakeEnv(
+                0,
+                config=make_config(),
+                role="train",
+                worker_index=0,
+            )
+        ]
+    )
+    process = vector_env.processes[0]
+    process.alive = False
+    process.exitcode = 1
+    vector_env.closed = True
+
+    with pytest.raises(RuntimeError, match="exit code 1"):
+        train_module._close_vector_env(vector_env)
+
+    assert process.join_calls == [1.0]
+
+
+@pytest.mark.parametrize(
+    ("exitcode", "message"),
+    [
+        (None, "exit code is unconfirmed"),
+        ("zero", "malformed exit code"),
+    ],
+)
+def test_subprocess_requires_a_confirmed_integer_exit_code(
+    exitcode: object,
+    message: str,
+) -> None:
+    vector_env = RuntimeProcessVecEnv(
+        [
+            lambda: FakeEnv(
+                0,
+                config=make_config(),
+                role="train",
+                worker_index=0,
+            )
+        ]
+    )
+    process = vector_env.processes[0]
+    vector_env.remotes = (ControlledExitCodeRemote(process, exitcode=exitcode),)
+
+    with pytest.raises(RuntimeError, match=message):
+        train_module._close_vector_env(vector_env)
+
+    assert process.is_alive() is False
+    assert vector_env.closed is True
+
+
+def test_subprocess_none_exitcode_after_escalation_is_unconfirmed() -> None:
+    vector_env = RuntimeProcessVecEnv(
+        [
+            lambda: FakeEnv(
+                0,
+                config=make_config(),
+                role="train",
+                worker_index=0,
+            )
+        ]
+    )
+    process = UnconfirmedEscalatedProcess()
+    vector_env.processes = [process]
+    vector_env.remotes = (FakeRemote(),)
+
+    with pytest.raises(RuntimeError, match="exit code is unconfirmed") as raised:
+        train_module._close_vector_env(vector_env)
+
+    assert "terminate/kill escalation" in str(raised.value)
+    assert process.terminate_calls == 1
+    assert process.kill_calls == 0
+    assert process.is_alive() is False
+
+
+def test_nonzero_worker_exit_blocks_inventory_and_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = tmp_path / "nonzero-worker-exit"
+    subproc = NonzeroExitRuntimeProcessVecFactory()
+    inventory_called = False
+
+    def unexpected_inventory(*args: object, **kwargs: object) -> tuple[object, ...]:
+        del args, kwargs
+        nonlocal inventory_called
+        inventory_called = True
+        return ()
+
+    monkeypatch.setattr(
+        train_module,
+        "summarize_episode_seed_artifacts",
+        unexpected_inventory,
+    )
+
+    with pytest.raises(RuntimeError, match="exit code 1"):
+        run_with_fakes(
+            make_config(num_envs=2),
+            run_dir,
+            subproc_factory=subproc,
+        )
+
+    assert inventory_called is False
+    assert not run_dir.exists()
+
+
+def test_nonzero_worker_exit_is_noted_without_masking_training_error(
+    tmp_path: Path,
+) -> None:
+    FakePPO.fail_learn = True
+    subproc = NonzeroExitRuntimeProcessVecFactory()
+
+    with pytest.raises(RuntimeError, match="learn failed") as raised:
+        run_with_fakes(
+            make_config(num_envs=2),
+            tmp_path / "learn-plus-nonzero-exit",
+            subproc_factory=subproc,
+        )
+
+    assert any("exit code 1" in note for note in raised.value.__notes__)
+
+
+def test_runtime_cleanup_escalation_fails_once_after_stopping_worker() -> None:
     vector_env = RuntimeProcessVecEnv(
         [
             lambda: FakeEnv(
@@ -1879,11 +2241,21 @@ def test_runtime_cleanup_continues_to_kill_after_join_and_terminate_fail() -> No
     vector_env.processes = [process]
     vector_env.remotes = (FakeRemote(),)
 
-    train_module._close_vector_env(vector_env)
+    with pytest.raises(RuntimeError, match="terminate/kill escalation"):
+        train_module._close_vector_env(vector_env)
 
     assert process.terminate_calls == 1
     assert process.kill_calls == 1
     assert process.is_alive() is False
+    operation_counts = (process.terminate_calls, process.kill_calls, len(process.join_calls))
+
+    train_module._close_vector_env(vector_env)
+
+    assert (
+        process.terminate_calls,
+        process.kill_calls,
+        len(process.join_calls),
+    ) == operation_counts
 
 
 def test_runtime_subprocess_remote_close_failure_is_propagated() -> None:

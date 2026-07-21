@@ -8,7 +8,7 @@ import os
 from collections.abc import Mapping, Sequence
 from numbers import Integral
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, NamedTuple
 
 import gymnasium as gym
 
@@ -31,6 +31,16 @@ _SEED_FIELDS: Final = (
     "metadrive_scenario_index",
     "scenario_parameter_seed",
 )
+
+
+class EpisodeSeedArtifactDescriptor(NamedTuple):
+    """Parent-transferable identity captured from a live writer descriptor."""
+
+    role: EnvironmentRole
+    worker_index: int
+    relative_path: str
+    device: int
+    inode: int
 
 
 def _validate_identity(role: object, worker_index: object) -> tuple[EnvironmentRole, int]:
@@ -185,7 +195,22 @@ class EpisodeSeedRecordingWrapper(gym.Wrapper[Any, Any, Any, Any]):
         self._worker_index = normalized_worker
         self._descriptor: int | None = descriptor
         self._identity = identity
+        self._artifact_descriptor = EpisodeSeedArtifactDescriptor(
+            role=normalized_role,
+            worker_index=normalized_worker,
+            relative_path=artifact.relative_to(artifact_root.parent).as_posix(),
+            device=identity[0],
+            inode=identity[1],
+        )
         self._closed = False
+
+    @property
+    def episode_seed_artifact_descriptor(self) -> EpisodeSeedArtifactDescriptor:
+        """Return the immutable identity proven by the still-open writer."""
+
+        descriptor = self._open_descriptor()
+        self._assert_artifact_identity(descriptor)
+        return self._artifact_descriptor
 
     def reset(
         self,
@@ -363,22 +388,24 @@ def _path_identity(artifact: Path) -> tuple[int, int]:
 def _read_parse_and_hash_artifact(
     artifact: Path,
     *,
-    role: EnvironmentRole,
-    worker_index: int,
+    descriptor: EpisodeSeedArtifactDescriptor,
 ) -> tuple[list[dict[str, object]], str, tuple[int, int]]:
+    expected_identity = (descriptor.device, descriptor.inode)
     try:
         with artifact.open("rb", buffering=0) as source:
             before = os.fstat(source.fileno())
             identity = _file_identity(before)
+            if identity != expected_identity:
+                raise ValueError(f"Episode seed artifact identity changed: {artifact}")
             if _path_identity(artifact) != identity:
                 raise ValueError(f"Episode seed artifact identity changed: {artifact}")
             payload = source.read()
             records = _parse_artifact_records(
                 payload,
                 artifact,
-                role=role,
-                worker_index=worker_index,
-                identity=identity,
+                role=descriptor.role,
+                worker_index=descriptor.worker_index,
+                identity=expected_identity,
             )
             digest = hashlib.sha256(payload).hexdigest()
             after = os.fstat(source.fileno())
@@ -396,28 +423,51 @@ def _read_parse_and_hash_artifact(
 def summarize_episode_seed_artifacts(
     workspace: Path,
     *,
-    expected_identities: Sequence[tuple[EnvironmentRole, int]],
+    expected_descriptors: Sequence[EpisodeSeedArtifactDescriptor],
 ) -> tuple[dict[str, object], ...]:
     """Validate owned artifacts and return deterministic metadata summaries."""
 
     workspace_root = workspace.resolve(strict=True)
     summaries: list[dict[str, object]] = []
     expected_paths: set[Path] = set()
-    for raw_role, raw_worker_index in expected_identities:
-        role, worker_index = _validate_identity(raw_role, raw_worker_index)
-        artifact_root, artifact = _artifact_paths(workspace_root, role, worker_index)
-        resolved_artifact = artifact.resolve(strict=True)
+    expected_environments: set[tuple[EnvironmentRole, int]] = set()
+    for descriptor in expected_descriptors:
+        if not isinstance(descriptor, EpisodeSeedArtifactDescriptor):
+            raise ValueError("Episode seed artifact descriptor is malformed")
+        role, worker_index = _validate_identity(descriptor.role, descriptor.worker_index)
+        expected_relative_path = f"{_ARTIFACT_DIRECTORY}/{_artifact_name(role, worker_index)}"
+        if descriptor.relative_path != expected_relative_path:
+            raise ValueError("Episode seed artifact descriptor path is malformed")
+        _file_identity_payload(descriptor.device, descriptor.inode)
+        environment_identity = (role, worker_index)
+        if environment_identity in expected_environments:
+            raise ValueError("Episode seed artifact descriptors contain a duplicate environment")
+        expected_environments.add(environment_identity)
+        try:
+            artifact_root = (workspace_root / _ARTIFACT_DIRECTORY).resolve(strict=True)
+        except OSError as exc:
+            raise ValueError(
+                "Episode seed artifact inventory does not match expected environments"
+            ) from exc
+        artifact = workspace_root / Path(*descriptor.relative_path.split("/"))
+        try:
+            resolved_artifact = artifact.resolve(strict=True)
+        except OSError as exc:
+            raise ValueError(
+                "Episode seed artifact inventory does not match expected environments"
+            ) from exc
         if resolved_artifact.parent != artifact_root or not resolved_artifact.is_file():
             raise ValueError(f"Episode seed artifact is outside the run workspace: {artifact}")
+        if resolved_artifact in expected_paths:
+            raise ValueError("Episode seed artifact descriptors contain a duplicate path")
         expected_paths.add(resolved_artifact)
-        records, digest, identity = _read_parse_and_hash_artifact(
+        records, digest, opened_identity = _read_parse_and_hash_artifact(
             resolved_artifact,
-            role=role,
-            worker_index=worker_index,
+            descriptor=descriptor,
         )
         summaries.append(
             {
-                "file_identity": _identity_payload(identity),
+                "file_identity": _identity_payload(opened_identity),
                 "path": resolved_artifact.relative_to(workspace_root).as_posix(),
                 "record_count": len(records),
                 "role": role,
@@ -426,8 +476,27 @@ def summarize_episode_seed_artifacts(
                 "worker_index": worker_index,
             }
         )
-    artifact_root = (workspace_root / _ARTIFACT_DIRECTORY).resolve(strict=True)
-    actual_paths = {path.resolve(strict=True) for path in artifact_root.iterdir()}
+    try:
+        artifact_root = (workspace_root / _ARTIFACT_DIRECTORY).resolve(strict=True)
+        actual_paths = {path.resolve(strict=True) for path in artifact_root.iterdir()}
+    except OSError as exc:
+        raise ValueError(
+            "Episode seed artifact inventory does not match expected environments"
+        ) from exc
     if actual_paths != expected_paths:
         raise ValueError("Episode seed artifact inventory does not match expected environments")
     return tuple(summaries)
+
+
+def _file_identity_payload(device: object, inode: object) -> tuple[int, int]:
+    if (
+        isinstance(device, bool)
+        or not isinstance(device, Integral)
+        or isinstance(inode, bool)
+        or not isinstance(inode, Integral)
+    ):
+        raise ValueError("Episode seed artifact descriptor identity is malformed")
+    normalized = (int(device), int(inode))
+    if normalized[0] < 0 or normalized[1] <= 0:
+        raise ValueError("Episode seed artifact descriptor identity is malformed")
+    return normalized

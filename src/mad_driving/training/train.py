@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from functools import partial
 from numbers import Integral
@@ -23,6 +23,7 @@ from mad_driving.envs.multi_agent_speed_env import MultiAgentSpeedEnv
 from mad_driving.scenarios import EnvironmentRole
 from mad_driving.training.callbacks import RewardComponentsCallback
 from mad_driving.training.episode_seeds import (
+    EpisodeSeedArtifactDescriptor,
     EpisodeSeedRecordingWrapper,
     summarize_episode_seed_artifacts,
 )
@@ -59,6 +60,7 @@ FactoryResult = TypeVar("FactoryResult")
 VecEnvFactory = Callable[[list[Callable[[], gym.Env[Any, Any]]]], Any]
 GenericFactory = Callable[..., FactoryResult]
 _STAGING_PREFIX = ".training-"
+_VECTOR_CLOSE_AUDIT_MARKER = "_mad_driving_close_audit_complete"
 
 
 @dataclass(frozen=True)
@@ -178,6 +180,44 @@ def _close_model_logger(model: object | None) -> None:
             close()
 
 
+def _collect_episode_seed_artifact_descriptors(
+    vector_env: object,
+    *,
+    expected_environments: Sequence[tuple[EnvironmentRole, int]],
+) -> tuple[EpisodeSeedArtifactDescriptor, ...]:
+    """Fetch live writer identities over the VecEnv control channel."""
+
+    get_attr = getattr(vector_env, "get_attr", None)
+    if not callable(get_attr):
+        raise RuntimeError("Vector environment cannot report episode seed artifact identities")
+    try:
+        raw_descriptors = get_attr("episode_seed_artifact_descriptor")
+    except Exception as exc:
+        raise RuntimeError(
+            "Vector environment failed to report episode seed artifact identities"
+        ) from exc
+    if not isinstance(raw_descriptors, list | tuple):
+        raise RuntimeError("Vector environment returned malformed seed artifact identities")
+    raw_descriptor_values = tuple(raw_descriptors)
+    if len(raw_descriptor_values) != len(expected_environments):
+        raise RuntimeError("Vector environment returned an incomplete seed artifact inventory")
+    descriptors: list[EpisodeSeedArtifactDescriptor] = []
+    for descriptor in raw_descriptor_values:
+        if not isinstance(descriptor, EpisodeSeedArtifactDescriptor):
+            raise RuntimeError("Vector environment returned a malformed seed artifact descriptor")
+        descriptors.append(descriptor)
+    if len(set(descriptors)) != len(descriptors):
+        raise RuntimeError("Vector environment returned duplicate seed artifact descriptors")
+    for descriptor, expected_environment in zip(
+        descriptors,
+        expected_environments,
+        strict=True,
+    ):
+        if (descriptor.role, descriptor.worker_index) != expected_environment:
+            raise RuntimeError("Vector environment returned a mismatched seed artifact descriptor")
+    return tuple(descriptors)
+
+
 def _process_is_alive(process: object) -> bool:
     try:
         return bool(process.is_alive())  # type: ignore[attr-defined]
@@ -185,33 +225,54 @@ def _process_is_alive(process: object) -> bool:
         return True
 
 
-def _attempt_process_operation(operation: Callable[..., object], *args: object) -> None:
+def _attempt_process_operation(
+    operation: Callable[..., object],
+    *args: object,
+) -> Exception | None:
     try:
         operation(*args)
-    except Exception:
-        pass
+    except Exception as exc:
+        return exc
+    return None
 
 
-def _stop_processes(processes: list[object], *, graceful_join: bool) -> bool:
+def _stop_processes(
+    processes: list[object],
+    *,
+    graceful_join: bool,
+) -> tuple[bool, bool, tuple[Exception, ...]]:
     """Escalate through join, terminate, and kill despite intermediate failures."""
 
+    escalated = False
+    operation_errors: list[Exception] = []
     for process in processes:
         join = getattr(process, "join", None)
         if graceful_join and callable(join):
-            _attempt_process_operation(join, 1.0)
+            if error := _attempt_process_operation(join, 1.0):
+                operation_errors.append(error)
         if _process_is_alive(process):
+            escalated = True
             terminate = getattr(process, "terminate", None)
             if callable(terminate):
-                _attempt_process_operation(terminate)
+                if error := _attempt_process_operation(terminate):
+                    operation_errors.append(error)
             if callable(join):
-                _attempt_process_operation(join, 1.0)
+                if error := _attempt_process_operation(join, 1.0):
+                    operation_errors.append(error)
         if _process_is_alive(process):
+            escalated = True
             kill = getattr(process, "kill", None)
             if callable(kill):
-                _attempt_process_operation(kill)
+                if error := _attempt_process_operation(kill):
+                    operation_errors.append(error)
             if callable(join):
-                _attempt_process_operation(join, 1.0)
-    return any(_process_is_alive(process) for process in processes)
+                if error := _attempt_process_operation(join, 1.0):
+                    operation_errors.append(error)
+    return (
+        any(_process_is_alive(process) for process in processes),
+        escalated,
+        tuple(operation_errors),
+    )
 
 
 def _close_vector_env(resource: object | None) -> None:
@@ -219,6 +280,14 @@ def _close_vector_env(resource: object | None) -> None:
 
     if resource is None:
         return
+    if getattr(resource, _VECTOR_CLOSE_AUDIT_MARKER, False):
+        return
+    try:
+        setattr(resource, _VECTOR_CLOSE_AUDIT_MARKER, True)
+    except Exception as exc:
+        raise _VectorEnvCleanupError(
+            "Vector environment close idempotence could not be established"
+        ) from exc
     processes = getattr(resource, "processes", None)
     if not isinstance(processes, list):
         close = getattr(resource, "close", None)
@@ -239,7 +308,38 @@ def _close_vector_env(resource: object | None) -> None:
                         RuntimeError(f"Subprocess close request could not be confirmed: {error}")
                     )
 
-    workers_alive = _stop_processes(processes, graceful_join=True)
+    workers_alive, escalated, process_operation_errors = _stop_processes(
+        processes,
+        graceful_join=True,
+    )
+    for operation_error in process_operation_errors:
+        cleanup_errors.append(
+            RuntimeError(f"Subprocess shutdown operation failed: {operation_error}")
+        )
+    if escalated:
+        cleanup_errors.append(
+            _VectorEnvCleanupError("Subprocess worker required terminate/kill escalation")
+        )
+    for worker_index, process in enumerate(processes):
+        exitcode = getattr(process, "exitcode", None)
+        if exitcode is None:
+            cleanup_errors.append(
+                _VectorEnvCleanupError(
+                    f"Subprocess worker {worker_index} shutdown exit code is unconfirmed"
+                )
+            )
+        elif isinstance(exitcode, bool) or not isinstance(exitcode, Integral):
+            cleanup_errors.append(
+                _VectorEnvCleanupError(
+                    f"Subprocess worker {worker_index} returned malformed exit code"
+                )
+            )
+        elif int(exitcode) != 0:
+            cleanup_errors.append(
+                _VectorEnvCleanupError(
+                    f"Subprocess worker {worker_index} exited with exit code {int(exitcode)}"
+                )
+            )
 
     for remote in remotes:
         try:
@@ -279,10 +379,18 @@ def _cleanup_partial_vector_env(
                     remote.close()
                 except Exception:
                     remote_close_failed = True
-        workers_alive = _stop_processes(processes, graceful_join=False)
+        workers_alive, _, process_operation_errors = _stop_processes(
+            processes,
+            graceful_join=False,
+        )
         owner.close()
         if workers_alive:
             raise _VectorEnvCleanupError("Subprocess worker cleanup could not be confirmed")
+        if process_operation_errors:
+            details = "; ".join(str(error) for error in process_operation_errors)
+            raise _VectorEnvCleanupError(
+                f"Subprocess shutdown operation failed: {details}"
+            ) from process_operation_errors[0]
         if remote_close_failed:
             raise _VectorEnvCleanupError("Subprocess remote cleanup could not be confirmed")
         return
@@ -626,6 +734,18 @@ def run_training(
             reset_num_timesteps=resume_source is None,
         )
         model.save(staged_final_checkpoint)
+        trusted_seed_descriptors = (
+            *_collect_episode_seed_artifact_descriptors(
+                train_env,
+                expected_environments=tuple(
+                    ("train", worker_index) for worker_index in range(config.training.num_envs)
+                ),
+            ),
+            *_collect_episode_seed_artifact_descriptors(
+                eval_env,
+                expected_environments=(("validation", 0),),
+            ),
+        )
         if deferred_evaluation:
             closing_train_env = train_env
             train_env = None
@@ -654,13 +774,9 @@ def run_training(
         _close_vector_env(closing_train_env)
         for owner in (eval_owner, train_owner):
             owner.close()
-        expected_seed_identities: tuple[tuple[EnvironmentRole, int], ...] = (
-            *(("train", worker_index) for worker_index in range(config.training.num_envs)),
-            ("validation", 0),
-        )
         episode_seed_artifacts = summarize_episode_seed_artifacts(
             workspace,
-            expected_identities=expected_seed_identities,
+            expected_descriptors=trusted_seed_descriptors,
         )
         write_run_metadata(
             RunMetadata(

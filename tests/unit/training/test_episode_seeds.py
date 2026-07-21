@@ -1,5 +1,6 @@
 import json
 import math
+import pickle
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,7 @@ from numpy.typing import NDArray
 
 import mad_driving.training.episode_seeds as episode_seed_module
 from mad_driving.training.episode_seeds import (
+    EpisodeSeedArtifactDescriptor,
     EpisodeSeedRecordingWrapper,
     summarize_episode_seed_artifacts,
 )
@@ -65,6 +67,22 @@ def replace_artifact_if_permitted(path: Path, replacement: bytes) -> bool:
     except OSError:
         return False
     return True
+
+
+def descriptor_for_artifact(
+    path: Path,
+    *,
+    role: str,
+    worker_index: int,
+) -> EpisodeSeedArtifactDescriptor:
+    stat_result = path.stat()
+    return EpisodeSeedArtifactDescriptor(
+        role=role,  # type: ignore[arg-type]
+        worker_index=worker_index,
+        relative_path=f"episode_seeds/{path.name}",
+        device=stat_result.st_dev,
+        inode=stat_result.st_ino,
+    )
 
 
 def test_replacement_after_exclusive_create_cannot_inject_history(tmp_path: Path) -> None:
@@ -140,6 +158,7 @@ def test_replacement_between_parse_and_hash_is_rejected(
         worker_index=0,
     )
     wrapped.reset()
+    trusted_descriptor = wrapped.episode_seed_artifact_descriptor
     wrapped.close()
     artifact = workspace / "episode_seeds" / "train-worker-000.jsonl"
     original = artifact.read_bytes()
@@ -160,7 +179,7 @@ def test_replacement_between_parse_and_hash_is_rejected(
     try:
         summarize_episode_seed_artifacts(
             workspace,
-            expected_identities=(("train", 0),),
+            expected_descriptors=(trusted_descriptor,),
         )
     except ValueError as error:
         assert replacement_succeeded
@@ -168,6 +187,182 @@ def test_replacement_between_parse_and_hash_is_rejected(
     else:
         assert replacement_attempted
         assert not replacement_succeeded
+
+
+def test_parent_held_identity_rejects_post_close_self_attested_replacement(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "private-workspace"
+    workspace.mkdir()
+    wrapped = EpisodeSeedRecordingWrapper(
+        ResetInfoEnv([seed_info(1, 2, 3)]),
+        workspace=workspace,
+        role="train",
+        worker_index=0,
+    )
+    trusted_descriptor = wrapped.episode_seed_artifact_descriptor
+    wrapped.reset()
+    wrapped.close()
+
+    artifact = workspace / "episode_seeds" / "train-worker-000.jsonl"
+    artifact.replace(workspace / "displaced-original.jsonl")
+    artifact.write_bytes(b"placeholder\n")
+    replacement_stat = artifact.stat()
+    replacement_header = {
+        "file_identity": {
+            "device": replacement_stat.st_dev,
+            "inode": replacement_stat.st_ino,
+        },
+        "record_type": "episode_seed_artifact",
+        "role": "train",
+        "schema_version": 2,
+        "worker_index": 0,
+    }
+    replacement_record = {
+        "episode_rng_seed": 999,
+        "metadrive_scenario_index": 1000,
+        "role": "train",
+        "scenario_parameter_seed": 1001,
+        "worker_index": 0,
+    }
+    artifact.write_text(
+        "\n".join(
+            json.dumps(value, sort_keys=True, separators=(",", ":"))
+            for value in (replacement_header, replacement_record)
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="identity"):
+        summarize_episode_seed_artifacts(
+            workspace,
+            expected_descriptors=(trusted_descriptor,),
+        )
+
+
+def test_parent_held_inventory_rejects_a_missing_artifact(tmp_path: Path) -> None:
+    workspace = tmp_path / "private-workspace"
+    workspace.mkdir()
+    wrapped = EpisodeSeedRecordingWrapper(
+        ResetInfoEnv([seed_info(1, 2, 3)]),
+        workspace=workspace,
+        role="train",
+        worker_index=0,
+    )
+    trusted_descriptor = wrapped.episode_seed_artifact_descriptor
+    wrapped.close()
+    artifact = workspace / trusted_descriptor.relative_path
+    artifact.replace(workspace / "missing-from-inventory.jsonl")
+
+    with pytest.raises(ValueError, match="inventory"):
+        summarize_episode_seed_artifacts(
+            workspace,
+            expected_descriptors=(trusted_descriptor,),
+        )
+
+
+def test_live_writer_descriptor_is_immutable_json_and_pickle_safe(tmp_path: Path) -> None:
+    workspace = tmp_path / "private-workspace"
+    workspace.mkdir()
+    wrapped = EpisodeSeedRecordingWrapper(
+        ResetInfoEnv([seed_info(1, 2, 3)]),
+        workspace=workspace,
+        role="train",
+        worker_index=0,
+    )
+
+    descriptor = wrapped.episode_seed_artifact_descriptor
+
+    assert json.loads(json.dumps(descriptor)) == [
+        "train",
+        0,
+        "episode_seeds/train-worker-000.jsonl",
+        descriptor.device,
+        descriptor.inode,
+    ]
+    assert pickle.loads(pickle.dumps(descriptor)) == descriptor
+    with pytest.raises(AttributeError):
+        descriptor.role = "validation"  # type: ignore[misc]
+    wrapped.close()
+
+
+def test_inventory_rejects_duplicate_parent_descriptors(tmp_path: Path) -> None:
+    workspace = tmp_path / "private-workspace"
+    workspace.mkdir()
+    wrapped = EpisodeSeedRecordingWrapper(
+        ResetInfoEnv([seed_info(1, 2, 3)]),
+        workspace=workspace,
+        role="train",
+        worker_index=0,
+    )
+    trusted_descriptor = wrapped.episode_seed_artifact_descriptor
+    wrapped.close()
+
+    with pytest.raises(ValueError, match="duplicate"):
+        summarize_episode_seed_artifacts(
+            workspace,
+            expected_descriptors=(trusted_descriptor, trusted_descriptor),
+        )
+
+
+def test_inventory_rejects_a_mismatched_parent_worker(tmp_path: Path) -> None:
+    workspace = tmp_path / "private-workspace"
+    workspace.mkdir()
+    wrapped = EpisodeSeedRecordingWrapper(
+        ResetInfoEnv([seed_info(1, 2, 3)]),
+        workspace=workspace,
+        role="train",
+        worker_index=0,
+    )
+    trusted_descriptor = wrapped.episode_seed_artifact_descriptor
+    wrapped.close()
+
+    with pytest.raises(ValueError, match="descriptor path"):
+        summarize_episode_seed_artifacts(
+            workspace,
+            expected_descriptors=(trusted_descriptor._replace(worker_index=1),),
+        )
+
+
+def test_inventory_rejects_a_non_descriptor_parent_value(tmp_path: Path) -> None:
+    workspace = tmp_path / "private-workspace"
+    workspace.mkdir()
+
+    with pytest.raises(ValueError, match="descriptor is malformed"):
+        summarize_episode_seed_artifacts(
+            workspace,
+            expected_descriptors=(object(),),  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize(
+    "identity_changes",
+    [
+        {"device": True},
+        {"inode": 0},
+    ],
+)
+def test_inventory_rejects_a_malformed_parent_file_identity(
+    tmp_path: Path,
+    identity_changes: dict[str, object],
+) -> None:
+    workspace = tmp_path / "private-workspace"
+    workspace.mkdir()
+    wrapped = EpisodeSeedRecordingWrapper(
+        ResetInfoEnv([seed_info(1, 2, 3)]),
+        workspace=workspace,
+        role="train",
+        worker_index=0,
+    )
+    trusted_descriptor = wrapped.episode_seed_artifact_descriptor
+    wrapped.close()
+
+    with pytest.raises(ValueError, match="descriptor identity"):
+        summarize_episode_seed_artifacts(
+            workspace,
+            expected_descriptors=(trusted_descriptor._replace(**identity_changes),),
+        )
 
 
 def test_records_each_actual_reset_info_in_order_and_summarizes_it(tmp_path: Path) -> None:
@@ -183,6 +378,7 @@ def test_records_each_actual_reset_info_in_order_and_summarizes_it(tmp_path: Pat
 
     wrapped.reset(seed=999)
     wrapped.reset()
+    trusted_descriptor = wrapped.episode_seed_artifact_descriptor
     wrapped.close()
 
     artifact = workspace / "episode_seeds" / "train-worker-000.jsonl"
@@ -204,7 +400,7 @@ def test_records_each_actual_reset_info_in_order_and_summarizes_it(tmp_path: Pat
     ]
     summaries = summarize_episode_seed_artifacts(
         workspace,
-        expected_identities=(("train", 0),),
+        expected_descriptors=(trusted_descriptor,),
     )
     assert summaries == (
         {
@@ -224,6 +420,7 @@ def test_role_and_worker_artifacts_never_collide(tmp_path: Path) -> None:
     workspace = tmp_path / "private-workspace"
     workspace.mkdir()
     identities = (("train", 0), ("train", 1), ("validation", 0))
+    trusted_descriptors: list[EpisodeSeedArtifactDescriptor] = []
 
     for ordinal, (role, worker_index) in enumerate(identities):
         wrapped = EpisodeSeedRecordingWrapper(
@@ -233,11 +430,12 @@ def test_role_and_worker_artifacts_never_collide(tmp_path: Path) -> None:
             worker_index=worker_index,
         )
         wrapped.reset()
+        trusted_descriptors.append(wrapped.episode_seed_artifact_descriptor)
         wrapped.close()
 
     summaries = summarize_episode_seed_artifacts(
         workspace,
-        expected_identities=identities,
+        expected_descriptors=trusted_descriptors,
     )
     assert [summary["path"] for summary in summaries] == [
         "episode_seeds/train-worker-000.jsonl",
@@ -288,11 +486,12 @@ def test_summary_rejects_malformed_or_unowned_artifacts(tmp_path: Path) -> None:
     artifact_dir.mkdir(parents=True)
     artifact = artifact_dir / "train-worker-000.jsonl"
     artifact.write_text('{"role":"train","worker_index":0}\n', encoding="utf-8")
+    trusted_descriptor = descriptor_for_artifact(artifact, role="train", worker_index=0)
 
     with pytest.raises(ValueError, match="seed artifact"):
         summarize_episode_seed_artifacts(
             workspace,
-            expected_identities=(("train", 0),),
+            expected_descriptors=(trusted_descriptor,),
         )
 
     outside = tmp_path / "outside.jsonl"
@@ -370,6 +569,7 @@ def test_summary_rejects_an_extra_file_in_owned_artifact_inventory(tmp_path: Pat
         worker_index=0,
     )
     wrapped.reset()
+    trusted_descriptor = wrapped.episode_seed_artifact_descriptor
     wrapped.close()
     extra = workspace / "episode_seeds" / "foreign.jsonl"
     extra.write_text("foreign", encoding="utf-8")
@@ -377,7 +577,7 @@ def test_summary_rejects_an_extra_file_in_owned_artifact_inventory(tmp_path: Pat
     with pytest.raises(ValueError, match="inventory"):
         summarize_episode_seed_artifacts(
             workspace,
-            expected_identities=(("train", 0),),
+            expected_descriptors=(trusted_descriptor,),
         )
 
     assert extra.read_text(encoding="utf-8") == "foreign"
@@ -410,6 +610,7 @@ def test_single_read_inventory_rejects_each_malformed_jsonl_boundary(
         worker_index=0,
     )
     wrapped.reset()
+    trusted_descriptor = wrapped.episode_seed_artifact_descriptor
     wrapped.close()
     artifact = workspace / "episode_seeds" / "train-worker-000.jsonl"
     header = artifact.read_bytes().splitlines()[0]
@@ -431,7 +632,7 @@ def test_single_read_inventory_rejects_each_malformed_jsonl_boundary(
     with pytest.raises(ValueError, match=message):
         summarize_episode_seed_artifacts(
             workspace,
-            expected_identities=(("train", 0),),
+            expected_descriptors=(trusted_descriptor,),
         )
 
 
