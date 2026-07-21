@@ -1,6 +1,8 @@
 import dataclasses
 import hashlib
+import math
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -21,11 +23,13 @@ def test_sha256_file_returns_lowercase_digest_without_mutating_source(tmp_path: 
     assert source.read_bytes() == original
 
 
-def test_metadata_models_are_frozen_and_json_serializable() -> None:
+def test_metadata_models_are_frozen_and_json_serializable(tmp_path: Path) -> None:
+    parent_run = (tmp_path / "source").resolve()
+    parent_checkpoint = (parent_run / "checkpoints" / "final_model.zip").resolve()
     resume = ResumeMetadata(
-        parent_checkpoint_path="C:/source/checkpoints/final_model.zip",
+        parent_checkpoint_path=str(parent_checkpoint),
         parent_checkpoint_sha256="a" * 64,
-        parent_run_dir="C:/source",
+        parent_run_dir=str(parent_run),
         parent_config={"training": {"seed": 42}},
         config_diff={"training.seed": {"parent": 42, "current": 43}},
         start_num_timesteps=12_500,
@@ -38,12 +42,110 @@ def test_metadata_models_are_frozen_and_json_serializable() -> None:
     assert metadata.research_contract_version == 2
     assert metadata.observation_schema_version == 1
     assert metadata.observation_shape == (24,)
+    assert metadata.observation_dtype == "float32"
     assert metadata.action_schema_version == 1
     assert metadata.action_count == 4
     assert metadata.action_order == ("KEEP", "SLOW", "PREPARE_STOP", "STOP")
     assert dataclasses.asdict(metadata)["resume"]["start_num_timesteps"] == 12_500
     with pytest.raises(dataclasses.FrozenInstanceError):
         metadata.action_count = 5  # type: ignore[misc]
+
+
+def test_metadata_recursively_detaches_and_freezes_caller_owned_values(tmp_path: Path) -> None:
+    resolved_config: dict[str, Any] = {
+        "training": {"seed": 42, "layers": [24, 16]},
+        "enabled": True,
+    }
+    parent_config: dict[str, Any] = {"training": {"seed": 41}}
+    config_diff: dict[str, Any] = {"training.seed": {"parent": 41, "current": 42}}
+    parent_run = (tmp_path / "source").resolve()
+    resume = ResumeMetadata(
+        parent_checkpoint_path=str((parent_run / "checkpoints" / "final.zip").resolve()),
+        parent_checkpoint_sha256="b" * 64,
+        parent_run_dir=str(parent_run),
+        parent_config=parent_config,
+        config_diff=config_diff,
+        start_num_timesteps=12_500,
+    )
+    metadata = RunMetadata(resolved_config=resolved_config, resume=resume)
+
+    resolved_config["training"]["seed"] = 999
+    resolved_config["training"]["layers"].append(8)
+    parent_config["training"]["seed"] = 999
+    config_diff["training.seed"]["current"] = 999
+
+    assert metadata.resolved_config["training"]["seed"] == 42
+    assert metadata.resolved_config["training"]["layers"] == (24, 16)
+    assert metadata.resume is not None
+    assert metadata.resume.parent_config["training"]["seed"] == 41
+    assert metadata.resume.config_diff["training.seed"]["current"] == 42
+    with pytest.raises(TypeError):
+        metadata.resolved_config["training"]["seed"] = 0  # type: ignore[index]
+    with pytest.raises(AttributeError):
+        metadata.resolved_config["training"]["layers"].append(8)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"research_contract_version": True}, "research_contract_version"),
+        ({"research_contract_version": 1}, "research_contract_version"),
+        ({"observation_schema_version": 2}, "observation_schema_version"),
+        ({"observation_shape": (25,)}, "observation_shape"),
+        ({"observation_dtype": "float64"}, "observation_dtype"),
+        ({"action_schema_version": False}, "action_schema_version"),
+        ({"action_count": True}, "action_count"),
+        ({"action_count": 5}, "action_count"),
+        ({"action_order": ("STOP", "SLOW", "PREPARE_STOP", "KEEP")}, "action_order"),
+        ({"resolved_config": {"value": math.nan}}, "finite"),
+        ({"resolved_config": {"value": math.inf}}, "finite"),
+        ({"resolved_config": {"value": object()}}, "JSON"),
+        ({"resolved_config": {1: "non-string"}}, "string key"),
+    ],
+)
+def test_run_metadata_rejects_invalid_public_constructor_fields(
+    overrides: dict[str, object],
+    message: str,
+) -> None:
+    values: dict[str, object] = {"resolved_config": {"seed": 42}, **overrides}
+
+    with pytest.raises(ValueError, match=message):
+        RunMetadata(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"parent_checkpoint_path": "relative/model.zip"}, "canonical"),
+        ({"parent_run_dir": "relative/run"}, "canonical"),
+        ({"parent_checkpoint_sha256": "A" * 64}, "SHA-256"),
+        ({"parent_checkpoint_sha256": "a" * 63}, "SHA-256"),
+        ({"parent_checkpoint_sha256": "z" * 64}, "SHA-256"),
+        ({"start_num_timesteps": True}, "start_num_timesteps"),
+        ({"start_num_timesteps": -1}, "start_num_timesteps"),
+        ({"start_num_timesteps": 1.5}, "start_num_timesteps"),
+        ({"parent_config": {"value": -math.inf}}, "finite"),
+        ({"config_diff": {"value": object()}}, "JSON"),
+    ],
+)
+def test_resume_metadata_rejects_invalid_public_constructor_fields(
+    tmp_path: Path,
+    overrides: dict[str, object],
+    message: str,
+) -> None:
+    parent_run = (tmp_path / "source").resolve()
+    values: dict[str, object] = {
+        "parent_checkpoint_path": str((parent_run / "checkpoints" / "final.zip").resolve()),
+        "parent_checkpoint_sha256": "c" * 64,
+        "parent_run_dir": str(parent_run),
+        "parent_config": {"seed": 42},
+        "config_diff": {},
+        "start_num_timesteps": 0,
+        **overrides,
+    }
+
+    with pytest.raises(ValueError, match=message):
+        ResumeMetadata(**values)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("failure", ["serialize", "replace"])
@@ -57,7 +159,9 @@ def test_metadata_write_failure_preserves_primary_error_and_cleans_sibling_temp(
     expected_error: type[Exception] = TypeError
     expected_message = "not JSON serializable"
     if failure == "serialize":
-        metadata = RunMetadata(resolved_config={"bad": object()})
+        object.__setattr__(metadata, "resolved_config", {"bad": object()})
+        expected_error = ValueError
+        expected_message = "JSON safe"
     else:
         expected_error = OSError
         expected_message = "replace failed"
@@ -70,6 +174,20 @@ def test_metadata_write_failure_preserves_primary_error_and_cleans_sibling_temp(
 
     with pytest.raises(expected_error, match=expected_message):
         metadata_module.write_run_metadata(metadata, destination)
+
+    assert not destination.exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_metadata_writer_rejects_non_finite_nested_value_without_destination(
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "run_metadata.json"
+    valid = RunMetadata(resolved_config={"seed": 42})
+    object.__setattr__(valid, "resolved_config", {"nested": [float("nan")]})
+
+    with pytest.raises(ValueError, match="finite"):
+        metadata_module.write_run_metadata(valid, destination)
 
     assert not destination.exists()
     assert list(tmp_path.iterdir()) == []

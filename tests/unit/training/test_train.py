@@ -1,6 +1,7 @@
-import dataclasses
 import json
 import math
+import os
+import threading
 import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -12,10 +13,13 @@ import numpy as np
 import pytest
 import yaml
 from gymnasium import spaces
+from stable_baselines3.common.utils import ConstantSchedule, FloatSchedule
 
 from mad_driving.config.models import AppConfig
 from mad_driving.scenarios import EnvironmentRole
 from mad_driving.training import RunMetadata, sha256_file
+from mad_driving.training import metadata as metadata_module
+from mad_driving.training import ownership as ownership_module
 from mad_driving.training import train as train_module
 from mad_driving.training.train import TrainingResult, run_training
 
@@ -181,7 +185,7 @@ class FakePPO:
     fail_load: ClassVar[bool] = False
     skip_save: ClassVar[bool] = False
     rollout_overshoot: ClassVar[int] = 0
-    resume_num_timesteps: ClassVar[int] = 12_500
+    resume_num_timesteps: ClassVar[object] = 12_500
 
     @staticmethod
     def default_contract() -> dict[str, Any]:
@@ -220,10 +224,8 @@ class FakePPO:
             {},
         )
         self.learning_rate = contract["learning_rate"]
-        if isinstance(self.learning_rate, int | float) and not isinstance(
-            self.learning_rate, bool
-        ):
-            self.lr_schedule = lambda _: float(self.learning_rate)
+        if isinstance(self.learning_rate, int | float) and not isinstance(self.learning_rate, bool):
+            self.lr_schedule = FloatSchedule(float(self.learning_rate))
         else:
             self.lr_schedule = self.learning_rate
         self.n_steps = contract["n_steps"]
@@ -233,7 +235,7 @@ class FakePPO:
         self.gae_lambda = contract["gae_lambda"]
         clip_range = contract["clip_range"]
         self.clip_range = (
-            (lambda _: float(clip_range))
+            FloatSchedule(float(clip_range))
             if isinstance(clip_range, int | float) and not isinstance(clip_range, bool)
             else clip_range
         )
@@ -381,10 +383,7 @@ def seed_compatible_source_run(
         encoding="utf-8",
     )
     metadata = RunMetadata(resolved_config=resolved_config)
-    (run_dir / "run_metadata.json").write_text(
-        json.dumps(dataclasses.asdict(metadata), ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    metadata_module.write_run_metadata(metadata, run_dir / "run_metadata.json")
     checkpoint = checkpoints_dir / "final_model.zip"
     FakePPO.write_checkpoint(
         checkpoint,
@@ -460,6 +459,145 @@ def test_existing_empty_run_directory_is_accepted(tmp_path: Path) -> None:
 
     assert result.run_dir == run_dir
     assert (run_dir / "run_metadata.json").is_file()
+
+
+def test_absent_destination_occupied_during_atomic_claim_preserves_foreign_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = tmp_path / "raced-absent"
+    foreign = run_dir / "competitor.bin"
+    environments = EnvFactory()
+    real_mkdir = Path.mkdir
+    injected = False
+
+    def mkdir_then_compete(path: Path, *args: Any, **kwargs: Any) -> None:
+        nonlocal injected
+        real_mkdir(path, *args, **kwargs)
+        if path == run_dir and not injected:
+            injected = True
+            foreign.write_bytes(b"competitor-owned\x00")
+
+    monkeypatch.setattr(Path, "mkdir", mkdir_then_compete)
+
+    with pytest.raises(FileExistsError) as raised:
+        run_with_fakes(make_config(), run_dir, env_factory=environments)
+
+    assert str(raised.value) == f"Run directory is non-empty: {run_dir}"
+    assert foreign.read_bytes() == b"competitor-owned\x00"
+    assert list(run_dir.iterdir()) == [foreign]
+    assert environments.calls == []
+    assert FakePPO.instances == []
+
+
+def test_empty_destination_occupied_during_exclusive_marker_preserves_foreign_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = tmp_path / "raced-empty"
+    run_dir.mkdir()
+    foreign = run_dir / "competitor.bin"
+    environments = EnvFactory()
+    real_open = os.open
+    injected = False
+
+    def open_then_compete(
+        path: str | bytes | os.PathLike[str], flags: int, mode: int = 0o777
+    ) -> int:
+        nonlocal injected
+        descriptor = real_open(path, flags, mode)
+        marker = Path(path)
+        if marker.parent == run_dir and flags & os.O_EXCL and not injected:
+            injected = True
+            foreign.write_bytes(b"competitor-owned\x00")
+        return descriptor
+
+    monkeypatch.setattr(os, "open", open_then_compete)
+
+    with pytest.raises(FileExistsError) as raised:
+        run_with_fakes(make_config(), run_dir, env_factory=environments)
+
+    assert str(raised.value) == f"Run directory is non-empty: {run_dir}"
+    assert foreign.read_bytes() == b"competitor-owned\x00"
+    assert list(run_dir.iterdir()) == [foreign]
+    assert environments.calls == []
+    assert FakePPO.instances == []
+
+
+def test_concurrent_compliant_trainers_have_one_owner_before_environment_side_effects(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "concurrent"
+    first_reached_environment = threading.Event()
+    release_first = threading.Event()
+    first_environments = EnvFactory()
+    second_environments = EnvFactory()
+    first_errors: list[BaseException] = []
+
+    class BlockingFactory:
+        def __call__(
+            self,
+            config: AppConfig,
+            *,
+            role: EnvironmentRole,
+            worker_index: int,
+        ) -> FakeEnv:
+            first_reached_environment.set()
+            if not release_first.wait(timeout=5.0):
+                raise TimeoutError("test did not release first trainer")
+            return first_environments(config, role=role, worker_index=worker_index)
+
+    def train_first() -> None:
+        try:
+            run_with_fakes(make_config(), run_dir, env_factory=BlockingFactory())  # type: ignore[arg-type]
+        except BaseException as exc:
+            first_errors.append(exc)
+
+    thread = threading.Thread(target=train_first)
+    thread.start()
+    assert first_reached_environment.wait(timeout=5.0)
+    marker_present = (run_dir / ".training-owner").is_file()
+    try:
+        with pytest.raises(FileExistsError):
+            run_with_fakes(make_config(), run_dir, env_factory=second_environments)
+    finally:
+        release_first.set()
+        thread.join(timeout=10.0)
+
+    assert thread.is_alive() is False
+    assert marker_present is True
+    assert first_errors == []
+    assert second_environments.calls == []
+    assert not (run_dir / ".training-owner").exists()
+
+
+@pytest.mark.parametrize("preexisting", [False, True])
+def test_failed_marker_initialization_preserves_primary_error_and_cleans_owned_marker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    preexisting: bool,
+) -> None:
+    run_dir = tmp_path / "marker-write-failure"
+    if preexisting:
+        run_dir.mkdir()
+    environments = EnvFactory()
+
+    def fail_marker_write(descriptor: int, data: bytes) -> int:
+        del descriptor, data
+        raise OSError("marker token write failed")
+
+    monkeypatch.setattr(ownership_module.os, "write", fail_marker_write)
+
+    with pytest.raises(OSError, match="marker token write failed"):
+        run_with_fakes(make_config(), run_dir, env_factory=environments)
+
+    assert environments.calls == []
+    assert FakePPO.instances == []
+    if preexisting:
+        assert run_dir.is_dir()
+        assert list(run_dir.iterdir()) == []
+    else:
+        assert not run_dir.exists()
 
 
 def test_run_directory_file_is_rejected_and_preserved_before_any_side_effect(
@@ -585,6 +723,7 @@ def test_fresh_run_writes_complete_research_contract_metadata(tmp_path: Path) ->
         "research_contract_version": 2,
         "observation_schema_version": 1,
         "observation_shape": [24],
+        "observation_dtype": "float32",
         "action_schema_version": 1,
         "action_count": 4,
         "action_order": ["KEEP", "SLOW", "PREPARE_STOP", "STOP"],
@@ -1463,6 +1602,57 @@ def test_resume_rejects_invalid_source_metadata_before_destination_or_environmen
     assert FakePPO.load_calls == []
 
 
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_resume_rejects_non_finite_source_metadata_without_mutating_source_or_destination(
+    tmp_path: Path,
+    constant: str,
+) -> None:
+    source = seed_compatible_source_run(tmp_path)
+    metadata_path = source.run_dir / "run_metadata.json"
+    payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    payload["resolved_config"]["training"]["seed"] = {
+        "NaN": math.nan,
+        "Infinity": math.inf,
+        "-Infinity": -math.inf,
+    }[constant]
+    metadata_path.write_text(json.dumps(payload, allow_nan=True), encoding="utf-8")
+    source_before = source_tree_bytes(source.run_dir)
+    destination = tmp_path / "non-finite-source"
+    environments = EnvFactory()
+
+    with pytest.raises(ValueError, match="finite"):
+        run_with_fakes(
+            make_config(),
+            destination,
+            resume_from=source.checkpoint,
+            env_factory=environments,
+        )
+
+    assert not destination.exists()
+    assert source_tree_bytes(source.run_dir) == source_before
+    assert environments.calls == []
+    assert FakePPO.load_calls == []
+
+
+def test_resume_rejects_nested_invalid_source_config_type_without_mutation(
+    tmp_path: Path,
+) -> None:
+    source = seed_compatible_source_run(tmp_path)
+    metadata_path = source.run_dir / "run_metadata.json"
+    payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    payload["resolved_config"]["training"]["seed"] = {"nested": [7]}
+    metadata_path.write_text(json.dumps(payload), encoding="utf-8")
+    source_before = source_tree_bytes(source.run_dir)
+    destination = tmp_path / "invalid-nested-source"
+
+    with pytest.raises(ValueError, match="resolved config|metadata"):
+        run_with_fakes(make_config(), destination, resume_from=source.checkpoint)
+
+    assert not destination.exists()
+    assert source_tree_bytes(source.run_dir) == source_before
+    assert FakePPO.load_calls == []
+
+
 @pytest.mark.parametrize(
     ("field", "source_value"),
     [
@@ -1518,6 +1708,58 @@ def test_resume_rejects_nonconstant_effective_learning_rate_schedule(
     assert FakePPO.instances[0].learn_kwargs is None
 
 
+def test_resume_rejects_callable_that_bypasses_three_point_schedule_sampling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = seed_compatible_source_run(tmp_path)
+    destination = tmp_path / "bypass-schedule"
+    original_load = FakePPO.load.__func__
+
+    def bypass_load(cls: type[FakePPO], path: Path, **kwargs: Any) -> FakePPO:
+        model = original_load(cls, path, **kwargs)
+        model.lr_schedule = lambda progress: 0.0001 if progress == 0.25 else 0.0003
+        return model
+
+    monkeypatch.setattr(FakePPO, "load", classmethod(bypass_load))
+
+    with pytest.raises(ValueError, match="learning_rate"):
+        run_with_fakes(make_config(), destination, resume_from=source.checkpoint)
+
+    assert not destination.exists()
+    assert FakePPO.instances[0].learn_kwargs is None
+
+
+def test_resume_accepts_exact_pinned_sb3_constant_schedule_representation(
+    tmp_path: Path,
+) -> None:
+    source = seed_compatible_source_run(tmp_path)
+
+    run_with_fakes(make_config(), tmp_path / "canonical-schedule", resume_from=source.checkpoint)
+
+    model = FakePPO.instances[0]
+    assert isinstance(model.lr_schedule, FloatSchedule)
+    assert isinstance(model.lr_schedule.value_schedule, ConstantSchedule)
+    assert isinstance(model.clip_range, FloatSchedule)
+    assert isinstance(model.clip_range.value_schedule, ConstantSchedule)
+
+
+@pytest.mark.parametrize("raw_timesteps", [True, 12.5, -1])
+def test_resume_rejects_invalid_raw_num_timesteps_before_writes_or_learning(
+    tmp_path: Path,
+    raw_timesteps: object,
+) -> None:
+    source = seed_compatible_source_run(tmp_path)
+    destination = tmp_path / "invalid-num-timesteps"
+    FakePPO.resume_num_timesteps = raw_timesteps
+
+    with pytest.raises(ValueError, match="num_timesteps"):
+        run_with_fakes(make_config(), destination, resume_from=source.checkpoint)
+
+    assert not destination.exists()
+    assert FakePPO.instances[0].learn_kwargs is None
+
+
 @pytest.mark.parametrize(
     ("override", "message"),
     [({"observation_shape": [25]}, "observation"), ({"action_count": 5}, "action")],
@@ -1553,9 +1795,7 @@ def test_resume_config_diff_contains_only_changed_allowed_fields_in_sorted_order
 
     run_with_fakes(config, destination, resume_from=source.checkpoint)
 
-    resume = json.loads((destination / "run_metadata.json").read_text(encoding="utf-8"))[
-        "resume"
-    ]
+    resume = json.loads((destination / "run_metadata.json").read_text(encoding="utf-8"))["resume"]
     expected = {
         "training.checkpoint_interval_steps": {"parent": 10_000, "current": 11_000},
         "training.eval_interval_steps": {"parent": 10_000, "current": 12_000},

@@ -73,3 +73,67 @@ and every fresh/continued run writes complete versioned provenance metadata.
   filesystem-level contract.
 - The 19 warnings are unchanged upstream Matplotlib/SB3 warnings; no Task 11 documentation,
   smoke execution, push, Phase 5, or later-phase work was performed.
+
+---
+
+## Independent-review remediation
+
+The Task 10 independent review returned **CHANGES REQUIRED**. The focused follow-up fixes
+all five findings without entering Task 11.
+
+### Additional RED / GREEN evidence
+
+- Atomic ownership RED: the three destination-race tests failed because preflight and the
+  first directory write were separated. GREEN: all three passed after adding an atomic
+  directory/exclusive-marker claim held through artifact publication.
+- Marker cleanup RED: both absent and pre-existing-empty cases left `.training-owner`
+  behind when marker initialization failed. GREEN: `5 passed` across acquisition races,
+  two compliant concurrent writers, and both marker-write failure cases.
+- Metadata RED: `26 failed, 3 passed` for recursive immutability, exact public-constructor
+  validation, observation dtype, canonical paths/digests/timesteps, and finite-only JSON.
+  GREEN: `29 passed`.
+- Schedule/timestep RED: the old three-point sampler accepted a callable that differed at
+  progress `0.25`; bool and fractional `num_timesteps` were silently converted. The
+  adversarial subset exposed `5 failed, 4 passed`. GREEN: `9 passed` after structural SB3
+  schedule validation and raw integral validation.
+- Final focused training/CLI/checkpoint gate: `135 passed, 17 warnings`, including the real
+  PPO checkpoint continuation integration.
+
+### Remediation implementation
+
+- Added a Windows-compatible `O_CREAT | O_EXCL` ownership marker. Absent destinations use
+  atomic `mkdir`; pre-existing empty destinations claim the marker and are rechecked for
+  foreign entries. The descriptor remains open until final publication and cleanup.
+- Ownership cleanup verifies the still-linked marker by file identity before unlinking it,
+  preserves competitor files/markers, removes only a process-created empty directory, and
+  adds cleanup failures as notes without replacing the primary exception.
+- `RunMetadata` and `ResumeMetadata` now validate every public field and recursively detach
+  JSON mappings/sequences into deterministic immutable values. Contract/schema/action
+  identity, `float32` observation dtype, canonical paths, lowercase SHA-256, required
+  mappings, and non-bool nonnegative integral timesteps are enforced at construction.
+- Metadata loading rejects `NaN`, `Infinity`, and `-Infinity` through `parse_constant` and
+  recursively validates nested values. Writing validates before temporary-file creation,
+  uses `allow_nan=False`, and retains sibling-temp cleanup plus atomic `os.replace`.
+- Effective learning-rate and clip-range schedules must have the exact pinned SB3 2.9
+  `FloatSchedule(ConstantSchedule(value))` structure and state. Arbitrary callables are no
+  longer sampled or accepted.
+- Loaded `model.num_timesteps` is checked as a non-bool, nonnegative `Integral` before any
+  conversion, metadata write, or learning.
+- The frozen `seed_compatible_source_run` fixture now writes realistic version-2 metadata
+  through the production transactional serializer. Adversarial source tests confirm exact
+  byte preservation and untouched failed destinations.
+
+### Final verification after remediation
+
+- Full pytest: `597 passed, 19 warnings`.
+- Ruff lint: `All checks passed!` across `src` and `tests`.
+- Ruff format: all 5 touched Python files already formatted.
+- mypy strict: `Success: no issues found in 53 source files`.
+- `git diff --check`: clean apart from expected Windows LF-to-CRLF notices.
+
+### Remaining concern
+
+- Source-checkpoint TOCTOU handling remains detection rather than locking: SHA-256 is
+  checked before and immediately after `PPO.load`. A hostile writer that changes and then
+  restores byte-identical content entirely between those reads is outside this contract.
+  Destination ownership itself is exclusive and held for the complete artifact transaction.

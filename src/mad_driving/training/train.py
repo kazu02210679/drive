@@ -8,6 +8,7 @@ import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
+from numbers import Integral
 from pathlib import Path
 from typing import Any, Protocol, TypeVar
 
@@ -29,6 +30,7 @@ from mad_driving.training.metadata import (
     validate_resume_contract,
     write_run_metadata,
 )
+from mad_driving.training.ownership import RunDirectoryOwnership
 
 
 class EnvironmentFactory(Protocol):
@@ -407,23 +409,27 @@ def run_training(
     """Train or resume one PPO policy and close every environment on exit."""
 
     destination = Path(run_dir)
-    require_empty_run_directory(destination)
+    ownership = RunDirectoryOwnership.acquire(destination)
     resume_path = None if resume_from is None else Path(resume_from)
-    if resume_path is not None and not resume_path.is_file():
-        raise FileNotFoundError(f"Resume checkpoint not found: {resume_path}")
-    resume_source = (
-        None if resume_path is None else resolve_resume_source(resume_path, config)
-    )
-    if resume_source is not None:
-        canonical_destination = destination.resolve()
-        if (
-            canonical_destination == resume_source.run_dir
-            or resume_source.run_dir in canonical_destination.parents
-        ):
-            raise ValueError(
-                "Resume destination must be separate from the source run: "
-                f"{destination}"
-            )
+    try:
+        if resume_path is not None and not resume_path.is_file():
+            raise FileNotFoundError(f"Resume checkpoint not found: {resume_path}")
+        resume_source = None if resume_path is None else resolve_resume_source(resume_path, config)
+        if resume_source is not None:
+            canonical_destination = destination.resolve()
+            if (
+                canonical_destination == resume_source.run_dir
+                or resume_source.run_dir in canonical_destination.parents
+            ):
+                raise ValueError(
+                    f"Resume destination must be separate from the source run: {destination}"
+                )
+    except BaseException as source_error:
+        try:
+            ownership.release()
+        except Exception as ownership_cleanup_error:
+            source_error.add_note(f"Ownership cleanup also failed: {ownership_cleanup_error}")
+        raise
 
     checkpoints_dir = destination / "checkpoints"
     tensorboard_dir = destination / "tensorboard"
@@ -488,9 +494,14 @@ def run_training(
                 )
             validate_resume_contract(model, config, resume_source.metadata)
 
-        start_timesteps = int(model.num_timesteps)
-        if start_timesteps < 0:
-            raise ValueError("Resume start_num_timesteps must be non-negative")
+        raw_start_timesteps = model.num_timesteps
+        if (
+            isinstance(raw_start_timesteps, bool)
+            or not isinstance(raw_start_timesteps, Integral)
+            or raw_start_timesteps < 0
+        ):
+            raise ValueError("Resume num_timesteps must be a non-negative non-bool integer")
+        start_timesteps = int(raw_start_timesteps)
         resume_metadata = None
         if resume_source is not None:
             resume_metadata = ResumeMetadata(
@@ -502,7 +513,6 @@ def run_training(
                 start_num_timesteps=start_timesteps,
             )
 
-        require_empty_run_directory(destination)
         checkpoints_dir.mkdir(parents=True)
         tensorboard_dir.mkdir()
         _write_resolved_config(config, destination / "config_resolved.yaml")
@@ -576,6 +586,18 @@ def run_training(
         if cleanup_errors:
             details = "; ".join(str(error) for error in cleanup_errors)
             cleanup_error = RuntimeError(f"Training resource cleanup failed: {details}")
-            if primary_error is None:
-                raise cleanup_error from cleanup_errors[0]
-            primary_error.add_note(f"Cleanup also failed: {details}")
+            if primary_error is not None:
+                primary_error.add_note(f"Cleanup also failed: {details}")
+        else:
+            cleanup_error = None
+        try:
+            ownership.release()
+        except Exception as exc:
+            if primary_error is not None:
+                primary_error.add_note(f"Ownership cleanup also failed: {exc}")
+            elif cleanup_error is None:
+                raise
+            else:
+                cleanup_error.add_note(f"Ownership cleanup also failed: {exc}")
+        if cleanup_error is not None and primary_error is None:
+            raise cleanup_error from cleanup_errors[0]

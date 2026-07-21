@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import dataclasses
 import hashlib
 import json
 import math
 import os
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from numbers import Integral, Real
 from pathlib import Path
@@ -17,12 +16,14 @@ from typing import Any, Final, cast
 import numpy as np
 import yaml
 from gymnasium import spaces
+from stable_baselines3.common.utils import ConstantSchedule, FloatSchedule
 
 from mad_driving.config.models import AppConfig
 
 RESEARCH_CONTRACT_VERSION: Final = 2
 OBSERVATION_SCHEMA_VERSION: Final = 1
 OBSERVATION_SHAPE: Final = (24,)
+OBSERVATION_DTYPE: Final = "float32"
 ACTION_SCHEMA_VERSION: Final = 1
 ACTION_ORDER: Final = ("KEEP", "SLOW", "PREPARE_STOP", "STOP")
 _ALLOWED_CONFIG_DIFFS: Final = frozenset(
@@ -37,6 +38,108 @@ _ALLOWED_CONFIG_DIFFS: Final = frozenset(
 )
 
 
+class FrozenJsonObject(Mapping[str, Any]):
+    """A detached, deterministic, recursively immutable JSON object."""
+
+    __slots__ = ("_items",)
+
+    def __init__(self, items: Sequence[tuple[str, Any]]) -> None:
+        self._items = tuple(items)
+
+    def __getitem__(self, key: str) -> Any:
+        for candidate, value in self._items:
+            if candidate == key:
+                return value
+        raise KeyError(key)
+
+    def __iter__(self) -> Iterator[str]:
+        return (key for key, _value in self._items)
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def __eq__(self, other: object) -> bool:
+        return _json_equal(self, other)
+
+    def __deepcopy__(self, memo: dict[int, object]) -> FrozenJsonObject:
+        del memo
+        return self
+
+
+def _json_equal(left: object, right: object) -> bool:
+    if isinstance(left, Mapping) or isinstance(right, Mapping):
+        if not isinstance(left, Mapping) or not isinstance(right, Mapping):
+            return False
+        return set(left) == set(right) and all(_json_equal(left[key], right[key]) for key in left)
+    if isinstance(left, list | tuple) or isinstance(right, list | tuple):
+        if not isinstance(left, list | tuple) or not isinstance(right, list | tuple):
+            return False
+        return len(left) == len(right) and all(
+            _json_equal(left_item, right_item)
+            for left_item, right_item in zip(left, right, strict=True)
+        )
+    return bool(left == right)
+
+
+def _freeze_json(value: object, name: str) -> Any:
+    if isinstance(value, Mapping):
+        entries: list[tuple[str, Any]] = []
+        for key in value:
+            if not isinstance(key, str):
+                raise ValueError(f"{name} must contain only string keys")
+            entries.append((key, _freeze_json(value[key], f"{name}.{key}")))
+        return FrozenJsonObject(sorted(entries, key=lambda item: item[0]))
+    if isinstance(value, list | tuple):
+        return tuple(_freeze_json(item, f"{name}[]") for item in value)
+    if value is None or type(value) in (bool, int, str):
+        return value
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise ValueError(f"{name} must contain only finite JSON numbers")
+        return value
+    raise ValueError(f"{name} contains a value that is not JSON safe: {value!r}")
+
+
+def _thaw_json(value: object, name: str) -> object:
+    """Validate and convert an immutable JSON value to encoder-native containers."""
+
+    if isinstance(value, Mapping):
+        result: dict[str, object] = {}
+        for key in sorted(value):
+            if not isinstance(key, str):
+                raise ValueError(f"{name} must contain only string keys")
+            result[key] = _thaw_json(value[key], f"{name}.{key}")
+        return result
+    if isinstance(value, list | tuple):
+        return [_thaw_json(item, f"{name}[]") for item in value]
+    if value is None or type(value) in (bool, int, str):
+        return value
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise ValueError(f"{name} must contain only finite JSON numbers")
+        return value
+    raise ValueError(f"{name} contains a value that is not JSON safe: {value!r}")
+
+
+def _validated_integral(value: object, name: str, *, expected: int | None = None) -> int:
+    if isinstance(value, bool) or not isinstance(value, Integral):
+        raise ValueError(f"{name} must be a non-bool integer")
+    result = int(value)
+    if expected is not None and result != expected:
+        raise ValueError(f"{name} must equal {expected}")
+    return result
+
+
+def _canonical_path(value: object, name: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{name} must be a non-empty canonical path string")
+    candidate = Path(value)
+    resolved = candidate.resolve(strict=False)
+    if not candidate.is_absolute() or str(resolved) != value:
+        raise ValueError(f"{name} must be a canonical absolute path")
+    return value
+
+
 @dataclass(frozen=True)
 class ResumeMetadata:
     """Immutable provenance for one continuation run."""
@@ -44,23 +147,124 @@ class ResumeMetadata:
     parent_checkpoint_path: str
     parent_checkpoint_sha256: str
     parent_run_dir: str | None
-    parent_config: dict[str, Any]
-    config_diff: dict[str, Any]
+    parent_config: Mapping[str, Any]
+    config_diff: Mapping[str, Any]
     start_num_timesteps: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "parent_checkpoint_path",
+            _canonical_path(self.parent_checkpoint_path, "parent_checkpoint_path"),
+        )
+        digest = self.parent_checkpoint_sha256
+        if (
+            not isinstance(digest, str)
+            or len(digest) != 64
+            or digest != digest.lower()
+            or any(character not in "0123456789abcdef" for character in digest)
+        ):
+            raise ValueError("parent_checkpoint_sha256 must be a lowercase SHA-256 digest")
+        if self.parent_run_dir is not None:
+            object.__setattr__(
+                self,
+                "parent_run_dir",
+                _canonical_path(self.parent_run_dir, "parent_run_dir"),
+            )
+        if not isinstance(self.parent_config, Mapping):
+            raise ValueError("parent_config must be a required JSON mapping")
+        if not isinstance(self.config_diff, Mapping):
+            raise ValueError("config_diff must be a required JSON mapping")
+        object.__setattr__(
+            self,
+            "parent_config",
+            _freeze_json(self.parent_config, "parent_config"),
+        )
+        object.__setattr__(
+            self,
+            "config_diff",
+            _freeze_json(self.config_diff, "config_diff"),
+        )
+        timesteps = _validated_integral(self.start_num_timesteps, "start_num_timesteps")
+        if timesteps < 0:
+            raise ValueError("start_num_timesteps must be non-negative")
+        object.__setattr__(self, "start_num_timesteps", timesteps)
 
 
 @dataclass(frozen=True)
 class RunMetadata:
     """Complete versioned identity of one fresh or continuation run."""
 
-    resolved_config: dict[str, Any]
+    resolved_config: Mapping[str, Any]
     resume: ResumeMetadata | None = None
     research_contract_version: int = RESEARCH_CONTRACT_VERSION
     observation_schema_version: int = OBSERVATION_SCHEMA_VERSION
     observation_shape: tuple[int, ...] = OBSERVATION_SHAPE
+    observation_dtype: str = OBSERVATION_DTYPE
     action_schema_version: int = ACTION_SCHEMA_VERSION
     action_count: int = len(ACTION_ORDER)
     action_order: tuple[str, ...] = ACTION_ORDER
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "research_contract_version",
+            _validated_integral(
+                self.research_contract_version,
+                "research_contract_version",
+                expected=RESEARCH_CONTRACT_VERSION,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "observation_schema_version",
+            _validated_integral(
+                self.observation_schema_version,
+                "observation_schema_version",
+                expected=OBSERVATION_SCHEMA_VERSION,
+            ),
+        )
+        if (
+            not isinstance(self.observation_shape, list | tuple)
+            or tuple(self.observation_shape) != OBSERVATION_SHAPE
+        ):
+            raise ValueError(f"observation_shape must equal {OBSERVATION_SHAPE}")
+        object.__setattr__(self, "observation_shape", OBSERVATION_SHAPE)
+        if self.observation_dtype != OBSERVATION_DTYPE:
+            raise ValueError(f"observation_dtype must equal {OBSERVATION_DTYPE!r}")
+        object.__setattr__(
+            self,
+            "action_schema_version",
+            _validated_integral(
+                self.action_schema_version,
+                "action_schema_version",
+                expected=ACTION_SCHEMA_VERSION,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "action_count",
+            _validated_integral(
+                self.action_count,
+                "action_count",
+                expected=len(ACTION_ORDER),
+            ),
+        )
+        if (
+            not isinstance(self.action_order, list | tuple)
+            or tuple(self.action_order) != ACTION_ORDER
+        ):
+            raise ValueError(f"action_order must equal {ACTION_ORDER}")
+        object.__setattr__(self, "action_order", ACTION_ORDER)
+        if not isinstance(self.resolved_config, Mapping):
+            raise ValueError("resolved_config must be a required JSON mapping")
+        object.__setattr__(
+            self,
+            "resolved_config",
+            _freeze_json(self.resolved_config, "resolved_config"),
+        )
+        if self.resume is not None and not isinstance(self.resume, ResumeMetadata):
+            raise ValueError("resume must be ResumeMetadata or null")
 
 
 @dataclass(frozen=True)
@@ -83,9 +287,7 @@ def sha256_file(path: str | Path) -> str:
 
 
 def _require_int(value: object, name: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, Integral):
-        raise ValueError(f"Resume metadata {name} must be an integer")
-    return int(value)
+    return _validated_integral(value, f"Resume metadata {name}")
 
 
 def _require_string(value: object, name: str) -> str:
@@ -118,8 +320,10 @@ def _parse_resume_metadata(value: object) -> ResumeMetadata | None:
     if parent_run_dir_value is not None and not isinstance(parent_run_dir_value, str):
         raise ValueError("Resume metadata parent_run_dir must be a string or null")
     digest = _require_string(payload["parent_checkpoint_sha256"], "checkpoint digest")
-    if len(digest) != 64 or digest != digest.lower() or any(
-        character not in "0123456789abcdef" for character in digest
+    if (
+        len(digest) != 64
+        or digest != digest.lower()
+        or any(character not in "0123456789abcdef" for character in digest)
     ):
         raise ValueError("Resume metadata checkpoint digest must be lowercase SHA-256")
     start_num_timesteps = _require_int(payload["start_num_timesteps"], "start_num_timesteps")
@@ -143,6 +347,7 @@ def _parse_run_metadata(payload: object) -> RunMetadata:
         "research_contract_version",
         "observation_schema_version",
         "observation_shape",
+        "observation_dtype",
         "action_schema_version",
         "action_count",
         "action_order",
@@ -171,6 +376,7 @@ def _parse_run_metadata(payload: object) -> RunMetadata:
             values["observation_schema_version"], "observation_schema_version"
         ),
         observation_shape=tuple(observation_shape_value),
+        observation_dtype=_require_string(values["observation_dtype"], "observation_dtype"),
         action_schema_version=_require_int(
             values["action_schema_version"], "action_schema_version"
         ),
@@ -188,6 +394,7 @@ def _validate_metadata_contract(metadata: RunMetadata) -> None:
     if (
         metadata.observation_schema_version != OBSERVATION_SCHEMA_VERSION
         or metadata.observation_shape != OBSERVATION_SHAPE
+        or metadata.observation_dtype != OBSERVATION_DTYPE
     ):
         raise ValueError("Resume observation schema mismatch")
     if (
@@ -200,7 +407,12 @@ def _validate_metadata_contract(metadata: RunMetadata) -> None:
 
 def _load_run_metadata(path: Path) -> RunMetadata:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(
+            path.read_text(encoding="utf-8"),
+            parse_constant=lambda value: (_ for _ in ()).throw(
+                ValueError(f"Resume metadata JSON number must be finite: {value}")
+            ),
+        )
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"Resume metadata is malformed: {path}") from exc
     metadata = _parse_run_metadata(payload)
@@ -293,19 +505,65 @@ def _require_constant_schedule(
     schedule: object,
     expected: float,
 ) -> None:
-    if not callable(schedule):
-        raise ValueError(f"Resume {name} mismatch: expected a constant numeric schedule")
-    for progress_remaining in (0.0, 0.5, 1.0):
-        try:
-            value = schedule(progress_remaining)
-        except Exception as exc:
-            raise ValueError(f"Resume {name} schedule could not be evaluated") from exc
-        _require_equal(name, value, expected)
+    canonical = FloatSchedule(expected)
+    if type(schedule) is not type(canonical) or vars(schedule).keys() != vars(canonical).keys():
+        raise ValueError(
+            f"Resume {name} mismatch: expected the pinned SB3 constant schedule wrapper"
+        )
+    value_schedule = cast(FloatSchedule, schedule).value_schedule
+    canonical_value_schedule = canonical.value_schedule
+    if (
+        type(value_schedule) is not ConstantSchedule
+        or type(value_schedule) is not type(canonical_value_schedule)
+        or vars(value_schedule).keys() != vars(canonical_value_schedule).keys()
+    ):
+        raise ValueError(f"Resume {name} mismatch: expected the pinned SB3 constant schedule value")
+    _require_equal(name, value_schedule.val, expected)
 
 
 def write_run_metadata(metadata: RunMetadata, destination: Path) -> None:
     """Atomically replace metadata through a cleaned sibling temporary file."""
 
+    resume_payload: object = None
+    if metadata.resume is not None:
+        resume = ResumeMetadata(
+            parent_checkpoint_path=metadata.resume.parent_checkpoint_path,
+            parent_checkpoint_sha256=metadata.resume.parent_checkpoint_sha256,
+            parent_run_dir=metadata.resume.parent_run_dir,
+            parent_config=metadata.resume.parent_config,
+            config_diff=metadata.resume.config_diff,
+            start_num_timesteps=metadata.resume.start_num_timesteps,
+        )
+        resume_payload = {
+            "parent_checkpoint_path": resume.parent_checkpoint_path,
+            "parent_checkpoint_sha256": resume.parent_checkpoint_sha256,
+            "parent_run_dir": resume.parent_run_dir,
+            "parent_config": _thaw_json(resume.parent_config, "parent_config"),
+            "config_diff": _thaw_json(resume.config_diff, "config_diff"),
+            "start_num_timesteps": resume.start_num_timesteps,
+        }
+    validated = RunMetadata(
+        resolved_config=metadata.resolved_config,
+        resume=metadata.resume,
+        research_contract_version=metadata.research_contract_version,
+        observation_schema_version=metadata.observation_schema_version,
+        observation_shape=metadata.observation_shape,
+        observation_dtype=metadata.observation_dtype,
+        action_schema_version=metadata.action_schema_version,
+        action_count=metadata.action_count,
+        action_order=metadata.action_order,
+    )
+    payload = {
+        "resolved_config": _thaw_json(validated.resolved_config, "resolved_config"),
+        "resume": resume_payload,
+        "research_contract_version": validated.research_contract_version,
+        "observation_schema_version": validated.observation_schema_version,
+        "observation_shape": list(validated.observation_shape),
+        "observation_dtype": validated.observation_dtype,
+        "action_schema_version": validated.action_schema_version,
+        "action_count": validated.action_count,
+        "action_order": list(validated.action_order),
+    }
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{destination.name}.",
         suffix=".tmp",
@@ -317,10 +575,11 @@ def write_run_metadata(metadata: RunMetadata, destination: Path) -> None:
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as output:
             json.dump(
-                dataclasses.asdict(metadata),
+                payload,
                 output,
                 ensure_ascii=False,
                 indent=2,
+                allow_nan=False,
             )
             output.write("\n")
         os.replace(temporary, destination)
