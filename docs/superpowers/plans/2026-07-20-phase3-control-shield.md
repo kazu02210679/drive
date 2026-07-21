@@ -1,5 +1,7 @@
 # Phase 3 Control and Safety Shield Implementation Plan
 
+> **Status: historical Phase 3 plan.** This checklist records the original control/Shield implementation. Use the Phase 4.1 plan dated 2026-07-21 for the active observation boundary and comparison contract.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Connect deterministic Agent decisions to a four-action MetaDrive control path through a monotone Safety Shield, lane keeping, and bounded speed PID, then prove the complete path in a 100-step headless simulation.

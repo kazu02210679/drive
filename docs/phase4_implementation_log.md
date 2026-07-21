@@ -374,3 +374,63 @@ files; and the branch-range whitespace check exited 0 with no output.
 The branch was pushed as `feat/phase4-rl-environment`, and stacked Draft PR
 [#4](https://github.com/kazu02210679/drive/pull/4) was opened against
 `feat/phase3-control-shield`. It explicitly depends on Phase 3 Draft PR #3.
+
+## Phase 4.1 Task 11: research-hardening verification
+
+### Standalone environment resolution
+
+The checkout uses a normal non-editable wheel. Before verification, the installed `mad_driving.cli.train` SHA-256 differed from `src/mad_driving/cli/train.py`. The checkout-local environment was refreshed without changing global Python:
+
+```powershell
+.venv\Scripts\uv.exe sync --no-editable --group dev --extra training --reinstall-package mad-driving
+```
+
+`uv 0.8.0` rebuilt and reinstalled `mad-driving==0.1.0`. The installed and source CLI SHA-256 then both equaled `758ac5034baccc02f0ec4b14f86e7d9f4f200a0ef4f42447399c55846e4fcb3b`, so standalone `python -m mad_driving.cli.train` resolved this checkout.
+
+### Fresh quality and real MetaDrive gates
+
+The final Task 11 gate used the requested commands:
+
+- `pytest -q`: `608 passed, 19 warnings in 36.37s`
+- `ruff check .`: `All checks passed!`
+- `mypy src`: `Success: no issues found in 53 source files`
+- coverage pytest with `--cov-fail-under=90`: `608 passed, 19 warnings in 50.03s`; `3,201` statements, `227` missed, total `90.42%`
+- real MetaDrive trio: `15 passed, 16 warnings in 18.54s`
+
+The 19 full-suite warnings comprise 14 upstream Matplotlib/PyParsing deprecations and five Stable-Baselines3 advisories: three train/eval vector-class warnings and two unwrapped-evaluation warnings. The three-file MetaDrive run contains the 14 deprecations plus two Stable-Baselines3 advisories. No project warning was suppressed.
+
+`Get-Process python,pythonw` reported `count=0` before the fresh gates and `count=0` after the real integration trio. It again reported `count=0` after both training runs and independent artifact reloads. No Python/MetaDrive process attributable to verification remained.
+
+### Reproducible real PPO smoke pair
+
+Read-only `Test-Path` checks reported both planned destinations absent. No run or recovery directory was removed or overwritten:
+
+```text
+runs\phase4_1_smoke_seed42_a  exists=False
+runs\phase4_1_smoke_seed42_b  exists=False
+```
+
+Both runs used `configs/train.yaml`, `--smoke`, policy/RNG seed 42, and fresh destinations. A completed in 43.1s and B in 42.1s. Each requested 5,000 timesteps, completed 6,144 at the full `n_steps=2048` rollout boundary, selected a best checkpoint at step 5,000, and evaluated five 200-step episodes with mean reward `-64.71`.
+
+An independent parser loaded each resolved YAML, strict JSON metadata, TensorBoard event file, best/final checkpoint, and fresh real MetaDrive environment. The first three reproduced identities were identical:
+
+| Role | `episode_rng_seed` | `metadrive_scenario_index` | `scenario_parameter_seed` |
+|---|---:|---:|---:|
+| train | 42 | 948 | 2,314 |
+| train | 191,664,963 | 3,546 | 2,463 |
+| train | 1,662,057,957 | 5,299 | 6,974 |
+| validation | 42 | 10,746 | 10,418 |
+| validation | 191,664,963 | 10,103 | 10,696 |
+| validation | 1,662,057,957 | 10,595 | 10,383 |
+
+Each train sequence contains three distinct episode RNG seeds, and A/B sequences match exactly. Every train scenario/parameter identity is in `[0, 10000)`. Every validation identity is in `[10000, 11000)` and therefore outside the train range. Test seeds were not constructed or consumed.
+
+Both metadata files are byte-identical with SHA-256 `e8788a5a76c03b67d9021dabdff8614fefda1ea5d4dc75b70f51edd34da4beaa`; both resolved configs are byte-identical with SHA-256 `682942f33278ee5e515129b717a984afd4ca3bb9442eab06a062e99f12fe66d6`. Each run records `research_contract_version=2`, `observation_schema_version=1`, shape `[24]`, dtype `float32`, action schema 1, action count 4, and `resume=null`.
+
+Each TensorBoard run contains one event file with 63 scalar events across evaluation, ten Reward components, timing, and PPO training tags; every parsed scalar is finite. Each final checkpoint reloaded with `num_timesteps=6144` into a fresh train-role environment and completed 100 deterministic prediction steps with finite observations and rewards, without termination or truncation. The differing checkpoint ZIP hashes are artifact-container bytes and were not used as the reproducibility criterion; config, metadata, seed identity sequences, timestep counts, and parsed finite behavior match.
+
+### Deferred observation work and phase boundary
+
+The current Coordinator observation remains 24-dimensional. Explicit `ttc_valid`, `claim_valid`, `agent_failed`, and `target_actor_present` features are deferred and unimplemented; no documentation claims that these slots exist. Adding them requires a versioned observation-schema change and retraining.
+
+Phase 4.1 adds no Phase 5 Lead Brake, Cut-in, or Occluded Crossing Actor and no Curriculum. It adds no Phase 6 baseline execution, reports, plots, or GIFs. Task 11 changed documentation/evidence only and did not push; the parent performs the final whole-branch review and PR #4 push.

@@ -2,6 +2,8 @@
 
 ## Status and authority
 
+> **Status: historical Phase 3 design.** This document preserves the original control/Shield delivery. Phase 4.1 supersedes its all-purpose snapshot boundary and defines the current comparison modes; the four-action order and monotone Shield remain active.
+
 本設計は、`docs/multi_agent_driving_mvp_spec.md` のPhase 3「制御とShield」を
 実装可能な粒度へ固定する。最上位要件はMVP仕様書であり、本設計はそこにない
 機能を追加しない。

@@ -1,5 +1,7 @@
 # Phase 4 RL Environment Implementation Plan
 
+> **Status: superseded historical plan.** This checklist records the original Phase 4 delivery and keeps its measured history intact. Use `docs/superpowers/plans/2026-07-21-phase4-research-validity-hardening.md` for the active timing, seed, state-boundary, Reward, PPO, and artifact contracts.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Turn the fixed Phase 3 decision pipeline into a reproducible 24-dimensional Gymnasium environment and train only its Coordinator with PPO, producing loadable checkpoints and TensorBoard events.

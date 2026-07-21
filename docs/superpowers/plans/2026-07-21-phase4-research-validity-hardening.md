@@ -8,6 +8,12 @@
 
 **Tech Stack:** Python 3.11, dataclasses, Pydantic v2, NumPy, Gymnasium, MetaDrive, Stable-Baselines3 PPO, pytest, Ruff, mypy, uv.
 
+## Implementation status
+
+Tasks 1-10 are complete at commits `41a584f` through `c668f6f`; their exact RED/GREEN and measured evidence is preserved in `.superpowers/sdd/task-1-report.md` through `task-10-report.md`. Task 11 completed the active-document migration, fresh `608 passed` full/coverage gates, `15 passed` real MetaDrive trio, two fresh 5,000-requested/6,144-actual PPO smokes, independent artifact/reload checks, and the documentation/evidence commit on 2026-07-21.
+
+The parent retains the final whole-branch review and PR #4 push. Task 11 Step 9 is therefore intentionally not run in this task and is not a completion prerequisite here. Phase 5 actors/Curriculum, Phase 6 work, and the explicit `ttc_valid`, `claim_valid`, `agent_failed`, and `target_actor_present` Observation features remain unimplemented.
+
 ## Global Constraints
 
 - Keep the Coordinator observation exactly `(24,)`, `numpy.float32`, finite, and bounded to `[-1, 1]`.
@@ -963,7 +969,7 @@ git commit -m "feat: enforce training artifact provenance"
 - Documents: three specialists plus one Critic, explicit timing, standard PPO update semantics, seed identities/splits, ScenarioRuntime, privileged-state boundary, current reward, Shield comparison contracts, coordinates, and fresh-run requirements.
 - Records: 24-dimensional validity flags as a deferred versioned observation-schema change.
 
-- [ ] **Step 1: Update the top-level specification and README**
+- [x] **Step 1: Update the top-level specification and README**
 
 Make these exact semantic corrections:
 
@@ -978,7 +984,7 @@ Make these exact semantic corrections:
 - document world/body/lane coordinate signs;
 - document fresh run directory and resume provenance requirements.
 
-- [ ] **Step 2: Run documentation consistency scans**
+- [x] **Step 2: Run documentation consistency scans**
 
 Run:
 
@@ -989,7 +995,7 @@ rg -n "train.*validation.*test|physics_dt_s|decision_dt_s|PrivilegedWorldState|S
 
 Expected: obsolete claims occur only in historical design/plan documents that are clearly labeled superseded; active specification and README use the Phase 4.1 contract.
 
-- [ ] **Step 3: Run the complete quality suite**
+- [x] **Step 3: Run the complete quality suite**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest -q
@@ -1000,7 +1006,7 @@ Expected: obsolete claims occur only in historical design/plan documents that ar
 
 Expected: all tests pass, Ruff and mypy are clean, and coverage is at least 90%.
 
-- [ ] **Step 4: Run real headless MetaDrive checks**
+- [x] **Step 4: Run real headless MetaDrive checks**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest tests/integration/test_metadrive_headless.py tests/integration/test_control_metadrive_headless.py tests/integration/test_rl_metadrive_headless.py -q
@@ -1008,7 +1014,7 @@ Expected: all tests pass, Ruff and mypy are clean, and coverage is at least 90%.
 
 Expected: all real integration tests pass with no leaked simulator process.
 
-- [ ] **Step 5: Run two reproducible PPO smoke trainings in fresh directories**
+- [x] **Step 5: Run two reproducible PPO smoke trainings in fresh directories**
 
 ```powershell
 .venv\Scripts\python.exe -m mad_driving.cli.train --config configs/train.yaml --smoke --run-dir runs/phase4_1_smoke_seed42_a
@@ -1017,18 +1023,18 @@ Expected: all real integration tests pass with no leaked simulator process.
 
 Expected: both runs complete, each observes at least two distinct episode RNG seeds, both seed sequences match, validation seeds are outside the train range, observations/rewards are finite, and run metadata contains contract version 2.
 
-- [ ] **Step 6: Record measured results and deferred observation work**
+- [x] **Step 6: Record measured results and deferred observation work**
 
 Append exact test count, warnings, coverage, smoke requested/actual timesteps, elapsed time, observed train/validation seed sequences, checkpoint reload result, and process cleanup result to `docs/phase4_implementation_log.md`. Record explicit validity features (`ttc_valid`, `claim_valid`, `agent_failed`, `target_actor_present`) as deferred and unimplemented.
 
-- [ ] **Step 7: Commit documentation and verification evidence**
+- [x] **Step 7: Commit documentation and verification evidence**
 
 ```powershell
 git add README.md docs configs
 git commit -m "docs: record phase 4 research hardening"
 ```
 
-- [ ] **Step 8: Perform final diff and repository review**
+- [x] **Step 8: Perform final diff and repository review**
 
 ```powershell
 git status --short
@@ -1038,7 +1044,7 @@ git log --oneline origin/feat/phase4-rl-environment..HEAD
 
 Expected: no unintended files, no whitespace errors, and only Phase 4.1 commits.
 
-- [ ] **Step 9: Push and verify Draft PR #4**
+- [ ] **Step 9: Push and verify Draft PR #4 (delegated to parent; intentionally not run here)**
 
 ```powershell
 git push origin feat/phase4-rl-environment

@@ -2,6 +2,8 @@
 
 ## Status and authority
 
+> **Status: superseded historical design.** この文書はhardening前のPhase 4契約と実装判断を保存する。現行契約は`docs/superpowers/specs/2026-07-21-phase4-research-validity-hardening-design.md`とし、将来lookahead Reward、内部errorのtruncation、privileged state混在、同一runへのresumeを採用しない。
+
 本設計は、`docs/multi_agent_driving_mvp_spec.md` のPhase 4「RL環境」を実装可能な
 粒度へ固定する。最上位要件はMVP仕様書であり、本設計はそこにない機能を追加しない。
 
