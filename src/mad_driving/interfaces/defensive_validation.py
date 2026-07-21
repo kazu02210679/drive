@@ -7,7 +7,6 @@ from mad_driving.interfaces.critic_review import CriticReview
 from mad_driving.interfaces.risk_claim import RiskClaim
 from mad_driving.interfaces.scene_frame import OcclusionRegion, RoadContext
 from mad_driving.interfaces.scene_snapshot import EgoState, SceneObservation
-from mad_driving.scenarios.seeding import EpisodeSeeds
 
 
 def valid_claim(claim: RiskClaim) -> bool:
@@ -36,17 +35,13 @@ def valid_snapshot(snapshot: SceneObservation) -> bool:
     try:
         values = asdict(snapshot)
         ego = EgoState(**values.pop("ego"))
-        seeds = EpisodeSeeds(**values.pop("seeds"))
-        visible_actors = tuple(
-            ActorState(**actor) for actor in values.pop("visible_actors")
-        )
+        visible_actors = tuple(ActorState(**actor) for actor in values.pop("visible_actors"))
         occlusion_regions = tuple(
             OcclusionRegion(**region) for region in values.pop("occlusion_regions")
         )
         road_context = RoadContext(**values.pop("road_context"))
         SceneObservation(
             ego=ego,
-            seeds=seeds,
             visible_actors=visible_actors,
             occlusion_regions=occlusion_regions,
             road_context=road_context,

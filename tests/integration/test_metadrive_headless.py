@@ -39,26 +39,27 @@ def test_real_metadrive_headless_step_builds_finite_snapshot() -> None:
         assert isinstance(reset_result, tuple)
         assert len(reset_result) == 2
 
-        runtime.after_simulator_reset(env, state)
-        runtime.before_step(env, state, step_index=1)
+        state = runtime.after_simulator_reset(env, state)
+        state = runtime.before_step(env, state, step_index=1)
         step_result = env.step(config.fixed_action)
         assert isinstance(step_result, tuple)
         assert len(step_result) == 5
 
         raw_info = step_result[4]
-        scenario_result = runtime.after_step(
+        transition = runtime.after_step(
             env,
             state,
             step_index=1,
             raw_info=raw_info,
         )
-        assert scenario_result == ScenarioStepResult(False, False)
+        assert transition.outcome == ScenarioStepResult(False, False)
+        state = transition.state
         frame = SceneSnapshotBuilder().build(
             env,
             step_index=1,
             seeds=seeds,
             context=runtime.observation_context(state),
-            scenario_result=scenario_result,
+            scenario_result=transition.outcome,
             raw_info=raw_info,
             previous_executed_action=0,
             previous_shield_intervention=False,

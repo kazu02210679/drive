@@ -6,9 +6,9 @@ Phase 4.1 now implements the research-hardening contract while retaining the 24-
 
 - three specialists plus one Critic and one-to-three claims per specialist, conservatively aggregated into 24 slots
 - standard PPO rollout updates and timing `0.02 / 5 / 0.10`
-- role-disjoint train/validation/test seeds, actual-reset JSONL artifacts, and five training seeds
-- `ScenarioRuntime`, hidden-kinematics isolation, current-state Reward, and coordinate signs
-- all-monitor decision comparison, all-enforce system comparison, and fresh destination/provenance version 2
+- role-disjoint train/validation/test seeds, actual-reset JSONL artifacts, and a documented five-run policy/RNG-seed comparison protocol
+- `ScenarioRuntime`, hidden-kinematics isolation, boundary-causal Reward, and coordinate signs
+- all-monitor decision comparison, all-enforce system comparison, and fresh destination/provenance version 3
 
 The explicit validity features `ttc_valid`, `claim_valid`, `agent_failed`, and `target_actor_present` remain deferred and unimplemented.
 

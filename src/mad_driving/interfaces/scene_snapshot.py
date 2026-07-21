@@ -9,13 +9,11 @@ from mad_driving.interfaces._validation import (
     require_action,
     require_finite,
     require_finite_values,
-    require_non_empty,
     require_non_negative,
     require_probability,
 )
 from mad_driving.interfaces.actor_state import ActorState
 from mad_driving.interfaces.scene_frame import OcclusionRegion, RoadContext
-from mad_driving.scenarios.seeding import EpisodeSeeds
 
 
 @dataclass(frozen=True)
@@ -44,8 +42,6 @@ class EgoState:
 class SceneObservation:
     step_index: int
     sim_time_s: float
-    scenario_id: str
-    seeds: EpisodeSeeds
     ego: EgoState
     visible_actors: tuple[ActorState, ...]
     occlusion_regions: tuple[OcclusionRegion, ...]
@@ -57,15 +53,10 @@ class SceneObservation:
         if self.step_index < 0:
             raise ValueError("step_index must be non-negative")
         require_non_negative("sim_time_s", self.sim_time_s)
-        require_non_empty("scenario_id", self.scenario_id)
-        if not isinstance(self.seeds, EpisodeSeeds):
-            raise ValueError("seeds must be an EpisodeSeeds instance")
         if not isinstance(self.ego, EgoState):
             raise ValueError("ego must be an EgoState instance")
         visible_actors = tuple(self.visible_actors)
-        if not all(
-            isinstance(actor, ActorState) and actor.visible for actor in visible_actors
-        ):
+        if not all(isinstance(actor, ActorState) and actor.visible for actor in visible_actors):
             raise ValueError("visible_actors must contain only visible ActorState values")
         occlusion_regions = tuple(self.occlusion_regions)
         if not all(isinstance(region, OcclusionRegion) for region in occlusion_regions):

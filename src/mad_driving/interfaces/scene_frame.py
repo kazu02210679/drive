@@ -14,6 +14,7 @@ from mad_driving.interfaces.actor_state import ActorState
 
 if TYPE_CHECKING:
     from mad_driving.interfaces.scene_snapshot import SceneObservation
+    from mad_driving.scenarios.seeding import EpisodeSeeds
 
 
 CollisionKind = Literal[
@@ -52,9 +53,7 @@ class RoadContext:
 
     def __post_init__(self) -> None:
         if self.distance_to_conflict_point_m is not None:
-            require_finite(
-                "distance_to_conflict_point_m", self.distance_to_conflict_point_m
-            )
+            require_finite("distance_to_conflict_point_m", self.distance_to_conflict_point_m)
 
 
 @dataclass(frozen=True)
@@ -89,12 +88,18 @@ class PrivilegedWorldState:
 class SceneFrame:
     """One decision-boundary view split between observation and simulator truth."""
 
+    scenario_id: str
+    seeds: EpisodeSeeds
     observation: SceneObservation
     privileged: PrivilegedWorldState
 
     def __post_init__(self) -> None:
         from mad_driving.interfaces.scene_snapshot import SceneObservation
+        from mad_driving.scenarios.seeding import EpisodeSeeds
 
+        require_non_empty("scenario_id", self.scenario_id)
+        if not isinstance(self.seeds, EpisodeSeeds):
+            raise ValueError("seeds must be an EpisodeSeeds instance")
         if not isinstance(self.observation, SceneObservation):
             raise ValueError("observation must be a SceneObservation")
         if not isinstance(self.privileged, PrivilegedWorldState):

@@ -18,7 +18,8 @@ class RewardContext:
 
     previous_frame: SceneFrame
     next_frame: SceneFrame
-    analysis: AgentAnalysisResult
+    previous_analysis: AgentAnalysisResult
+    next_analysis: AgentAnalysisResult
     executed_action: int
     shield_intervened: bool
     decision_interval_s: float
@@ -62,14 +63,18 @@ class RewardCalculator:
         """Calculate all ten signed components for one transition."""
 
         dt = self._elapsed_time(context)
-        rule_constraint = self._has_rule_constraint(context)
-        min_ttc_s = self._minimum_ttc(context.analysis.claims)
+        rule_constraint = self._has_rule_constraint(
+            context.previous_frame,
+            context.previous_analysis,
+        )
+        previous_min_ttc_s = self._minimum_ttc(context.previous_analysis.claims)
+        next_min_ttc_s = self._minimum_ttc(context.next_analysis.claims)
         privileged = context.next_frame.privileged
         components = {
             "progress_reward": self._progress_reward(context),
             "arrival_reward": self._arrival_reward(privileged.arrived),
             "collision_penalty": self._collision_penalty(privileged.collision_kind),
-            "near_miss_penalty": self._near_miss_penalty(min_ttc_s),
+            "near_miss_penalty": self._near_miss_penalty(next_min_ttc_s),
             "offroad_penalty": -self._config.offroad if privileged.off_road else 0.0,
             "rule_violation_penalty": (
                 -self._config.hard_rule_violation
@@ -78,12 +83,11 @@ class RewardCalculator:
             ),
             "jerk_penalty": self._jerk_penalty(context, dt),
             "unnecessary_brake_penalty": self._unnecessary_brake_penalty(
-                context, min_ttc_s, rule_constraint
+                context, previous_min_ttc_s, rule_constraint
             ),
             "standstill_penalty": (
                 -self._config.standstill_per_second * dt
-                if context.next_frame.observation.ego.speed_mps
-                <= self._config.standstill_speed_mps
+                if context.next_frame.observation.ego.speed_mps <= self._config.standstill_speed_mps
                 else 0.0
             ),
             "shield_intervention_penalty": (
@@ -130,7 +134,11 @@ class RewardCalculator:
 
     @staticmethod
     def _minimum_ttc(claims: tuple[RiskClaim, ...]) -> float | None:
-        values = [claim.min_ttc_s for claim in claims if claim.min_ttc_s is not None]
+        values = [
+            claim.min_ttc_s
+            for claim in claims
+            if claim.agent_id in {"nominal", "hazard"} and claim.min_ttc_s is not None
+        ]
         return min(values, default=None)
 
     def _near_miss_penalty(self, min_ttc_s: float | None) -> float:
@@ -140,14 +148,16 @@ class RewardCalculator:
         return -self._config.near_miss_max * proximity**2
 
     @staticmethod
-    def _has_rule_constraint(context: RewardContext) -> bool:
-        observation = context.next_frame.observation
+    def _has_rule_constraint(
+        frame: SceneFrame,
+        analysis: AgentAnalysisResult,
+    ) -> bool:
+        observation = frame.observation
         return (
             observation.road_context.stop_required
             or observation.road_context.intersection_entry_prohibited
             or any(
-                claim.agent_id == "rule" and claim.hard_stop_required
-                for claim in context.analysis.claims
+                claim.agent_id == "rule" and claim.hard_stop_required for claim in analysis.claims
             )
         )
 
@@ -164,19 +174,16 @@ class RewardCalculator:
         min_ttc_s: float | None,
         rule_constraint: bool,
     ) -> float:
-        claims = context.analysis.claims
+        claims = context.previous_analysis.claims
         hazard_claims = tuple(claim for claim in claims if claim.agent_id == "hazard")
         rule_claims = tuple(claim for claim in claims if claim.agent_id == "rule")
         privileged = context.next_frame.privileged
-        safe_ttc = (
-            min_ttc_s is None
-            or min_ttc_s >= self._config.unnecessary_brake_safe_ttc_s
-        )
+        safe_ttc = min_ttc_s is None or min_ttc_s >= self._config.unnecessary_brake_safe_ttc_s
         safe_post_step = (
             bool(hazard_claims)
             and bool(rule_claims)
-            and "hazard" not in context.analysis.failed_agent_ids
-            and "rule" not in context.analysis.failed_agent_ids
+            and "hazard" not in context.previous_analysis.failed_agent_ids
+            and "rule" not in context.previous_analysis.failed_agent_ids
             and all(
                 claim.severity < self._config.unnecessary_brake_severity_threshold
                 for claim in hazard_claims

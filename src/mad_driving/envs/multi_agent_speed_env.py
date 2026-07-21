@@ -49,6 +49,7 @@ from mad_driving.scenarios import (
     ScenarioState,
     ScenarioStepResult,
 )
+from mad_driving.scenarios.runtime import ScenarioTransition
 from mad_driving.world_model import SceneSnapshotBuilder
 from mad_driving.world_model.validation import decision_interval_s
 
@@ -150,6 +151,8 @@ class SmokeResult:
     steps_completed: int
     terminated: bool
     truncated: bool
+    scenario_id: str
+    seeds: EpisodeSeeds
     final_snapshot: SceneObservation
     final_claims: tuple[RiskClaim, ...]
     final_review: CriticReview
@@ -162,6 +165,8 @@ class ControlSmokeResult:
     steps_completed: int
     terminated: bool
     truncated: bool
+    scenario_id: str
+    seeds: EpisodeSeeds
     final_snapshot: SceneObservation
     final_claims: tuple[RiskClaim, ...]
     final_review: CriticReview
@@ -279,7 +284,10 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
                 reset_info,
                 seeds.metadrive_scenario_index,
             )
-            runtime.after_simulator_reset(environment, scenario_state)
+            scenario_state = runtime.after_simulator_reset(environment, scenario_state)
+            if not isinstance(scenario_state, ScenarioState):
+                raise TypeError("ScenarioRuntime.after_simulator_reset must return ScenarioState")
+            self._validate_scenario_state(scenario_state, seeds)
             context = self._runtime_context(runtime, scenario_state)
             self._validated_decision_interval(environment)
             initial_result = ScenarioStepResult(success=False, failure=False)
@@ -355,18 +363,41 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
                 frame.observation.ego.speed_limit_mps,
             )
             step_index = frame.observation.step_index + 1
-            runtime.before_step(environment, scenario_state, step_index=step_index)
+            scenario_state = runtime.before_step(
+                environment,
+                scenario_state,
+                step_index=step_index,
+            )
+            if not isinstance(scenario_state, ScenarioState):
+                raise TypeError("ScenarioRuntime.before_step must return ScenarioState")
+            self._validate_scenario_state(scenario_state, seeds)
             _, _, raw_terminated, raw_truncated, raw_step_info = environment.step(int(executed))
             runtime_decision_interval_s = self._validated_decision_interval(environment)
             step_info = self._copy_info(raw_step_info)
-            scenario_result = runtime.after_step(
+            control_fail_safe = step_info.get("fail_safe", False)
+            control_fail_safe_reason = step_info.get("fail_safe_reason")
+            if not isinstance(control_fail_safe, bool):
+                raise TypeError("fail_safe must be a boolean")
+            if control_fail_safe:
+                if not isinstance(control_fail_safe_reason, str) or not control_fail_safe_reason:
+                    raise ValueError("fail_safe_reason must identify an active fail-safe")
+            elif control_fail_safe_reason is not None:
+                raise ValueError("fail_safe_reason must be None when fail_safe is false")
+            transition = runtime.after_step(
                 environment,
                 scenario_state,
                 step_index=step_index,
                 raw_info=step_info,
             )
+            if not isinstance(transition, ScenarioTransition):
+                raise TypeError("ScenarioRuntime.after_step must return ScenarioTransition")
+            scenario_state = transition.state
+            if not isinstance(scenario_state, ScenarioState):
+                raise TypeError("ScenarioTransition.state must be a ScenarioState")
+            self._validate_scenario_state(scenario_state, seeds)
+            scenario_result = transition.outcome
             if not isinstance(scenario_result, ScenarioStepResult):
-                raise TypeError("ScenarioRuntime.after_step must return ScenarioStepResult")
+                raise TypeError("ScenarioTransition.outcome must be a ScenarioStepResult")
             context = self._runtime_context(runtime, scenario_state)
             runtime_decision_interval_s = self._validated_decision_interval(environment)
             next_frame = self._build_frame(
@@ -385,7 +416,8 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
                 RewardContext(
                     previous_frame=frame,
                     next_frame=next_frame,
-                    analysis=next_analysis,
+                    previous_analysis=analysis,
+                    next_analysis=next_analysis,
                     executed_action=int(executed),
                     shield_intervened=shield_result.intervened,
                     decision_interval_s=runtime_decision_interval_s,
@@ -414,13 +446,17 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
             trace = DecisionTrace(
                 step_index=step_index,
                 raw_action=int(requested),
+                required_action=int(shield_result.required_action),
                 executed_action=int(executed),
+                intervention_required=shield_result.intervention_required,
                 target_speed_mps=target,
                 shield_intervened=shield_result.intervened,
                 shield_reasons=shield_result.reasons,
                 claims=analysis.claims,
                 review=analysis.review,
                 reward_components=reward_result.components,
+                control_fail_safe=control_fail_safe,
+                control_fail_safe_reason=control_fail_safe_reason,
                 failed_agent_ids=analysis.failed_agent_ids,
                 errors=analysis.errors,
                 episode_rng_seed=seeds.episode_rng_seed,
@@ -434,13 +470,17 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
             info.update(
                 {
                     "requested_action": int(requested),
+                    "required_action": int(shield_result.required_action),
                     "executed_action": int(executed),
+                    "intervention_required": shield_result.intervention_required,
                     "shield_intervened": shield_result.intervened,
                     "shield_reasons": tuple(shield_result.reasons),
                     "target_speed_mps": target,
                     "failed_agent_ids": tuple(analysis.failed_agent_ids),
                     "analysis_errors": tuple(analysis.errors),
                     "reward_components": dict(reward_result.components),
+                    "control_fail_safe": control_fail_safe,
+                    "control_fail_safe_reason": control_fail_safe_reason,
                     "decision_trace": trace,
                 }
             )
@@ -451,6 +491,7 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
 
         self._frame = next_frame
         self._analysis = next_analysis
+        self._scenario_state = scenario_state
         self._episode_active = not (terminated or truncated)
         return observation, reward_total, terminated, truncated, info
 

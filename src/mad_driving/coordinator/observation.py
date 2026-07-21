@@ -31,9 +31,7 @@ class _AggregatedClaim:
     hard_stop_required: bool
 
 
-def aggregate_agent_claims(
-    agent_id: str, claims: Sequence[RiskClaim]
-) -> _AggregatedClaim | None:
+def aggregate_agent_claims(agent_id: str, claims: Sequence[RiskClaim]) -> _AggregatedClaim | None:
     """Return one conservative aggregate, or ``None`` when an agent made no claim."""
 
     if not isinstance(agent_id, str) or not agent_id:
@@ -66,9 +64,7 @@ def aggregate_agent_claims(
         probability=max(probabilities, default=None),
         confidence=min(claim.confidence for claim in agent_claims),
         severity=max(claim.severity for claim in agent_claims),
-        recommended_max_speed_mps=min(
-            claim.recommended_max_speed_mps for claim in agent_claims
-        ),
+        recommended_max_speed_mps=min(claim.recommended_max_speed_mps for claim in agent_claims),
         hard_stop_required=any(claim.hard_stop_required for claim in agent_claims),
     )
 

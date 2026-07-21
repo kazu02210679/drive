@@ -15,13 +15,13 @@ from typing import Any, Protocol, TypeVar
 import gymnasium as gym
 import yaml
 from stable_baselines3 import PPO
-from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
+from stable_baselines3.common.callbacks import CheckpointCallback
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 
 from mad_driving.config.models import AppConfig
 from mad_driving.envs.multi_agent_speed_env import MultiAgentSpeedEnv
 from mad_driving.scenarios import EnvironmentRole
-from mad_driving.training.callbacks import RewardComponentsCallback
+from mad_driving.training.callbacks import RewardComponentsCallback, SeededEvalCallback
 from mad_driving.training.episode_seeds import (
     EpisodeSeedArtifactDescriptor,
     EpisodeSeedRecordingWrapper,
@@ -455,36 +455,23 @@ def _build_train_env(
     )
 
 
+def _build_eval_env(
+    config: AppConfig,
+    owner: _OwnedEnvironments,
+    *,
+    dummy_vec_env_factory: VecEnvFactory,
+    subproc_vec_env_factory: VecEnvFactory,
+) -> Any:
+    factory = subproc_vec_env_factory if config.training.num_envs == 1 else dummy_vec_env_factory
+    return _construct_vector_env(
+        factory,
+        owner.thunks("validation", 1),
+        owner,
+    )
+
+
 def _scaled_frequency(interval_steps: int, num_envs: int) -> int:
     return max(interval_steps // num_envs, 1)
-
-
-def _run_deferred_evaluation(callback: object, model: object, produced_timesteps: int) -> None:
-    """Run one validation pass after the single-process training engine is closed."""
-
-    fake_hook = getattr(callback, "on_fake_training", None)
-    if callable(fake_hook):
-        fake_hook(model, produced_timesteps)
-        return
-
-    init_callback = getattr(callback, "init_callback", None)
-    on_training_start = getattr(callback, "on_training_start", None)
-    on_step = getattr(callback, "on_step", None)
-    on_training_end = getattr(callback, "on_training_end", None)
-    if (
-        not callable(init_callback)
-        or not callable(on_training_start)
-        or not callable(on_step)
-        or not callable(on_training_end)
-    ):
-        raise TypeError("Deferred evaluation callback does not implement the callback lifecycle")
-    init_callback(model)
-    on_training_start({}, {})
-    try:
-        if on_step() is False:
-            raise RuntimeError("Deferred validation callback requested training termination")
-    finally:
-        on_training_end()
 
 
 def _write_resolved_config(config: AppConfig, destination: Path) -> None:
@@ -581,7 +568,7 @@ def run_training(
     dummy_vec_env_factory: VecEnvFactory = DummyVecEnv,
     subproc_vec_env_factory: VecEnvFactory = SubprocVecEnv,
     checkpoint_callback_factory: GenericFactory[Any] = CheckpointCallback,
-    eval_callback_factory: GenericFactory[Any] = EvalCallback,
+    eval_callback_factory: GenericFactory[Any] = SeededEvalCallback,
     reward_callback_factory: GenericFactory[Any] = RewardComponentsCallback,
 ) -> TrainingResult:
     """Train or resume one PPO policy and close every environment on exit."""
@@ -623,7 +610,6 @@ def run_training(
     model: Any = None
     model_logger_closed = False
     primary_error: BaseException | None = None
-    deferred_evaluation = config.training.num_envs == 1
     try:
         train_env = _build_train_env(
             config,
@@ -631,10 +617,11 @@ def run_training(
             dummy_vec_env_factory=dummy_vec_env_factory,
             subproc_vec_env_factory=subproc_vec_env_factory,
         )
-        eval_env = _construct_vector_env(
-            dummy_vec_env_factory,
-            eval_owner.thunks("validation", 1),
+        eval_env = _build_eval_env(
+            config,
             eval_owner,
+            dummy_vec_env_factory=dummy_vec_env_factory,
+            subproc_vec_env_factory=subproc_vec_env_factory,
         )
 
         if resume_source is None:
@@ -711,23 +698,18 @@ def run_training(
         )
         eval_callback = eval_callback_factory(
             eval_env=eval_env,
+            validation_episode_seed=config.seed,
             best_model_save_path=str(staging_dir),
-            eval_freq=(
-                1
-                if deferred_evaluation
-                else _scaled_frequency(
-                    min(config.training.eval_interval_steps, requested_timesteps),
-                    config.training.num_envs,
-                )
+            eval_freq=_scaled_frequency(
+                min(config.training.eval_interval_steps, requested_timesteps),
+                config.training.num_envs,
             ),
             n_eval_episodes=config.training.eval_episodes,
             deterministic=True,
             render=False,
         )
         reward_callback = reward_callback_factory()
-        callbacks = [reward_callback, checkpoint_callback]
-        if not deferred_evaluation:
-            callbacks.append(eval_callback)
+        callbacks = [reward_callback, checkpoint_callback, eval_callback]
         model.learn(
             total_timesteps=requested_timesteps,
             callback=callbacks,
@@ -746,12 +728,6 @@ def run_training(
                 expected_environments=(("validation", 0),),
             ),
         )
-        if deferred_evaluation:
-            closing_train_env = train_env
-            train_env = None
-            _close_vector_env(closing_train_env)
-            train_owner.close()
-            _run_deferred_evaluation(eval_callback, model, requested_timesteps)
         if not staged_best_checkpoint.is_file():
             raise FileNotFoundError(f"Best checkpoint was not produced: {staged_best_checkpoint}")
         if not staged_final_checkpoint.is_file():

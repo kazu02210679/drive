@@ -43,25 +43,26 @@ def run_smoke(
     try:
         state = runtime.reset(env, seeds=seeds)
         env.reset(seed=seeds.metadrive_scenario_index)
-        runtime.after_simulator_reset(env, state)
+        state = runtime.after_simulator_reset(env, state)
         for step_index in range(1, config.decision_steps + 1):
-            runtime.before_step(env, state, step_index=step_index)
+            state = runtime.before_step(env, state, step_index=step_index)
             _, _, terminated_value, truncated_value, raw_info = env.step(action)
             terminated = bool(terminated_value)
             truncated = bool(truncated_value)
             steps_completed = step_index
-            scenario_result = runtime.after_step(
+            transition = runtime.after_step(
                 env,
                 state,
                 step_index=step_index,
                 raw_info=raw_info,
             )
+            state = transition.state
             final_frame = snapshot_builder.build(
                 env,
                 step_index=step_index,
                 seeds=seeds,
                 context=runtime.observation_context(state),
-                scenario_result=scenario_result,
+                scenario_result=transition.outcome,
                 raw_info=raw_info,
                 previous_executed_action=0,
                 previous_shield_intervention=False,
@@ -78,6 +79,8 @@ def run_smoke(
         steps_completed=steps_completed,
         terminated=terminated,
         truncated=truncated,
+        scenario_id=final_frame.scenario_id,
+        seeds=final_frame.seeds,
         final_snapshot=final_frame.observation,
         final_claims=final_analysis.claims,
         final_review=final_analysis.review,

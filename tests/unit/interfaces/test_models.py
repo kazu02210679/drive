@@ -1,6 +1,6 @@
 import json
 import math
-from dataclasses import FrozenInstanceError, asdict
+from dataclasses import FrozenInstanceError, asdict, fields
 from typing import Any
 
 import pytest
@@ -77,8 +77,6 @@ def make_snapshot(**overrides: Any) -> SceneObservation:
     values: dict[str, Any] = {
         "step_index": 1,
         "sim_time_s": 0.1,
-        "scenario_id": "test",
-        "seeds": make_seeds(),
         "ego": make_ego(),
         "visible_actors": (make_actor(),),
         "occlusion_regions": (),
@@ -92,6 +90,8 @@ def make_snapshot(**overrides: Any) -> SceneObservation:
 
 def make_frame(**overrides: Any) -> SceneFrame:
     values: dict[str, Any] = {
+        "scenario_id": "test",
+        "seeds": make_seeds(),
         "observation": make_snapshot(),
         "privileged": PrivilegedWorldState(
             all_actors=(make_actor(),),
@@ -105,6 +105,15 @@ def make_frame(**overrides: Any) -> SceneFrame:
     }
     values.update(overrides)
     return SceneFrame(**values)
+
+
+def test_agent_visible_observation_excludes_scenario_identity_and_seeds() -> None:
+    observation_fields = {field.name for field in fields(SceneObservation)}
+    frame_fields = {field.name for field in fields(SceneFrame)}
+
+    assert "scenario_id" not in observation_fields
+    assert "seeds" not in observation_fields
+    assert {"scenario_id", "seeds"} <= frame_fields
 
 
 def make_claim(**overrides: Any) -> RiskClaim:
@@ -147,7 +156,9 @@ def test_models_are_frozen_and_json_serializable() -> None:
     trace = DecisionTrace(
         step_index=1,
         raw_action=0,
+        required_action=1,
         executed_action=1,
+        intervention_required=True,
         target_speed_mps=7.0,
         shield_intervened=True,
         shield_reasons=("margin",),
@@ -204,7 +215,7 @@ def test_scene_observation_defensively_freezes_and_validates_inputs() -> None:
     assert observation.visible_actors == (make_actor(),)
     assert observation.occlusion_regions == ()
     with pytest.raises(ValueError, match="seeds"):
-        make_snapshot(seeds={"episode_rng_seed": 42})
+        make_frame(seeds={"episode_rng_seed": 42})
     with pytest.raises(ValueError, match="road_context"):
         make_snapshot(road_context={"stop_required": False})
 
@@ -214,7 +225,9 @@ def test_decision_trace_copies_reward_components() -> None:
     trace = DecisionTrace(
         step_index=1,
         raw_action=0,
+        required_action=0,
         executed_action=0,
+        intervention_required=False,
         target_speed_mps=8.0,
         shield_intervened=False,
         shield_reasons=(),
@@ -229,13 +242,90 @@ def test_decision_trace_copies_reward_components() -> None:
         trace.reward_components["progress"] = 2.0  # type: ignore[index]
 
 
+def test_decision_trace_preserves_monitor_mode_shield_requirement() -> None:
+    trace = DecisionTrace(
+        step_index=1,
+        raw_action=0,
+        required_action=3,
+        executed_action=0,
+        intervention_required=True,
+        target_speed_mps=8.0,
+        shield_intervened=False,
+        shield_reasons=("imminent_ttc",),
+        claims=(make_claim(),),
+        review=make_review(),
+        reward_components={},
+    )
+
+    assert trace.required_action == 3
+    assert trace.intervention_required is True
+    assert trace.shield_intervened is False
+
+
+def test_decision_trace_rejects_inconsistent_shield_diagnostics() -> None:
+    with pytest.raises(ValueError, match="intervention_required"):
+        DecisionTrace(
+            step_index=1,
+            raw_action=0,
+            required_action=3,
+            executed_action=0,
+            intervention_required=False,
+            target_speed_mps=8.0,
+            shield_intervened=False,
+            shield_reasons=(),
+            claims=(make_claim(),),
+            review=make_review(),
+            reward_components={},
+        )
+
+
+def test_decision_trace_preserves_low_level_control_fail_safe() -> None:
+    trace = DecisionTrace(
+        step_index=1,
+        raw_action=0,
+        required_action=0,
+        executed_action=0,
+        intervention_required=False,
+        target_speed_mps=8.0,
+        shield_intervened=False,
+        shield_reasons=(),
+        claims=(make_claim(),),
+        review=make_review(),
+        reward_components={},
+        control_fail_safe=True,
+        control_fail_safe_reason="ValueError",
+    )
+
+    assert trace.control_fail_safe is True
+    assert trace.control_fail_safe_reason == "ValueError"
+
+    with pytest.raises(ValueError, match="control_fail_safe_reason"):
+        DecisionTrace(
+            step_index=1,
+            raw_action=0,
+            required_action=0,
+            executed_action=0,
+            intervention_required=False,
+            target_speed_mps=8.0,
+            shield_intervened=False,
+            shield_reasons=(),
+            claims=(make_claim(),),
+            review=make_review(),
+            reward_components={},
+            control_fail_safe=False,
+            control_fail_safe_reason="ValueError",
+        )
+
+
 def test_decision_trace_freezes_and_validates_analysis_diagnostics() -> None:
     failed_agent_ids = ["hazard"]
     errors = ["hazard:RuntimeError:failed"]
     trace = DecisionTrace(
         step_index=1,
         raw_action=0,
+        required_action=0,
         executed_action=0,
+        intervention_required=False,
         target_speed_mps=8.0,
         shield_intervened=False,
         shield_reasons=[],  # type: ignore[arg-type]
@@ -257,7 +347,9 @@ def test_decision_trace_freezes_and_validates_analysis_diagnostics() -> None:
         DecisionTrace(
             step_index=1,
             raw_action=0,
+            required_action=0,
             executed_action=0,
+            intervention_required=False,
             target_speed_mps=8.0,
             shield_intervened=False,
             shield_reasons=(),
@@ -278,7 +370,9 @@ def test_decision_trace_deeply_freezes_claim_and_review_sequences() -> None:
     trace = DecisionTrace(
         step_index=1,
         raw_action=0,
+        required_action=0,
         executed_action=0,
+        intervention_required=False,
         target_speed_mps=8.0,
         shield_intervened=False,
         shield_reasons=(),
@@ -326,7 +420,9 @@ def test_decision_trace_rejects_invalid_nested_string_sequences(
         DecisionTrace(
             step_index=1,
             raw_action=0,
+            required_action=0,
             executed_action=0,
+            intervention_required=False,
             target_speed_mps=8.0,
             shield_intervened=False,
             shield_reasons=(),
@@ -415,7 +511,9 @@ def test_decision_trace_actions_are_discrete_four(field: str, value: int) -> Non
     values: dict[str, Any] = {
         "step_index": 1,
         "raw_action": 0,
+        "required_action": 0,
         "executed_action": 0,
+        "intervention_required": False,
         "target_speed_mps": 8.0,
         "shield_intervened": False,
         "shield_reasons": (),
@@ -434,7 +532,9 @@ def test_reward_components_must_be_finite() -> None:
         DecisionTrace(
             step_index=1,
             raw_action=0,
+            required_action=0,
             executed_action=0,
+            intervention_required=False,
             target_speed_mps=8.0,
             shield_intervened=False,
             shield_reasons=(),

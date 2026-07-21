@@ -251,6 +251,8 @@ def test_monitor_mode_counts_no_actual_intervention() -> None:
 
     assert result.action_counts == (2, 0, 0, 0)
     assert result.shield_intervention_count == 0
+    assert result.final_trace.required_action == 3
+    assert result.final_trace.intervention_required is True
     assert result.final_trace.shield_intervened is False
     assert "imminent_ttc" in result.final_trace.shield_reasons
 

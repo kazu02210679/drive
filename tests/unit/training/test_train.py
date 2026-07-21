@@ -23,6 +23,7 @@ from mad_driving.training import RunMetadata, sha256_file
 from mad_driving.training import metadata as metadata_module
 from mad_driving.training import ownership as ownership_module
 from mad_driving.training import train as train_module
+from mad_driving.training.metadata import RESEARCH_CONTRACT_VERSION
 from mad_driving.training.train import TrainingResult, run_training
 
 
@@ -204,12 +205,14 @@ class FakeEvalCallback:
         self.eval_env = kwargs["eval_env"]
         self.eval_freq = kwargs["eval_freq"]
         self.best_model_save_path = Path(kwargs["best_model_save_path"])
+        self.validation_episode_seed = kwargs["validation_episode_seed"]
+        self.training_env_closed_during_evaluation: list[bool] = []
 
     def on_fake_training(self, model: "FakePPO", produced_timesteps: int) -> None:
         train_env = model.init_kwargs["env"]
-        if train_env.closed:
-            for environment in self.eval_env.envs:
-                environment.reset()
+        self.training_env_closed_during_evaluation.append(train_env.closed)
+        for environment in self.eval_env.envs:
+            environment.reset(seed=self.validation_episode_seed)
         callback_calls = math.ceil(produced_timesteps / train_env.num_envs)
         if callback_calls >= self.eval_freq:
             model.write_checkpoint(self.best_model_save_path / "best_model.zip", "best")
@@ -416,11 +419,6 @@ class ResettingFakePPO(FakePPO):
         for environment in train_env.envs:
             environment.reset()
             environment.reset()
-        for callback in kwargs["callback"]:
-            eval_env = getattr(callback, "eval_env", None)
-            if eval_env is not None:
-                for environment in eval_env.envs:
-                    environment.reset()
         return super().learn(**kwargs)
 
 
@@ -573,7 +571,7 @@ def test_environment_close_failure_prevents_success_publication(tmp_path: Path) 
     run_dir = tmp_path / "close-failure"
     environments = CloseFailingEnvFactory()
 
-    with pytest.raises(OSError, match="environment 0 close failed") as captured:
+    with pytest.raises(OSError) as captured:
         run_with_fakes(
             make_config(),
             run_dir,
@@ -582,7 +580,9 @@ def test_environment_close_failure_prevents_success_publication(tmp_path: Path) 
 
     assert not run_dir.exists()
     assert [environment.close_calls for environment in environments.created] == [1, 1]
-    assert any("environment 1 close failed" in note for note in captured.value.__notes__)
+    reported_errors = [str(captured.value), *captured.value.__notes__]
+    assert any("environment 0 close failed" in message for message in reported_errors)
+    assert any("environment 1 close failed" in message for message in reported_errors)
 
 
 def test_seed_artifact_finalization_failure_prevents_success_publication(
@@ -963,7 +963,7 @@ def test_run_directory_file_is_rejected_and_preserved_before_any_side_effect(
     assert FakePPO.instances == []
 
 
-def test_single_environment_training_and_validation_never_invoke_subprocess_factory(
+def test_single_environment_uses_dummy_train_and_subprocess_validation_during_learning(
     tmp_path: Path,
 ) -> None:
     config = make_config(
@@ -1017,12 +1017,15 @@ def test_single_environment_training_and_validation_never_invoke_subprocess_fact
     assert model.learn_kwargs["total_timesteps"] == 5_000
     assert model.learn_kwargs["reset_num_timesteps"] is True
     assert train_env is not eval_env
-    assert dummy.created == [train_env, eval_env]
-    assert subproc.created == []
+    assert dummy.created == [train_env]
+    assert subproc.created == [eval_env]
+    assert evaluation.instances[0].validation_episode_seed == config.seed
+    assert evaluation.instances[0].training_env_closed_during_evaluation == [False]
+    assert evaluation.instances[0] in model.learn_kwargs["callback"]
     assert environments.created[0] is not environments.created[1]
     assert all(env.closed for env in environments.created)
     assert all(env.close_calls == 1 for env in environments.created)
-    assert all(vec.closed for vec in [*dummy.created, eval_env])
+    assert all(vec.closed for vec in [*dummy.created, *subproc.created])
     assert result == TrainingResult(
         run_dir=run_dir,
         final_checkpoint=run_dir / "checkpoints" / "final_model.zip",
@@ -1077,7 +1080,7 @@ def test_fresh_run_writes_complete_research_contract_metadata(tmp_path: Path) ->
     metadata = json.loads((run_dir / "run_metadata.json").read_text(encoding="utf-8"))
     summaries = metadata.pop("episode_seed_artifacts")
     assert metadata == {
-        "research_contract_version": 2,
+        "research_contract_version": RESEARCH_CONTRACT_VERSION,
         "observation_schema_version": 1,
         "observation_shape": [24],
         "observation_dtype": "float32",

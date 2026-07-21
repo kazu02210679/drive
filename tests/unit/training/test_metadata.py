@@ -40,7 +40,7 @@ def test_metadata_models_are_frozen_and_json_serializable(tmp_path: Path) -> Non
         resume=resume,
     )
 
-    assert metadata.research_contract_version == 2
+    assert metadata.research_contract_version == 3
     assert metadata.observation_schema_version == 1
     assert metadata.observation_shape == (24,)
     assert metadata.observation_dtype == "float32"
@@ -105,6 +105,7 @@ def test_frozen_json_objects_reject_attribute_and_storage_reassignment() -> None
     ("overrides", "message"),
     [
         ({"research_contract_version": True}, "research_contract_version"),
+        ({"research_contract_version": 2}, "research_contract_version"),
         ({"research_contract_version": 1}, "research_contract_version"),
         ({"observation_schema_version": 2}, "observation_schema_version"),
         ({"observation_shape": (25,)}, "observation_shape"),
@@ -255,7 +256,7 @@ def test_metadata_writer_rejects_non_finite_nested_value_without_destination(
     assert list(tmp_path.iterdir()) == []
 
 
-def test_version_2_metadata_without_seed_artifacts_remains_loadable(tmp_path: Path) -> None:
+def test_version_3_metadata_without_seed_artifacts_remains_loadable(tmp_path: Path) -> None:
     destination = tmp_path / "run_metadata.json"
     metadata_module.write_run_metadata(
         RunMetadata(resolved_config={"seed": 42}),
@@ -267,7 +268,7 @@ def test_version_2_metadata_without_seed_artifacts_remains_loadable(tmp_path: Pa
 
     loaded = metadata_module._load_run_metadata(destination)
 
-    assert loaded.research_contract_version == 2
+    assert loaded.research_contract_version == 3
     assert loaded.episode_seed_artifacts == ()
 
 

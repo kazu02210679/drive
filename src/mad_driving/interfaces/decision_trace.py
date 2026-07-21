@@ -52,13 +52,17 @@ _REPLACED_ERROR_CATEGORIES = frozenset({"Cc", "Zl", "Zp"})
 class DecisionTrace:
     step_index: int
     raw_action: int
+    required_action: int
     executed_action: int
+    intervention_required: bool
     target_speed_mps: float
     shield_intervened: bool
     shield_reasons: tuple[str, ...]
     claims: tuple[RiskClaim, ...]
     review: CriticReview
     reward_components: dict[str, float]
+    control_fail_safe: bool = False
+    control_fail_safe_reason: str | None = None
     failed_agent_ids: tuple[str, ...] = ()
     errors: tuple[str, ...] = ()
     episode_rng_seed: int | None = None
@@ -71,7 +75,24 @@ class DecisionTrace:
         if self.step_index < 0:
             raise ValueError("step_index must be non-negative")
         require_action("raw_action", self.raw_action)
+        require_action("required_action", self.required_action)
         require_action("executed_action", self.executed_action)
+        if self.intervention_required != (self.required_action > self.raw_action):
+            raise ValueError("intervention_required is inconsistent")
+        if self.shield_intervened != (self.executed_action != self.raw_action):
+            raise ValueError("shield_intervened is inconsistent")
+        if not isinstance(self.control_fail_safe, bool):
+            raise ValueError("control_fail_safe must be a boolean")
+        if self.control_fail_safe:
+            if (
+                not isinstance(self.control_fail_safe_reason, str)
+                or not self.control_fail_safe_reason
+            ):
+                raise ValueError(
+                    "control_fail_safe_reason must be non-empty when fail-safe is active"
+                )
+        elif self.control_fail_safe_reason is not None:
+            raise ValueError("control_fail_safe_reason must be None when fail-safe is inactive")
         require_non_negative("target_speed_mps", self.target_speed_mps)
         shield_reasons = tuple(self.shield_reasons)
         claims = tuple(self.claims)

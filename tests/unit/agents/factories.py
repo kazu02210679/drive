@@ -127,12 +127,6 @@ def make_snapshot(
     values: dict[str, Any] = {
         "step_index": step_index,
         "sim_time_s": step_index * 0.1,
-        "scenario_id": "phase2_unit",
-        "seeds": EpisodeSeeds(
-            episode_rng_seed=42,
-            metadrive_scenario_index=7,
-            scenario_parameter_seed=11,
-        ),
         "ego": make_ego(speed_mps=ego_speed_mps, speed_limit_mps=speed_limit_mps),
         "visible_actors": actors,
         "occlusion_regions": (),
@@ -150,6 +144,8 @@ def make_snapshot(
 
 def make_frame(
     *,
+    scenario_id: str = "phase2_unit",
+    seeds: EpisodeSeeds | None = None,
     observation: SceneObservation | None = None,
     all_actors: tuple[ActorState, ...] = (),
     collision_occurred: bool = False,
@@ -162,6 +158,13 @@ def make_frame(
     """Build a full frame for reward and environment tests."""
 
     return SceneFrame(
+        scenario_id=scenario_id,
+        seeds=seeds
+        or EpisodeSeeds(
+            episode_rng_seed=42,
+            metadrive_scenario_index=7,
+            scenario_parameter_seed=11,
+        ),
         observation=make_snapshot() if observation is None else observation,
         privileged=PrivilegedWorldState(
             all_actors=all_actors,

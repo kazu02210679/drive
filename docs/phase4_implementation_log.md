@@ -651,3 +651,77 @@ Final checkpoint SHA-256 is
 reloaded at `num_timesteps=6144` and completed 100 deterministic real MetaDrive steps with
 101 finite observations, 100 finite rewards, no termination, and no truncation. The final
 `python`/`pythonw` process count was 0. Nothing was pushed.
+
+## Phase 4.2 external-review remediation
+
+This section supersedes the earlier reward, validation-topology, and contract-version
+evidence while preserving all historical run directories. The 24-dimensional Coordinator
+Observation remains unchanged; explicit validity slots are still deferred.
+
+The review remediation removes scenario identity and episode seeds from agent-visible
+`SceneObservation` and keeps them as `SceneFrame` metadata. Privileged actors now retain
+truthful visible/occluded flags. Action-validity reward terms use the previous frame and
+analysis, near-miss uses only next Nominal/Hazard physical-risk TTC, and the research
+contract is version 3. `ScenarioRuntime` threads hook-returned immutable state through
+`ScenarioTransition`. Shield monitor requirements and low-level control fail-safe status
+are explicit in both `info` and `DecisionTrace`.
+
+Single-environment training now uses a parent `DummyVecEnv` plus a one-worker validation
+`SubprocVecEnv`, so periodic validation occurs during learning without two MetaDrive
+engines in one process. Each scheduled evaluation reseeds validation with the same root
+seed. Reward TensorBoard fields use SB3 `record_mean`, averaging across vector environments
+and the logger dump interval instead of retaining the final sample.
+
+### Verification
+
+- canonical coverage gate: `708 passed, 25 warnings in 71.63s`;
+- total coverage: `90.13%` across 3,709 statements and 1,064 branches;
+- Ruff lint and format: all checks passed, 90 files formatted;
+- mypy: no issues in 54 source files;
+- focused RED→GREEN tests proved reward mean logging and public
+  `ScenarioTransition` export.
+
+The pre-push independent review found no Critical issues and two Important issues. The
+validation documentation now distinguishes fixed AppConfig root `seed` from the
+five-run policy/RNG `training.seed`, and `ScenarioState.parameters` now recursively copies
+and freezes finite JSON-like mappings/sequences. Nested aliasing and malformed parameter
+boundaries are covered by five additional tests before the final 708-test gate.
+
+No warning was suppressed. The warnings are upstream Matplotlib deprecations plus SB3
+advisories for the intentional complementary VecEnv topology and unmodified evaluation
+wrapping.
+
+### Contract-v3 PPO smokes
+
+The first attempted pair
+`phase4_2_review_fix_smoke_20260721_a/b` was excluded after metadata revealed that the
+non-editable virtual-environment wheel was still contract v2. The environment was
+resynchronized from the current source and verified to expose contract 3 and an
+agent-visible `SceneObservation` without `scenario_id` or `seeds` before new destinations
+were launched.
+
+`phase4_2_review_fix_v3_smoke_20260721_c` completed in 42.0s and
+`phase4_2_review_fix_v3_smoke_20260721_d` completed in 48.2s. Each requested 5,000
+timesteps, evaluated at exactly step 5,000, and then completed 6,144 at the PPO rollout
+boundary. Each five-episode validation reported mean reward `-64.71` and episode length
+`200`. Both metadata files record `research_contract_version=3` and
+`observation_schema_version=1`.
+
+Each run contains 31 train and 6 validation seed records. Ignoring the descriptor-specific
+identity header, the C/D validation JSONL records are byte-equal:
+`(42, 10746, 10418)`, `(191664963, 10103, 10696)`,
+`(1662057957, 10595, 10383)`, `(1405681631, 10643, 10445)`,
+`(942484272, 10361, 10833)`, and `(929893137, 10640, 10594)`.
+
+TensorBoard contains all ten reward-component means at steps 2,048, 4,096, 5,000, and
+6,144. C and D values are identical. Mean jerk penalty is `-1.7162`, `-1.4787`,
+`-1.3225`, and `-1.2281` respectively; this demonstrates that the logger no longer reports
+an arbitrary final transition as the rollout statistic. The jerk formula and configured
+scale were not changed without scenario-specific evidence.
+
+Final checkpoint SHA-256 values are
+`edc3323fd49ed227db3a99824705679d9f01fff05783d0fee27642c16782ab12` for C and
+`1df8aa745fb2dd9e4bdf847568999671e813adf0f2c468db86c077b8f3f781f5` for D. Both
+reload at `num_timesteps=6144` and complete 100 deterministic real MetaDrive decisions
+with finite 24-dimensional observations and finite rewards. Each reward sum is
+`-32.434590492396445`.

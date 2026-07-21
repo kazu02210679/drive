@@ -201,9 +201,7 @@ def _canonical_strings(values: object, field_name: str) -> tuple[str, ...]:
     return tuple(value for value in result if isinstance(value, str))
 
 
-def _validate_error_mapping(
-    failed_agent_ids: tuple[str, ...], errors: tuple[str, ...]
-) -> None:
+def _validate_error_mapping(failed_agent_ids: tuple[str, ...], errors: tuple[str, ...]) -> None:
     """Require one sanitized error in the same order for each failed specialist."""
 
     if len(failed_agent_ids) != len(errors) or len(errors) != len(set(errors)):
@@ -216,8 +214,7 @@ def _validate_error_mapping(
         if not exception_type or not separator:
             raise ValueError("errors must use agent:type:message format")
         if len(message) > _MAX_SANITIZED_EXCEPTION_MESSAGE_LENGTH or any(
-            category(character) in _REPLACED_EXCEPTION_CHARACTER_CATEGORIES
-            for character in message
+            category(character) in _REPLACED_EXCEPTION_CHARACTER_CATEGORIES for character in message
         ):
             raise ValueError("errors must contain bounded sanitized messages")
 
@@ -234,6 +231,5 @@ def _format_agent_error(agent_id: str, error: Exception) -> str:
         for character in message
     )
     return (
-        f"{agent_id}:{type(error).__name__}:"
-        f"{sanitized[:_MAX_SANITIZED_EXCEPTION_MESSAGE_LENGTH]}"
+        f"{agent_id}:{type(error).__name__}:{sanitized[:_MAX_SANITIZED_EXCEPTION_MESSAGE_LENGTH]}"
     )

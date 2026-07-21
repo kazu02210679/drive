@@ -32,9 +32,7 @@ def test_enforce_never_relaxes_requested_action() -> None:
 
 def test_modes_distinguish_candidate_from_real_intervention() -> None:
     claims = complete_claims(min_ttc_s=0.5)
-    off = SafetyShield(ShieldConfig(mode="off")).filter(
-        DrivingAction.KEEP, make_snapshot(), claims
-    )
+    off = SafetyShield(ShieldConfig(mode="off")).filter(DrivingAction.KEEP, make_snapshot(), claims)
     monitor = SafetyShield(ShieldConfig(mode="monitor")).filter(
         DrivingAction.KEEP, make_snapshot(), claims
     )
@@ -64,9 +62,7 @@ def test_privileged_labels_cannot_change_an_observation_only_shield_decision() -
     shield = SafetyShield(ShieldConfig())
 
     safe_result = shield.filter(DrivingAction.KEEP, safe_frame.observation, complete_claims())
-    labeled_result = shield.filter(
-        DrivingAction.KEEP, labeled_frame.observation, complete_claims()
-    )
+    labeled_result = shield.filter(DrivingAction.KEEP, labeled_frame.observation, complete_claims())
 
     assert labeled_result == safe_result
     assert labeled_result.reasons == ()

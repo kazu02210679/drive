@@ -22,9 +22,7 @@ def test_role_or_worker_changes_derived_seed_identity() -> None:
     train_worker_one = EpisodeSeedAllocator("train", split, worker_index=1).allocate(42)
     validation_worker_zero = EpisodeSeedAllocator("validation", split, worker_index=0).allocate(42)
 
-    assert (
-        train_worker_zero != train_worker_one
-    )
+    assert train_worker_zero != train_worker_one
     assert train_worker_zero != validation_worker_zero
 
 

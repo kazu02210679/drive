@@ -79,17 +79,12 @@ class SceneSnapshotBuilder:
             heading,
             interval_s,
             config,
+            context.visible_actor_ids,
         )
-        visible_actors = tuple(
-            actor
-            for actor in all_actors
-            if context.visible_actor_ids is None or actor.actor_id in context.visible_actor_ids
-        )
+        visible_actors = tuple(actor for actor in all_actors if actor.visible)
         observation = SceneObservation(
             step_index=step_index,
             sim_time_s=step_index * interval_s,
-            scenario_id=context.scenario_id,
-            seeds=seeds,
             ego=ego,
             visible_actors=visible_actors,
             occlusion_regions=context.occlusion_regions,
@@ -110,7 +105,12 @@ class SceneSnapshotBuilder:
             scenario_success=scenario_result.success,
             scenario_failure=scenario_result.failure,
         )
-        return SceneFrame(observation=observation, privileged=privileged)
+        return SceneFrame(
+            scenario_id=context.scenario_id,
+            seeds=seeds,
+            observation=observation,
+            privileged=privileged,
+        )
 
     @staticmethod
     def _collision_occurred(raw_info: Mapping[str, object], vehicle: Any) -> bool:
@@ -159,6 +159,7 @@ class SceneSnapshotBuilder:
         ego_heading: float,
         interval_s: float,
         config: ConfigReader,
+        visible_actor_ids: frozenset[str] | None,
     ) -> tuple[ActorState, ...]:
         ego_lane = self._current_lane(ego_vehicle)
         ego_lane_index = self._canonical_lane_index(ego_vehicle, ego_lane)
@@ -176,6 +177,7 @@ class SceneSnapshotBuilder:
             dy = position[1] - ego_position[1]
             actor_id = self._actor_id(object_key, simulator_object)
             actor_lane = self._current_lane(simulator_object)
+            visible = visible_actor_ids is None or actor_id in visible_actor_ids
             actors.append(
                 ActorState(
                     actor_id=actor_id,
@@ -197,8 +199,8 @@ class SceneSnapshotBuilder:
                         position,
                         config,
                     ),
-                    visible=True,
-                    occluded=False,
+                    visible=visible,
+                    occluded=not visible,
                 )
             )
         actor_ids = tuple(actor.actor_id for actor in actors)

@@ -76,7 +76,7 @@ def run_control_smoke(
         shield = shield_factory(config.shield)
         state = runtime.reset(env, seeds=seeds)
         _, reset_info = env.reset(seed=seeds.metadrive_scenario_index)
-        runtime.after_simulator_reset(env, state)
+        state = runtime.after_simulator_reset(env, state)
         frame = builder.build(
             env,
             step_index=0,
@@ -102,8 +102,17 @@ def run_control_smoke(
                 frame.observation.ego.speed_mps,
                 frame.observation.ego.speed_limit_mps,
             )
-            runtime.before_step(env, state, step_index=step_index)
+            state = runtime.before_step(env, state, step_index=step_index)
             _, _, terminated_value, truncated_value, raw_info = env.step(int(executed))
+            control_fail_safe = raw_info.get("fail_safe", False)
+            control_fail_safe_reason = raw_info.get("fail_safe_reason")
+            if not isinstance(control_fail_safe, bool):
+                raise TypeError("fail_safe must be a boolean")
+            if control_fail_safe:
+                if not isinstance(control_fail_safe_reason, str) or not control_fail_safe_reason:
+                    raise ValueError("fail_safe_reason must identify an active fail-safe")
+            elif control_fail_safe_reason is not None:
+                raise ValueError("fail_safe_reason must be None when fail_safe is false")
             terminated = bool(terminated_value)
             truncated = bool(truncated_value)
             steps_completed = step_index
@@ -112,13 +121,17 @@ def run_control_smoke(
             final_trace = DecisionTrace(
                 step_index=step_index,
                 raw_action=int(requested),
+                required_action=int(shield_result.required_action),
                 executed_action=int(executed),
+                intervention_required=shield_result.intervention_required,
                 target_speed_mps=target,
                 shield_intervened=shield_result.intervened,
                 shield_reasons=shield_result.reasons,
                 claims=analysis.claims,
                 review=analysis.review,
                 reward_components={},
+                control_fail_safe=control_fail_safe,
+                control_fail_safe_reason=control_fail_safe_reason,
                 failed_agent_ids=analysis.failed_agent_ids,
                 errors=analysis.errors,
                 episode_rng_seed=seeds.episode_rng_seed,
@@ -127,18 +140,19 @@ def run_control_smoke(
                 role="train",
                 worker_index=0,
             )
-            scenario_result = runtime.after_step(
+            transition = runtime.after_step(
                 env,
                 state,
                 step_index=step_index,
                 raw_info=raw_info,
             )
+            state = transition.state
             frame = builder.build(
                 env,
                 step_index=step_index,
                 seeds=seeds,
                 context=runtime.observation_context(state),
-                scenario_result=scenario_result,
+                scenario_result=transition.outcome,
                 raw_info=raw_info,
                 previous_executed_action=int(executed),
                 previous_shield_intervention=shield_result.intervened,
@@ -155,6 +169,8 @@ def run_control_smoke(
         steps_completed=steps_completed,
         terminated=terminated,
         truncated=truncated,
+        scenario_id=frame.scenario_id,
+        seeds=frame.seeds,
         final_snapshot=frame.observation,
         final_claims=analysis.claims,
         final_review=analysis.review,

@@ -5,6 +5,7 @@ fixed_action: [0.0, 0.25]
 metadrive:
   use_render: false
   image_observation: false
+  # Smoke defaults only; PPO environments override both from scenarios.<role>.
   num_scenarios: 1
   start_seed: 42
   traffic_density: 0.1

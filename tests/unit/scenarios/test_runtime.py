@@ -1,6 +1,9 @@
 import os
 import subprocess
 import sys
+from collections.abc import Mapping
+from dataclasses import FrozenInstanceError
+from math import inf
 from pathlib import Path
 
 import pytest
@@ -12,6 +15,7 @@ from mad_driving.scenarios import (
     ScenarioObservationContext,
     ScenarioState,
     ScenarioStepResult,
+    ScenarioTransition,
 )
 
 
@@ -47,13 +51,16 @@ def test_noop_runtime_has_stable_lifecycle_outputs() -> None:
         scenario_parameter_seed=11,
     )
     state = runtime.reset(FakeEnvironment(), seeds=seeds)
-    runtime.after_simulator_reset(FakeEnvironment(), state)
-    runtime.before_step(FakeEnvironment(), state, step_index=1)
-    result = runtime.after_step(
-        FakeEnvironment(), state, step_index=1, raw_info={}
+    reset_state = runtime.after_simulator_reset(FakeEnvironment(), state)
+    step_state = runtime.before_step(FakeEnvironment(), reset_state, step_index=1)
+    transition = runtime.after_step(FakeEnvironment(), step_state, step_index=1, raw_info={})
+    assert reset_state is state
+    assert step_state is state
+    assert transition == ScenarioTransition(
+        state=state,
+        outcome=ScenarioStepResult(success=False, failure=False),
     )
-    assert result == ScenarioStepResult(success=False, failure=False)
-    assert runtime.observation_context(state) == ScenarioObservationContext(
+    assert runtime.observation_context(transition.state) == ScenarioObservationContext(
         scenario_id="phase4_noop",
         stop_required=False,
         occlusion_regions=(),
@@ -108,6 +115,61 @@ def test_scenario_state_copies_and_freezes_parameters() -> None:
     assert state.parameters == {"crossing_speed_mps": 3.0}
     with pytest.raises(TypeError):
         state.parameters["crossing_speed_mps"] = 5.0
+
+
+def test_scenario_state_recursively_freezes_nested_parameter_aliases() -> None:
+    levels = [1.0, 2.0]
+    schedule = {"levels": levels}
+    parameters = {"curriculum": [schedule]}
+    state = ScenarioState(
+        scenario_id="crossing",
+        seeds=EpisodeSeeds(1, 2, 3),
+        parameters=parameters,
+    )
+
+    levels.append(99.0)
+    schedule["levels"] = [100.0]
+    parameters["curriculum"].append({"levels": [200.0]})
+
+    curriculum = state.parameters["curriculum"]
+    assert isinstance(curriculum, tuple)
+    frozen_schedule = curriculum[0]
+    assert isinstance(frozen_schedule, Mapping)
+    assert frozen_schedule["levels"] == (1.0, 2.0)
+    with pytest.raises(TypeError):
+        frozen_schedule["levels"] = ()  # type: ignore[index]
+
+
+@pytest.mark.parametrize(
+    ("parameters", "message"),
+    [
+        ({1: "value"}, "mapping keys"),
+        ({"value": inf}, "finite"),
+        ({"value": {1, 2}}, "JSON-like"),
+        ([], "must be a mapping"),
+    ],
+)
+def test_scenario_state_rejects_non_json_or_non_mapping_parameters(
+    parameters: object,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        ScenarioState(
+            scenario_id="crossing",
+            seeds=EpisodeSeeds(1, 2, 3),
+            parameters=parameters,  # type: ignore[arg-type]
+        )
+
+
+def test_scenario_transition_is_immutable() -> None:
+    state = ScenarioState("crossing", EpisodeSeeds(1, 2, 3), {})
+    transition = ScenarioTransition(
+        state=state,
+        outcome=ScenarioStepResult(success=False, failure=False),
+    )
+
+    with pytest.raises(FrozenInstanceError):
+        transition.state = ScenarioState("crossing", state.seeds, {})  # type: ignore[misc]
 
 
 def test_observation_context_rejects_malformed_occlusion_regions() -> None:

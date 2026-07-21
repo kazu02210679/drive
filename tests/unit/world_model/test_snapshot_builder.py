@@ -321,6 +321,8 @@ def test_builder_uses_scenario_context_only_for_observable_road_facts() -> None:
     assert frame.observation.road_context.stop_required is True
     assert frame.observation.road_context.distance_to_conflict_point_m == 12.0
     assert frame.observation.road_context.intersection_entry_prohibited is True
+    assert frame.scenario_id == "scenario_flags"
+    assert frame.seeds == EpisodeSeeds(42, 7, 11)
     assert frame.privileged.collision_occurred is False
     assert frame.privileged.off_road is False
 
@@ -365,6 +367,11 @@ def test_hidden_actor_exists_only_in_privileged_state() -> None:
         "a-vehicle",
         "z-vehicle",
     )
+    privileged = {actor.actor_id: actor for actor in frame.privileged.all_actors}
+    assert privileged["a-vehicle"].visible is False
+    assert privileged["a-vehicle"].occluded is True
+    assert privileged["z-vehicle"].visible is True
+    assert privileged["z-vehicle"].occluded is False
     assert not hasattr(frame.observation, "collision_occurred")
 
 

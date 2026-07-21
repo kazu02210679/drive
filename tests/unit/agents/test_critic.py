@@ -55,7 +55,8 @@ def test_critic_finds_nominal_hazard_disagreement() -> None:
 def test_critic_finds_occlusion_underestimation() -> None:
     review = critic().review(
         make_snapshot(occlusion_regions=(make_occlusion(),)),
-        (make_claim("nominal", severity=0.1),), failed_agent_ids=(),
+        (make_claim("nominal", severity=0.1),),
+        failed_agent_ids=(),
     )
 
     assert review.reasons == ("occlusion_underestimated",)
@@ -86,11 +87,13 @@ def test_critic_finds_speed_recommendation_spread() -> None:
 def test_critic_finds_expired_claim_but_accepts_equal_boundary() -> None:
     expired = critic().review(
         make_snapshot(step_index=2),
-        (make_claim(valid_until_step=1),), failed_agent_ids=(),
+        (make_claim(valid_until_step=1),),
+        failed_agent_ids=(),
     )
     current = critic().review(
         make_snapshot(step_index=2),
-        (make_claim(valid_until_step=2),), failed_agent_ids=(),
+        (make_claim(valid_until_step=2),),
+        failed_agent_ids=(),
     )
 
     assert expired.reasons == ("claim_expired",)
@@ -100,7 +103,8 @@ def test_critic_finds_expired_claim_but_accepts_equal_boundary() -> None:
 def test_critic_finds_low_confidence_definitive_claim_at_half_speed() -> None:
     review = critic().review(
         make_snapshot(speed_limit_mps=10.0),
-        (make_claim(confidence=0.4, recommended_max_speed_mps=5.0),), failed_agent_ids=(),
+        (make_claim(confidence=0.4, recommended_max_speed_mps=5.0),),
+        failed_agent_ids=(),
     )
 
     assert review.reasons == ("low_confidence_definitive",)
@@ -109,7 +113,8 @@ def test_critic_finds_low_confidence_definitive_claim_at_half_speed() -> None:
 def test_low_confidence_threshold_equality_does_not_trigger() -> None:
     review = critic().review(
         make_snapshot(speed_limit_mps=10.0),
-        (make_claim(confidence=0.5, recommended_max_speed_mps=5.0),), failed_agent_ids=(),
+        (make_claim(confidence=0.5, recommended_max_speed_mps=5.0),),
+        failed_agent_ids=(),
     )
 
     assert review.reasons == ()
@@ -156,7 +161,8 @@ def test_critic_finds_all_eight_rules_in_fixed_order() -> None:
             speed_limit_mps=10.0,
             occlusion_regions=(make_occlusion(),),
         ),
-        (nominal, hazard, rule, invalid), failed_agent_ids=(),
+        (nominal, hazard, rule, invalid),
+        failed_agent_ids=(),
     )
 
     assert review.reasons == (
@@ -185,7 +191,8 @@ def test_challenged_claim_ids_are_input_ordered_and_duplicate_free() -> None:
 def test_supported_agents_are_sorted_and_empty_review_is_neutral() -> None:
     supported = critic().review(
         make_snapshot(),
-        (make_claim("z"), make_claim("a")), failed_agent_ids=(),
+        (make_claim("z"), make_claim("a")),
+        failed_agent_ids=(),
     )
     empty = critic().review(make_snapshot(), (), failed_agent_ids=())
 

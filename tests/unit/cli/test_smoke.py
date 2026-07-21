@@ -114,7 +114,7 @@ def test_run_smoke_resets_steps_until_done_and_always_closes() -> None:
     assert result.terminated is True
     assert result.truncated is False
     assert result.final_snapshot.step_index == 2
-    assert result.final_snapshot.scenario_id == "unit_smoke"
+    assert result.scenario_id == "unit_smoke"
     assert len(result.final_claims) == 3
     assert tuple(claim.agent_id for claim in result.final_claims) == (
         "nominal",

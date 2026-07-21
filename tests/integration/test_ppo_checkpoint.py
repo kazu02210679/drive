@@ -16,6 +16,7 @@ from stable_baselines3.common.vec_env import SubprocVecEnv
 from mad_driving.config.models import AppConfig
 from mad_driving.scenarios import EnvironmentRole
 from mad_driving.training import run_training
+from mad_driving.training.metadata import RESEARCH_CONTRACT_VERSION
 
 
 class TinyDeterministicEnv(gym.Env[NDArray[np.float32], int]):
@@ -63,6 +64,37 @@ class TinyDeterministicEnv(gym.Env[NDArray[np.float32], int]):
         self.closed = True
 
 
+class SeedAwareTinyEnv(gym.Env[NDArray[np.float32], int]):
+    """One-step environment that reports its explicit or derived Gymnasium seed."""
+
+    observation_space = spaces.Box(low=-1.0, high=1.0, shape=(24,), dtype=np.float32)
+    action_space = spaces.Discrete(4)
+
+    def reset(
+        self,
+        *,
+        seed: int | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> tuple[NDArray[np.float32], dict[str, Any]]:
+        super().reset(seed=seed)
+        del options
+        episode_seed = (
+            seed if seed is not None else int(self.np_random.integers(0, np.iinfo(np.int32).max))
+        )
+        return np.zeros(24, dtype=np.float32), {
+            "episode_rng_seed": episode_seed,
+            "metadrive_scenario_index": episode_seed + 20_000,
+            "scenario_parameter_seed": episode_seed + 30_000,
+        }
+
+    def step(
+        self,
+        action: int,
+    ) -> tuple[NDArray[np.float32], float, bool, bool, dict[str, Any]]:
+        assert self.action_space.contains(action)
+        return np.zeros(24, dtype=np.float32), 0.0, True, False, {}
+
+
 class CapturingSubprocVecEnv(SubprocVecEnv):
     created: ClassVar[list["CapturingSubprocVecEnv"]] = []
 
@@ -85,6 +117,16 @@ def tiny_env_factory(
 ) -> TinyDeterministicEnv:
     del received_config
     return TinyDeterministicEnv(role=role, worker_index=worker_index)
+
+
+def seed_aware_tiny_env_factory(
+    received_config: AppConfig,
+    *,
+    role: EnvironmentRole,
+    worker_index: int,
+) -> SeedAwareTinyEnv:
+    del received_config, role, worker_index
+    return SeedAwareTinyEnv()
 
 
 def make_real_ppo_config() -> AppConfig:
@@ -118,6 +160,49 @@ def load_and_predict_policy(checkpoint: Path) -> PPO:
 def checkpoint_hash(checkpoint: Path) -> str:
     with checkpoint.open("rb") as checkpoint_file:
         return hashlib.file_digest(checkpoint_file, "sha256").hexdigest()
+
+
+def episode_seed_records(run_dir: Path, role: EnvironmentRole) -> list[int]:
+    artifact = run_dir / "episode_seeds" / f"{role}-worker-000.jsonl"
+    return [
+        int(record["episode_rng_seed"])
+        for record in (
+            json.loads(line) for line in artifact.read_text(encoding="utf-8").splitlines()[1:]
+        )
+    ]
+
+
+@pytest.mark.integration
+def test_validation_reuses_the_same_episode_seed_sequence_for_fresh_and_resumed_runs(
+    tmp_path: Path,
+) -> None:
+    config = make_real_ppo_config()
+    first_run = tmp_path / "seed-sequence-first"
+    first_result = run_training(
+        config,
+        smoke=False,
+        run_dir=first_run,
+        env_factory=seed_aware_tiny_env_factory,
+    )
+    continued_run = tmp_path / "seed-sequence-resumed"
+    resumed_config = config.model_copy(
+        update={"training": config.training.model_copy(update={"seed": 123})}
+    )
+
+    run_training(
+        resumed_config,
+        smoke=False,
+        run_dir=continued_run,
+        resume_from=first_result.final_checkpoint,
+        env_factory=seed_aware_tiny_env_factory,
+    )
+
+    first_validation_seeds = episode_seed_records(first_run, "validation")
+    resumed_validation_seeds = episode_seed_records(continued_run, "validation")
+    assert len(first_validation_seeds) == 4
+    assert first_validation_seeds[0] == config.seed
+    assert first_validation_seeds[:2] == first_validation_seeds[2:]
+    assert resumed_validation_seeds == first_validation_seeds
 
 
 @pytest.mark.integration
@@ -218,7 +303,7 @@ def test_real_ppo_writes_artifacts_and_resumes_transactionally(tmp_path: Path) -
     assert list((run_dir / "tensorboard").rglob("events.out.tfevents.*"))
 
     seed_metadata = json.loads((run_dir / "run_metadata.json").read_text(encoding="utf-8"))
-    assert seed_metadata["research_contract_version"] == 2
+    assert seed_metadata["research_contract_version"] == RESEARCH_CONTRACT_VERSION
     assert seed_metadata["observation_schema_version"] == 1
     seed_summaries = seed_metadata["episode_seed_artifacts"]
     assert [(summary["role"], summary["worker_index"]) for summary in seed_summaries] == [
@@ -271,7 +356,8 @@ def test_real_ppo_writes_artifacts_and_resumes_transactionally(tmp_path: Path) -
         "checkpoint_interval_steps": 8,
         "eval_interval_steps": 8,
     }
-    assert len(environments) == 2
+    # The validation environment is constructed in its subprocess and is not shared back.
+    assert len(environments) == 1
     assert all(environment.closed for environment in environments)
     source_files = {
         path.relative_to(run_dir).as_posix(): path.read_bytes()
@@ -330,5 +416,5 @@ def test_real_ppo_writes_artifacts_and_resumes_transactionally(tmp_path: Path) -
     assert resume_metadata["parent_run_dir"] == str(run_dir.resolve())
     assert resume_metadata["start_num_timesteps"] == 16
     assert resume_metadata["config_diff"] == {}
-    assert len(environments) == 4
+    assert len(environments) == 2
     assert all(environment.closed for environment in environments)

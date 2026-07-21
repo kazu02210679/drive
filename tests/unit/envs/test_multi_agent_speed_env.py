@@ -33,6 +33,7 @@ from mad_driving.scenarios import (
     ScenarioState,
     ScenarioStepResult,
 )
+from mad_driving.scenarios.runtime import ScenarioTransition
 from mad_driving.world_model import SceneSnapshotBuilder
 from tests.unit.agents.factories import make_analysis, make_claim, make_frame, make_snapshot
 
@@ -270,9 +271,16 @@ class RecordingRuntime:
         context: ScenarioObservationContext | None = None,
         step_results: Sequence[ScenarioStepResult] = (),
         invalid_reset_result: bool = False,
+        invalid_after_reset_result: bool = False,
+        invalid_before_step_result: bool = False,
         invalid_step_result: bool = False,
+        invalid_transition_state: bool = False,
+        invalid_transition_outcome: bool = False,
         invalid_context_result: bool = False,
         reset_state: ScenarioState | None = None,
+        after_reset_state: ScenarioState | None = None,
+        before_step_state: ScenarioState | None = None,
+        transition_state: ScenarioState | None = None,
         physics_dt_after_simulator_reset: float | None = None,
         physics_dt_after_step: float | None = None,
     ) -> None:
@@ -282,9 +290,16 @@ class RecordingRuntime:
         )
         self.step_results = tuple(step_results) or (ScenarioStepResult(False, False),)
         self.invalid_reset_result = invalid_reset_result
+        self.invalid_after_reset_result = invalid_after_reset_result
+        self.invalid_before_step_result = invalid_before_step_result
         self.invalid_step_result = invalid_step_result
+        self.invalid_transition_state = invalid_transition_state
+        self.invalid_transition_outcome = invalid_transition_outcome
         self.invalid_context_result = invalid_context_result
         self.reset_state = reset_state
+        self.after_reset_state = after_reset_state
+        self.before_step_state = before_step_state
+        self.transition_state = transition_state
         self.physics_dt_after_simulator_reset = physics_dt_after_simulator_reset
         self.physics_dt_after_step = physics_dt_after_step
         self.states: list[ScenarioState] = []
@@ -300,13 +315,15 @@ class RecordingRuntime:
         self.states.append(state)
         return state
 
-    def after_simulator_reset(self, environment: object, state: ScenarioState) -> None:
-        del state
+    def after_simulator_reset(self, environment: object, state: ScenarioState) -> ScenarioState:
         if self.events is not None:
             self.events.append("runtime.after_simulator_reset")
         if self.physics_dt_after_simulator_reset is not None:
             simulator = cast(FakeSimulator, environment)
             simulator.config["physics_world_step_size"] = self.physics_dt_after_simulator_reset
+        if self.invalid_after_reset_result:
+            return object()  # type: ignore[return-value]
+        return self.after_reset_state or state
 
     def before_step(
         self,
@@ -314,10 +331,13 @@ class RecordingRuntime:
         state: ScenarioState,
         *,
         step_index: int,
-    ) -> None:
-        del environment, state, step_index
+    ) -> ScenarioState:
+        del environment, step_index
         if self.events is not None:
             self.events.append("runtime.before_step")
+        if self.invalid_before_step_result:
+            return object()  # type: ignore[return-value]
+        return self.before_step_state or state
 
     def after_step(
         self,
@@ -326,8 +346,8 @@ class RecordingRuntime:
         *,
         step_index: int,
         raw_info: Mapping[str, object],
-    ) -> ScenarioStepResult:
-        del state, step_index, raw_info
+    ) -> ScenarioTransition:
+        del step_index, raw_info
         if self.events is not None:
             self.events.append("runtime.after_step")
         if self.physics_dt_after_step is not None:
@@ -337,13 +357,75 @@ class RecordingRuntime:
             return object()  # type: ignore[return-value]
         index = min(self.after_step_calls, len(self.step_results) - 1)
         self.after_step_calls += 1
-        return self.step_results[index]
+        transition_state = self.transition_state or state
+        outcome = self.step_results[index]
+        if self.invalid_transition_state:
+            transition_state = object()  # type: ignore[assignment]
+        if self.invalid_transition_outcome:
+            outcome = object()  # type: ignore[assignment]
+        return ScenarioTransition(state=transition_state, outcome=outcome)  # type: ignore[arg-type]
 
     def observation_context(self, state: ScenarioState) -> ScenarioObservationContext:
         del state
         if self.invalid_context_result:
             return object()  # type: ignore[return-value]
         return self.context
+
+
+class StateThreadingRuntime:
+    def __init__(self, scenario_id: str) -> None:
+        self.scenario_id = scenario_id
+        self.before_step_inputs: list[ScenarioState] = []
+        self.after_step_inputs: list[ScenarioState] = []
+
+    def _state(self, seeds: EpisodeSeeds, phase: str) -> ScenarioState:
+        return ScenarioState(self.scenario_id, seeds, {"phase": phase})
+
+    def reset(self, environment: object, *, seeds: EpisodeSeeds) -> ScenarioState:
+        del environment
+        return self._state(seeds, "reset")
+
+    def after_simulator_reset(self, environment: object, state: ScenarioState) -> ScenarioState:
+        del environment
+        return self._state(state.seeds, "after_simulator_reset")
+
+    def before_step(
+        self,
+        environment: object,
+        state: ScenarioState,
+        *,
+        step_index: int,
+    ) -> ScenarioState:
+        del environment
+        self.before_step_inputs.append(state)
+        return self._state(state.seeds, f"before_step_{step_index}")
+
+    def after_step(
+        self,
+        environment: object,
+        state: ScenarioState,
+        *,
+        step_index: int,
+        raw_info: Mapping[str, object],
+    ) -> ScenarioTransition:
+        del environment, raw_info
+        self.after_step_inputs.append(state)
+        return ScenarioTransition(
+            state=self._state(state.seeds, f"after_step_{step_index}"),
+            outcome=ScenarioStepResult(False, False),
+        )
+
+    def observation_context(self, state: ScenarioState) -> ScenarioObservationContext:
+        phase = str(state.parameters["phase"])
+        distances = {
+            "after_simulator_reset": 10.0,
+            "after_step_1": 9.0,
+            "after_step_2": 8.0,
+        }
+        return ScenarioObservationContext(
+            scenario_id=state.scenario_id,
+            distance_to_conflict_point_m=distances[phase],
+        )
 
 
 class RecordingSnapshotBuilder:
@@ -386,8 +468,6 @@ class RecordingSnapshotBuilder:
             raise RuntimeError("snapshot failure")
         observation = make_snapshot(
             step_index=step_index,
-            scenario_id=context.scenario_id,
-            seeds=seeds,
             occlusion_regions=context.occlusion_regions,
             road_context=RoadContext(
                 stop_required=context.stop_required,
@@ -405,6 +485,8 @@ class RecordingSnapshotBuilder:
         elif bool(raw_info.get("crash_vehicle", False)):
             collision_kind = "vehicle"
         return make_frame(
+            scenario_id=context.scenario_id,
+            seeds=seeds,
             observation=observation,
             collision_occurred=collision_kind is not None,
             collision_kind=collision_kind,
@@ -723,6 +805,33 @@ def test_runtime_hook_order_wraps_simulator_and_frame_construction() -> None:
         harness.env.close()
 
 
+def test_runtime_hook_states_drive_context_and_persist_between_steps() -> None:
+    runtime = StateThreadingRuntime(make_config().scenario_id)
+    harness = make_env(runtime=runtime)  # type: ignore[arg-type]
+    try:
+        harness.env.reset(seed=7)
+        assert (
+            harness.snapshot_builder.calls[-1][  # type: ignore[union-attr]
+                "context"
+            ].distance_to_conflict_point_m
+            == 10.0
+        )
+
+        harness.env.step(DrivingAction.KEEP)
+        harness.env.step(DrivingAction.KEEP)
+
+        assert runtime.after_step_inputs[0].parameters["phase"] == "before_step_1"
+        assert runtime.before_step_inputs[1].parameters["phase"] == "after_step_1"
+        assert (
+            harness.snapshot_builder.calls[-1][  # type: ignore[union-attr]
+                "context"
+            ].distance_to_conflict_point_m
+            == 8.0
+        )
+    finally:
+        harness.env.close()
+
+
 def test_reset_and_step_publish_complete_episode_metadata() -> None:
     harness = make_env(role="validation", worker_index=2)
     try:
@@ -820,8 +929,28 @@ def test_scenario_runtime_factory_return_type_is_validated(
     ("runtime", "operation", "message"),
     [
         (RecordingRuntime(invalid_reset_result=True), "reset", "ScenarioState"),
+        (
+            RecordingRuntime(invalid_after_reset_result=True),
+            "reset",
+            "after_simulator_reset.*ScenarioState",
+        ),
         (RecordingRuntime(invalid_context_result=True), "reset", "ScenarioObservationContext"),
-        (RecordingRuntime(invalid_step_result=True), "step", "ScenarioStepResult"),
+        (
+            RecordingRuntime(invalid_before_step_result=True),
+            "step",
+            "before_step.*ScenarioState",
+        ),
+        (RecordingRuntime(invalid_step_result=True), "step", "ScenarioTransition"),
+        (
+            RecordingRuntime(invalid_transition_state=True),
+            "step",
+            "ScenarioTransition.state",
+        ),
+        (
+            RecordingRuntime(invalid_transition_outcome=True),
+            "step",
+            "ScenarioTransition.outcome",
+        ),
     ],
 )
 def test_scenario_runtime_hook_return_types_are_validated(
@@ -837,6 +966,44 @@ def test_scenario_runtime_hook_return_types_are_validated(
         harness.env.reset(seed=75)
         with pytest.raises(TypeError, match=message):
             harness.env.step(DrivingAction.KEEP)
+    assert harness.env_factory.created[0].close_calls == 1
+
+
+@pytest.mark.parametrize(
+    ("hook", "mismatch", "message"),
+    [
+        ("after_simulator_reset", "scenario_id", "ScenarioState scenario_id"),
+        ("after_simulator_reset", "seeds", "ScenarioState seeds"),
+        ("before_step", "scenario_id", "ScenarioState scenario_id"),
+        ("before_step", "seeds", "ScenarioState seeds"),
+        ("after_step", "scenario_id", "ScenarioState scenario_id"),
+        ("after_step", "seeds", "ScenarioState seeds"),
+    ],
+)
+def test_runtime_validates_scenario_identity_after_every_state_hook(
+    hook: str,
+    mismatch: str,
+    message: str,
+) -> None:
+    seeds = expected_seeds(76)
+    returned_seeds = EpisodeSeeds(1, 2, 3) if mismatch == "seeds" else seeds
+    scenario_id = "stale_scenario" if mismatch == "scenario_id" else make_config().scenario_id
+    returned_state = ScenarioState(scenario_id, returned_seeds, {})
+    runtime_kwargs = {
+        "after_simulator_reset": {"after_reset_state": returned_state},
+        "before_step": {"before_step_state": returned_state},
+        "after_step": {"transition_state": returned_state},
+    }[hook]
+    harness = make_env(runtime=RecordingRuntime(**runtime_kwargs))
+
+    if hook == "after_simulator_reset":
+        with pytest.raises(RuntimeError, match=message):
+            harness.env.reset(seed=76)
+    else:
+        harness.env.reset(seed=76)
+        with pytest.raises(RuntimeError, match=message):
+            harness.env.step(DrivingAction.KEEP)
+
     assert harness.env_factory.created[0].close_calls == 1
 
 
@@ -877,7 +1044,8 @@ def test_runtime_context_flows_to_frame_builder_and_hidden_actor_stays_privilege
         harness.env.reset(seed=77)
         observation = suite.observations[0]
         assert tuple(actor.actor_id for actor in observation.visible_actors) == ("visible",)
-        assert observation.scenario_id == "visibility_case"
+        assert not hasattr(observation, "scenario_id")
+        assert not hasattr(observation, "seeds")
         assert observation.road_context.stop_required is True
         assert observation.road_context.distance_to_conflict_point_m == 12.5
         assert observation.road_context.intersection_entry_prohibited is True
@@ -901,7 +1069,8 @@ def test_step_uses_analysis_result_observation_only_shield_and_frame_reward_cont
         context = harness.reward.contexts[-1]
         assert context.previous_frame.observation is suite.observations[0]
         assert context.next_frame.observation is suite.observations[1]
-        assert context.analysis == post
+        assert context.previous_analysis == pre
+        assert context.next_analysis == post
         assert context.executed_action == int(DrivingAction.STOP)
         assert context.decision_interval_s == pytest.approx(0.10)
     finally:
@@ -1306,6 +1475,8 @@ def test_step_builds_trace_from_pre_step_analysis_and_post_step_reward() -> None
         assert info["failed_agent_ids"] == pre.failed_agent_ids
         assert info["analysis_errors"] == pre.errors
         assert trace.reward_components == info["reward_components"]
+        assert trace.required_action == info["required_action"] == DrivingAction.STOP
+        assert trace.intervention_required is info["intervention_required"] is True
         assert trace.episode_rng_seed == 87
         assert trace.metadrive_scenario_index == info["metadrive_scenario_index"]
         assert trace.scenario_parameter_seed == info["scenario_parameter_seed"]
@@ -1315,6 +1486,54 @@ def test_step_builds_trace_from_pre_step_analysis_and_post_step_reward() -> None
         assert harness.env.observation_space.contains(observation)
         assert terminated is False
         assert truncated is False
+    finally:
+        harness.env.close()
+
+
+def test_monitor_shield_requirement_and_control_fail_safe_are_explicit_diagnostics() -> None:
+    class MonitorShield:
+        def filter(
+            self,
+            requested_action: DrivingAction | int,
+            observation: SceneObservation,
+            claims: Sequence[RiskClaim],
+        ) -> ShieldResult:
+            del observation, claims
+            requested = DrivingAction(requested_action)
+            return ShieldResult(
+                requested_action=requested,
+                required_action=DrivingAction.STOP,
+                executed_action=requested,
+                intervention_required=True,
+                intervened=False,
+                reasons=("imminent_ttc",),
+            )
+
+    simulator = FakeSimulator(
+        step_results=(
+            (
+                False,
+                False,
+                {"fail_safe": True, "fail_safe_reason": "ValueError"},
+            ),
+        )
+    )
+    harness = make_env(simulators=(simulator,), shield=MonitorShield())
+    try:
+        harness.env.reset(seed=123)
+        _, _, _, _, info = harness.env.step(DrivingAction.KEEP)
+        trace = info["decision_trace"]
+
+        assert info["required_action"] == DrivingAction.STOP
+        assert info["intervention_required"] is True
+        assert info["shield_intervened"] is False
+        assert info["control_fail_safe"] is True
+        assert info["control_fail_safe_reason"] == "ValueError"
+        assert trace.required_action == DrivingAction.STOP
+        assert trace.intervention_required is True
+        assert trace.shield_intervened is False
+        assert trace.control_fail_safe is True
+        assert trace.control_fail_safe_reason == "ValueError"
     finally:
         harness.env.close()
 

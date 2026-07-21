@@ -20,7 +20,7 @@ from stable_baselines3.common.utils import ConstantSchedule, FloatSchedule
 
 from mad_driving.config.models import AppConfig
 
-RESEARCH_CONTRACT_VERSION: Final = 2
+RESEARCH_CONTRACT_VERSION: Final = 3
 OBSERVATION_SCHEMA_VERSION: Final = 1
 OBSERVATION_SHAPE: Final = (24,)
 OBSERVATION_DTYPE: Final = "float32"

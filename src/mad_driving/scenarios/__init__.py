@@ -6,6 +6,7 @@ from mad_driving.scenarios.runtime import (
     ScenarioRuntime,
     ScenarioState,
     ScenarioStepResult,
+    ScenarioTransition,
 )
 from mad_driving.scenarios.seeding import (
     EnvironmentRole,
@@ -22,4 +23,5 @@ __all__ = [
     "ScenarioRuntime",
     "ScenarioState",
     "ScenarioStepResult",
+    "ScenarioTransition",
 ]

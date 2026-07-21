@@ -109,14 +109,16 @@ selected role's `seed_start` and `seed_count`. Therefore every actual MetaDrive 
 index belongs to the same disjoint role range as the scenario-parameter seed. The old
 single global MetaDrive seed range is not used by training factories after this change.
 
-Formal PPO comparisons use at least five training seeds: `42, 43, 44, 45, 46`. These are
-policy/RNG seeds, not replacements for the disjoint scenario ranges.
+Formal PPO comparisons consist of five independently launched runs using policy/RNG seeds
+`42, 43, 44, 45, 46`; the repository does not provide an automatic multi-seed sweep. These
+seeds do not replace the disjoint scenario ranges.
 
 ### 4.3 Reward and failure settings
 
-`unnecessary_brake_lookahead_steps` is removed. The learning reward uses only the current
-post-step state. "No event occurred later" remains an evaluation metric, not a training
-reward input.
+`unnecessary_brake_lookahead_steps` is removed. Action-validity terms use only the
+pre-step frame and analysis available when the action was selected; transition outcomes
+use the next privileged frame and next analysis. "No event occurred later" remains an
+evaluation metric, not a training reward input.
 
 Internal simulator, snapshot, reward, or observation construction errors are programming
 or infrastructure faults, not MDP terminal states. Phase 4.1 therefore uses fail-fast
@@ -166,8 +168,9 @@ The current path occupant and any replaceable sidecar are never a trust source.
 Replacement, injected history, missing/extra artifacts, duplicate/mismatched descriptors,
 malformed JSONL, or an identity/change race fails the run. Metadata stores the relative
 path, role, worker, record count, artifact schema version, validated file identity, and
-SHA-256. Existing version-2 run metadata without this optional inventory remains loadable
-for resume compatibility.
+SHA-256. Run metadata without this optional inventory remains loadable only when it carries
+the current `research_contract_version=3`; version-2 runs are rejected because corrected
+reward semantics changed the research contract.
 
 ## 6. Scenario Runtime Boundary
 
@@ -186,7 +189,7 @@ class ScenarioRuntime(Protocol):
         self,
         env: DrivingEnvironment,
         state: ScenarioState,
-    ) -> None: ...
+    ) -> ScenarioState: ...
 
     def before_step(
         self,
@@ -194,7 +197,7 @@ class ScenarioRuntime(Protocol):
         state: ScenarioState,
         *,
         step_index: int,
-    ) -> None: ...
+    ) -> ScenarioState: ...
 
     def after_step(
         self,
@@ -203,7 +206,7 @@ class ScenarioRuntime(Protocol):
         *,
         step_index: int,
         raw_info: Mapping[str, object],
-    ) -> ScenarioStepResult: ...
+    ) -> ScenarioTransition: ...
 
     def observation_context(
         self,
@@ -223,8 +226,10 @@ The environment calls these hooks in this order:
 8. call `after_step` for scenario status and labels;
 9. build the next frame, claims, reward, observation, and trace.
 
-The Phase 4.1 default runtime is a deterministic no-op implementation. Scenario-specific
-logic is not embedded directly in `MultiAgentSpeedEnv`.
+`ScenarioTransition` contains both the next immutable `ScenarioState` and the
+`ScenarioStepResult` outcome. Every hook-returned state is validated and threaded into the
+following hook. The Phase 4.1 default runtime is a deterministic no-op implementation.
+Scenario-specific logic is not embedded directly in `MultiAgentSpeedEnv`.
 
 `ScenarioObservationContext` carries scenario ID, stop requirement, occlusion regions,
 distance to conflict point, intersection-entry prohibition, and visible actor IDs. If an
@@ -240,8 +245,6 @@ The current all-purpose snapshot is replaced by three immutable types:
 class SceneObservation:
     step_index: int
     sim_time_s: float
-    scenario_id: str
-    seeds: EpisodeSeeds
     ego: EgoState
     visible_actors: tuple[ActorState, ...]
     occlusion_regions: tuple[OcclusionRegion, ...]
@@ -261,6 +264,8 @@ class PrivilegedWorldState:
 
 @dataclass(frozen=True)
 class SceneFrame:
+    scenario_id: str
+    seeds: EpisodeSeeds
     observation: SceneObservation
     privileged: PrivilegedWorldState
 ```
@@ -268,7 +273,10 @@ class SceneFrame:
 Specialists, Critic, Coordinator, and Safety Shield receive only `SceneObservation`.
 Reward, evaluation, and debug logging may receive `PrivilegedWorldState`. Hidden actors do
 not appear in `visible_actors`; setting `visible=False` while retaining their kinematics in
-the agent-facing structure is forbidden.
+the agent-facing structure is forbidden. Scenario identity and seeds are operational
+`SceneFrame` metadata, not agent-visible features. In `PrivilegedWorldState.all_actors`,
+visible actors retain `visible=True, occluded=False` and hidden actors retain
+`visible=False, occluded=True`.
 
 Current ego and road facts required for action safety remain observable. Collision kind,
 arrival, scenario outcome, and hidden-actor state are privileged. Off-road status is built
@@ -329,25 +337,32 @@ other fields. Existing observation slots retain their positions. Claim count, ta
 explicit validity, and explicit agent-failure slots are deferred to the observation-schema
 follow-up.
 
+Every `DecisionTrace` and step `info` records `required_action` and
+`intervention_required` even in Shield `monitor` mode. Low-level control fallback is
+normalized into project-owned `control_fail_safe` and `control_fail_safe_reason` fields;
+the reason is non-empty exactly when the fail-safe is active.
+
 ## 10. Reward Semantics
 
 The ten existing reward component names remain stable.
 
-Unnecessary braking is penalized in the current post-step state when all conditions hold:
+Unnecessary braking is evaluated from the previous frame and previous specialist analysis,
+the information available when the action was selected, when all conditions hold:
 
 - the executed action is `SLOW`, `PREPARE_STOP`, or `STOP`;
 - Hazard and Rule completed successfully;
 - every Hazard claim is below the configured severity threshold;
 - TTC is missing because there is no hazard actor, or minimum TTC is at least the safe TTC;
-- no current hard rule constraint exists;
-- no collision, off-road event, or Shield intervention occurred.
+- no hard rule constraint existed at the action-selection boundary;
+- no collision, off-road event, or Shield intervention occurred in the transition.
 
 The penalty applies immediately as `-scale * executed_action`. No future observation and no
 safe-brake streak is used.
 
 Collision, arrival, off-road, and scenario outcome inputs come from privileged post-step
-state. Near-miss TTC comes from current specialist claims and is therefore based on data
-available at the decision boundary.
+state. Near-miss TTC comes from the next Nominal/Hazard physical-risk claims. Rule claims
+are excluded because their TTC can represent a regulatory constraint rather than a
+physical near miss.
 
 ## 11. Control and PPO Contracts
 
@@ -364,12 +379,17 @@ Training uses standard Stable-Baselines3 PPO. Updates occur after `n_steps * num
 rollout transitions and are not synchronized to episode boundaries. The specification's
 old prohibition on mid-episode updates is removed; no custom rollout collector is added.
 
-With `num_envs=1`, both train and validation use `DummyVecEnv`; the training engine is
-closed before one deferred validation pass so MetaDrive's process-global engine is never
-shared concurrently and no `SubprocVecEnv` is constructed. With `num_envs>1`, train uses
-`SubprocVecEnv` while the single validation environment remains a parent-process
-`DummyVecEnv`, allowing periodic evaluation without placing two MetaDrive engines in one
-process.
+With `num_envs=1`, train uses a parent-process `DummyVecEnv` and the single validation
+environment uses a one-worker `SubprocVecEnv`. With `num_envs>1`, train uses
+`SubprocVecEnv` while validation uses a parent-process `DummyVecEnv`. This complementary
+topology permits periodic evaluation during learning while placing at most one MetaDrive
+engine in each process.
+
+Immediately before every scheduled evaluation, the validation VecEnv is seeded with the
+root `AppConfig.seed`. The evaluation reset consumes that explicit seed, so every checkpoint
+comparison uses the exact same validation episode-seed sequence. Root seed, scenario splits,
+and evaluation episode count remain resume-incompatible configuration fields, so continuation
+runs use the same comparison sequence even when the allowed PPO training seed changes.
 
 ## 12. Internal Errors and Gymnasium Semantics
 
@@ -414,9 +434,9 @@ metadata creation. Once stored, historical parent checkpoint and run-directory p
 opaque non-empty provenance strings: chained resume loading does not reinterpret Windows
 paths with POSIX rules or POSIX paths with Windows rules.
 
-Every run records `research_contract_version=2` and `observation_schema_version=1`.
-Pre-hardening checkpoints have no compatible research-contract metadata and are rejected by
-the project resume command, even though raw SB3 could load their unchanged spaces.
+Every run records `research_contract_version=3` and `observation_schema_version=1`.
+Checkpoints with any older research-contract version are rejected by the project resume
+command, even though raw SB3 could load their unchanged spaces.
 
 After loading, `policy`, `learning_rate`, `n_steps`, `batch_size`, `n_epochs`, `gamma`,
 `gae_lambda`, `clip_range`, `ent_coef`, `vf_coef`, `max_grad_norm`, observation shape, and

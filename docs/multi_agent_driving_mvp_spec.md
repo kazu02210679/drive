@@ -114,7 +114,7 @@ MetaDrive Simulation
 SceneSnapshotBuilder
         │
         ▼
-SceneFrame = SceneObservation + PrivilegedWorldState
+SceneFrame = scenario metadata + SceneObservation + PrivilegedWorldState
         │
         ├───────────────┬────────────────┬───────────────┐
         ▼               ▼                ▼               ▼
@@ -200,8 +200,6 @@ class EgoState:
 class SceneObservation:
     step_index: int
     sim_time_s: float
-    scenario_id: str
-    seeds: EpisodeSeeds
     ego: EgoState
     visible_actors: tuple[ActorState, ...]
     occlusion_regions: tuple[OcclusionRegion, ...]
@@ -225,11 +223,13 @@ class PrivilegedWorldState:
 
 @dataclass(frozen=True)
 class SceneFrame:
+    scenario_id: str
+    seeds: EpisodeSeeds
     observation: SceneObservation
     privileged: PrivilegedWorldState
 ```
 
-Nominal、Hazard、Rule、Critic、Coordinator、Safety Shieldが受け取れるのは`SceneObservation`だけとする。遮蔽されたActorは`visible_actors`へ入れず、`visible=False`のActorを運動学情報付きでAgent可視構造へ残してはならない。`PrivilegedWorldState`はReward、評価、debugログだけが使用できる。
+Nominal、Hazard、Rule、Critic、Coordinator、Safety Shieldが受け取れるのは`SceneObservation`だけとする。`scenario_id`と`EpisodeSeeds`はAgent入力ではなく`SceneFrame`の運用metadataとする。遮蔽されたActorは`visible_actors`へ入れず、`visible=False`のActorを運動学情報付きでAgent可視構造へ残してはならない。`PrivilegedWorldState.all_actors`では可視Actorを`visible=True, occluded=False`、非可視Actorを`visible=False, occluded=True`としてtruth上の可視性を保持する。`PrivilegedWorldState`はReward、評価、debugログだけが使用できる。
 
 ### 5.4 RiskClaim
 
@@ -281,10 +281,14 @@ class CriticReview:
 class DecisionTrace:
     step_index: int
     raw_action: int
+    required_action: int
     executed_action: int
     target_speed_mps: float
+    intervention_required: bool
     shield_intervened: bool
     shield_reasons: tuple[str, ...]
+    control_fail_safe: bool
+    control_fail_safe_reason: str | None
     claims: tuple[RiskClaim, ...]
     review: CriticReview
     reward_components: dict[str, float]
@@ -500,7 +504,7 @@ seed: 42
 
 Smoke trainingは`5_000` timesteps、標準trainingは`500_000` timestepsを初期値とする。
 
-正式比較ではpolicy/RNGのtrain seedとして`42, 43, 44, 45, 46`の5 seedを使用する。PPOは標準Stable-Baselines3実装を使い、`n_steps * num_envs`のrollout境界で更新する。エピソード途中にrollout境界が来ることを禁止せず、独自collectorを追加しない。
+正式比較では`training.seed`をpolicy/RNG seed `42, 43, 44, 45, 46`へ設定した5本の独立runを使用し、validation episode列を決めるAppConfigのroot `seed`は固定する。自動multi-seed sweepは要件としない。PPOは標準Stable-Baselines3実装を使い、`n_steps * num_envs`のrollout境界で更新する。エピソード途中にrollout境界が来ることを禁止せず、独自collectorを追加しない。
 
 複数環境並列化は設定で切り替える。Windowsで問題がある場合に単一環境へフォールバックできること。
 
@@ -563,6 +567,8 @@ class SafetyShield:
 
 学習は設定可能とし、初期値は`enforce`＋介入ペナルティとする。比較実験では、意思決定性能比較のB1・B2・Proposedをすべて`monitor`にそろえ、実行可能システム比較の全方式を`enforce`にそろえる。`Proposed without Shield`は主baselineではなくablationとして扱う。
 
+`monitor`でも`required_action`と`intervention_required`を`info`と`DecisionTrace`へ必ず記録する。低レベル制御がfail-safeへ入った場合は`control_fail_safe`と非空の`control_fail_safe_reason`を同じ2箇所へ記録し、通常時はfalse/`None`とする。
+
 ---
 
 ## 10. 環境Wrapper
@@ -584,7 +590,7 @@ class SafetyShield:
 2. Safety ShieldでActionをfilter
 3. 低レベルPolicyへtarget speedを設定
 4. `ScenarioRuntime.before_step`を呼び、MetaDriveを1 decision step進め、authoritative decision intervalを再検証してから`ScenarioRuntime.after_step`を呼ぶ
-5. `after_step`とobservation context取得後にdecision intervalを再検証し、直後に新SceneFrameを作成する。不一致時はsnapshot、Agent分析、Reward、Trace、next stateへ進まずcloseして元の例外を送出する
+5. `after_step`が返す`ScenarioTransition(state, outcome)`のstateを次のlifecycleへ引き継ぐ。observation context取得後にdecision intervalを再検証し、直後に新SceneFrameを作成する。不一致時はsnapshot、Agent分析、Reward、Trace、next stateへ進まずcloseして元の例外を送出する
 6. Agent可視ObservationからAgent分析とCriticReviewを実行
 7. rewardを計算
 8. terminated/truncatedを判定
@@ -641,7 +647,7 @@ reward:
 
 ### Near-miss
 
-TTCに応じた連続ペナルティとする。閾値を跨いだ瞬間だけの不連続な報酬にしない。
+遷移後のnext Agent分析に含まれるNominal/Hazardの物理リスクTTCに応じた連続ペナルティとする。Rule Claimの規則上のTTCはnear-miss集計へ混ぜない。閾値を跨いだ瞬間だけの不連続な報酬にしない。
 
 ### Unnecessary brake
 
@@ -651,9 +657,10 @@ TTCに応じた連続ペナルティとする。閾値を跨いだ瞬間だけ�
 - HazardAgentとRuleAgentが失敗せず、両AgentのClaimが存在する
 - 全Hazard Claimのseverityが設定閾値未満
 - TTCが欠損して危険Actorがいない、または最小TTCが安全閾値以上
-- 現在のRule制約、衝突、路外、Shield介入がない
+- Action選択時のRule制約がない
+- 遷移後の衝突、路外、Shield介入がない
 
-判定は現在のpost-step状態だけを使い、`-scale * executed_action`を即時に適用する。将来Observation、lookahead、safe-brake streakを使用しない。「後から危険eventが発生しなかった」は評価metricであり、学習Reward入力ではない。
+Actionの妥当性はAction選択時のprevious SceneFrameとprevious Agent分析で判定し、`-scale * executed_action`を即時に適用する。遷移後の衝突、路外、Shield介入は安全側のActionを誤罰しないための抑止条件としてだけ使う。将来lookahead、safe-brake streakを使用しない。「後から危険eventが発生しなかった」は評価metricであり、学習Reward入力ではない。
 
 ### 終了条件
 
@@ -677,7 +684,8 @@ Phase 4.1ではSimulator非依存の`ScenarioRuntime` lifecycleとrole別seed al
 - seedで完全再現可能
 - `episode_rng_seed`、`metadrive_scenario_index`、`scenario_parameter_seed`を別identityとしてreset infoとDecisionTraceへ記録する。学習ではrole/worker別JSONLをexclusive createし、wrapper lifetime中は同じdescriptorだけでappend/fsyncする。headerのplatform file identityとpathのidentityを各append前後に照合する。VecEnv close後は各fileを1回だけopen/readし、同一byte列でstrict JSONL parse、件数、SHA-256を確定する。置換、history injection、parse/hash raceはfail closedとし、`run_metadata.json`の`episode_seed_artifacts`にfile identityも記録する
 - `train=[0, 10000)`、`validation=[10000, 11000)`、`test=[20000, 21000)`を使い、空rangeと重複rangeを拒否する
-- train workerはroleとworker indexを明示する。`num_envs=1`ではtrain/validationとも`DummyVecEnv`を使い、train engine close後に1回のdeferred validationを行ってsubprocessを生成しない。`num_envs>1`ではtrainだけ`SubprocVecEnv`を使い、validation worker 0はparent processの単一`DummyVecEnv`でperiodic evaluationとbest-checkpoint選択に使う
+- train workerはroleとworker indexを明示する。`num_envs=1`ではtrainをparent processの`DummyVecEnv`、validationを1 workerの`SubprocVecEnv`にする。`num_envs>1`ではtrainを`SubprocVecEnv`、validation worker 0をparent processの`DummyVecEnv`にする。この相補構成で学習中のperiodic evaluationとbest-checkpoint選択を必ず行う
+- 各scheduled evaluation直前にvalidation VecEnvをAppConfigのroot `seed`で再seedし、すべてのcheckpoint比較とresumeで同一のvalidation episode-seed列を使う
 - test rangeはPhase 6の最終比較専用とし、学習、checkpoint選択、Curriculum進行に使用しない
 - Actor生成条件をJSONLへ記録
 - difficulty levelを持つ
@@ -827,7 +835,7 @@ runs/<run_id>/
    └─ episode_<id>.gif
 ```
 
-新規学習は必須の`--run-dir`で、存在しない、または空のrun destinationを明示した場合だけ受け付ける。`training.run_root`へのgeneric fallback、非空directoryの再利用、overwrite optionは設けない。Resumeもsource runとは別の新しい空destinationへ書き、source checkpointのSHA-256、source hostで正規化したpath、親run/config、current configとの差分、開始`num_timesteps`、Observation/Action schemaを記録する。current resume sourceはcurrent hostでcanonicalize/dereferenceするが、既存metadata内のhistorical parent pathはcross-host provenance文字列として保持し、current hostのPath flavorで再解釈しない。全runは`research_contract_version=2`と`observation_schema_version=1`を持つ。旧contractのcheckpointを正式比較へ混在させない。
+新規学習は必須の`--run-dir`で、存在しない、または空のrun destinationを明示した場合だけ受け付ける。`training.run_root`へのgeneric fallback、非空directoryの再利用、overwrite optionは設けない。Resumeもsource runとは別の新しい空destinationへ書き、source checkpointのSHA-256、source hostで正規化したpath、親run/config、current configとの差分、開始`num_timesteps`、Observation/Action schemaを記録する。current resume sourceはcurrent hostでcanonicalize/dereferenceするが、既存metadata内のhistorical parent pathはcross-host provenance文字列として保持し、current hostのPath flavorで再解釈しない。全runは`research_contract_version=3`と`observation_schema_version=1`を持つ。旧contractのcheckpointを正式比較へ混在させない。
 
 ### GIF Overlay
 
@@ -858,12 +866,12 @@ python -m mad_driving.cli.smoke --config configs/base.yaml
 
 # 学習
 python -m mad_driving.cli.train \
-  --config configs/train.yaml \
+  --config configs/base.yaml \
   --run-dir runs/phase4_seed42_<unique_run_id>
 
 # 別runへresume
 python -m mad_driving.cli.train \
-  --config configs/train.yaml \
+  --config configs/base.yaml \
   --run-dir runs/<new_run_id> \
   --resume-from runs/<parent_run_id>/checkpoints/final_model.zip
 
@@ -893,7 +901,6 @@ python -m mad_driving.cli.compare \
 ```text
 configs/
 ├─ base.yaml
-├─ train.yaml
 ├─ eval.yaml
 ├─ compare.yaml
 ├─ agents.yaml
@@ -1099,8 +1106,8 @@ multi-agent-driving/
 
 - 3専門Agentの1〜3 Claimと1 Critic、24-slot保守集約
 - role別seed、`ScenarioRuntime`、Agent可視/privileged state分離
-- current-state Reward、内部errorのfail-fast、標準PPO rollout更新
-- timing/座標契約、fresh destination、resume provenance version 2
+- action-selection/transition境界を分けたReward、内部errorのfail-fast、標準PPO rollout更新
+- timing/座標契約、fresh destination、resume provenance version 3
 - explicit validity featureは未実装のまま24次元を維持
 
 ### Phase 5: シナリオ
