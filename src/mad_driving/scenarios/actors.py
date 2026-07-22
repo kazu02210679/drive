@@ -176,6 +176,7 @@ class ScenarioActorState:
     velocity_xy_mps: tuple[float, float]
     acceleration_xy_mps2: tuple[float, float]
     heading_rad: float
+    lane_index: LaneIndex | None = None
 
     def __post_init__(self) -> None:
         require_non_empty("actor_id", self.actor_id)
@@ -185,3 +186,5 @@ class ScenarioActorState:
         require_finite("heading_rad", self.heading_rad)
         if not -pi <= self.heading_rad < pi:
             raise ValueError("heading_rad must be normalized to [-pi, pi)")
+        if self.lane_index is not None:
+            _validate_lane_index(self.lane_index)

@@ -16,6 +16,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 from mad_driving.config.models import AppConfig
 from mad_driving.scenarios import EnvironmentRole
 from mad_driving.training import run_training
+from mad_driving.training.callbacks import CurriculumEvalCallback
 from mad_driving.training.curriculum import CurriculumState
 from mad_driving.training.metadata import RESEARCH_CONTRACT_VERSION, resolve_resume_source
 
@@ -120,6 +121,35 @@ class SeedAwareTinyEnv(gym.Env[NDArray[np.float32], int]):
             "scenario_success": True,
             "collision_occurred": False,
         }
+
+
+class ContinuationTinyEnv(TinyDeterministicEnv):
+    """Tiny environment whose active level follows automatic curriculum from level zero."""
+
+    def __init__(self, *, role: EnvironmentRole, worker_index: int) -> None:
+        super().__init__(role=role, worker_index=worker_index)
+        self.difficulty_level = 0
+        self.pending_difficulty_level = 0
+
+
+class RecordingCurriculumEvalCallback(CurriculumEvalCallback):
+    """Record actual scheduled evaluation timesteps and resulting states."""
+
+    def __init__(
+        self,
+        *args: Any,
+        evaluation_events: list[tuple[int, CurriculumState]],
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self._evaluation_events = evaluation_events
+
+    def _on_step(self) -> bool:
+        previous_evaluations = self.controller.state.evaluations
+        continue_training = super()._on_step()
+        if self.controller.state.evaluations != previous_evaluations:
+            self._evaluation_events.append((self.num_timesteps, self.controller.state))
+        return continue_training
 
 
 class CapturingSubprocVecEnv(SubprocVecEnv):
@@ -237,9 +267,9 @@ def test_every_published_checkpoint_restores_its_exact_automatic_curriculum_stat
     )
 
     expected = {
-        run_dir / "checkpoints" / "ppo_checkpoint_8_steps.zip": CurriculumState(0, 0, 0),
-        run_dir / "checkpoints" / "ppo_checkpoint_16_steps.zip": CurriculumState(1, 0, 1),
-        run_dir / "checkpoints" / "ppo_checkpoint_24_steps.zip": CurriculumState(2, 0, 2),
+        run_dir / "checkpoints" / "ppo_checkpoint_8_steps.zip": CurriculumState(1, 0, 1),
+        run_dir / "checkpoints" / "ppo_checkpoint_16_steps.zip": CurriculumState(2, 0, 2),
+        run_dir / "checkpoints" / "ppo_checkpoint_24_steps.zip": CurriculumState(3, 0, 3),
         result.best_checkpoint: CurriculumState(1, 0, 1),
         result.final_checkpoint: CurriculumState(3, 0, 3),
     }
@@ -247,6 +277,121 @@ def test_every_published_checkpoint_restores_its_exact_automatic_curriculum_stat
         assert checkpoint.is_file()
         assert checkpoint_curriculum_sidecar(checkpoint).is_file()
         assert resolve_resume_source(checkpoint, config).curriculum_state == state
+
+
+@pytest.mark.integration
+def test_periodic_checkpoint_resume_matches_absolute_non_aligned_continuation(
+    tmp_path: Path,
+) -> None:
+    base = make_real_ppo_config()
+    config = base.model_copy(
+        update={
+            "scenarios": base.scenarios.model_copy(
+                update={
+                    "selection": "auto",
+                    "curriculum": base.scenarios.curriculum.model_copy(
+                        update={
+                            "mode": "automatic",
+                            "initial_level": 0,
+                            "consecutive_evaluations": 1,
+                            "success_rate_threshold": 1.0,
+                            "collision_rate_threshold": 0.0,
+                        }
+                    ),
+                }
+            ),
+            "training": base.training.model_copy(
+                update={
+                    "n_steps": 2,
+                    "batch_size": 4,
+                    "n_epochs": 1,
+                    "num_envs": 2,
+                    "total_timesteps": 24,
+                    "checkpoint_interval_steps": 11,
+                    "eval_interval_steps": 7,
+                    "eval_episodes": 1,
+                }
+            ),
+        }
+    )
+
+    def environment_factory(
+        received_config: AppConfig,
+        *,
+        role: EnvironmentRole,
+        worker_index: int,
+    ) -> ContinuationTinyEnv:
+        assert received_config.training.num_envs == 2
+        return ContinuationTinyEnv(role=role, worker_index=worker_index)
+
+    uninterrupted_events: list[tuple[int, CurriculumState]] = []
+
+    def uninterrupted_eval_factory(**kwargs: Any) -> RecordingCurriculumEvalCallback:
+        return RecordingCurriculumEvalCallback(
+            **kwargs,
+            evaluation_events=uninterrupted_events,
+        )
+
+    uninterrupted_dir = tmp_path / "absolute-uninterrupted"
+    uninterrupted = run_training(
+        config,
+        smoke=False,
+        run_dir=uninterrupted_dir,
+        env_factory=environment_factory,
+        eval_callback_factory=uninterrupted_eval_factory,
+        subproc_vec_env_factory=DummyVecEnv,
+    )
+    periodic_checkpoint = uninterrupted_dir / "checkpoints" / "ppo_checkpoint_12_steps.zip"
+    assert periodic_checkpoint.is_file()
+    assert uninterrupted_events == [
+        (8, CurriculumState(1, 0, 1)),
+        (14, CurriculumState(2, 0, 2)),
+        (22, CurriculumState(3, 0, 3)),
+    ]
+    assert resolve_resume_source(periodic_checkpoint, config).curriculum_state == CurriculumState(
+        1, 0, 1
+    )
+
+    resumed_events: list[tuple[int, CurriculumState]] = []
+
+    def resumed_eval_factory(**kwargs: Any) -> RecordingCurriculumEvalCallback:
+        return RecordingCurriculumEvalCallback(
+            **kwargs,
+            evaluation_events=resumed_events,
+        )
+
+    resumed_config = config.model_copy(
+        update={"training": config.training.model_copy(update={"total_timesteps": 12})}
+    )
+    resumed_dir = tmp_path / "absolute-resumed"
+    resumed = run_training(
+        resumed_config,
+        smoke=False,
+        run_dir=resumed_dir,
+        resume_from=periodic_checkpoint,
+        env_factory=environment_factory,
+        eval_callback_factory=resumed_eval_factory,
+        subproc_vec_env_factory=DummyVecEnv,
+    )
+
+    assert resumed_events == uninterrupted_events[1:]
+    assert resolve_resume_source(resumed.final_checkpoint, resumed_config).curriculum_state == (
+        resolve_resume_source(uninterrupted.final_checkpoint, config).curriculum_state
+    )
+    uninterrupted_periodic_steps = sorted(
+        int(path.stem.removeprefix("ppo_checkpoint_").removesuffix("_steps"))
+        for path in (uninterrupted_dir / "checkpoints").glob("ppo_checkpoint_*_steps.zip")
+    )
+    resumed_periodic_steps = sorted(
+        int(path.stem.removeprefix("ppo_checkpoint_").removesuffix("_steps"))
+        for path in (resumed_dir / "checkpoints").glob("ppo_checkpoint_*_steps.zip")
+    )
+    assert uninterrupted_periodic_steps == [12, 22]
+    assert resumed_periodic_steps == uninterrupted_periodic_steps[1:]
+    assert resolve_resume_source(
+        resumed_dir / "checkpoints" / "ppo_checkpoint_22_steps.zip",
+        resumed_config,
+    ).curriculum_state == CurriculumState(3, 0, 3)
 
 
 def episode_seed_records(run_dir: Path, role: EnvironmentRole) -> list[int]:

@@ -521,10 +521,6 @@ def _build_eval_env(
     )
 
 
-def _scaled_frequency(interval_steps: int, num_envs: int) -> int:
-    return max(interval_steps // num_envs, 1)
-
-
 def _initial_curriculum_state(config: AppConfig) -> CurriculumState:
     curriculum = config.scenarios.curriculum
     level = curriculum.fixed_level if curriculum.mode == "fixed" else curriculum.initial_level
@@ -771,10 +767,7 @@ def run_training(
         staged_best_checkpoint = staging_dir / best_checkpoint.name
         checkpoint_callback = checkpoint_callback_factory(
             controller=curriculum_controller,
-            save_freq=_scaled_frequency(
-                config.training.checkpoint_interval_steps,
-                config.training.num_envs,
-            ),
+            save_freq=config.training.checkpoint_interval_steps,
             save_path=str(staging_dir),
             name_prefix="ppo_checkpoint",
         )
@@ -784,16 +777,17 @@ def run_training(
             controller=curriculum_controller,
             curriculum_state_path=curriculum_state_path,
             best_model_save_path=str(staging_dir),
-            eval_freq=_scaled_frequency(
-                min(config.training.eval_interval_steps, requested_timesteps),
-                config.training.num_envs,
+            eval_freq=(
+                min(config.training.eval_interval_steps, requested_timesteps)
+                if smoke
+                else config.training.eval_interval_steps
             ),
             n_eval_episodes=config.training.eval_episodes,
             deterministic=True,
             render=False,
         )
         reward_callback = reward_callback_factory()
-        callbacks = [reward_callback, checkpoint_callback, eval_callback]
+        callbacks = [reward_callback, eval_callback, checkpoint_callback]
         model.learn(
             total_timesteps=requested_timesteps,
             callback=callbacks,

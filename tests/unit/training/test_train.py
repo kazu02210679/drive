@@ -204,10 +204,15 @@ class FakeCheckpointCallback:
 
     def on_fake_training(self, model: "FakePPO", produced_timesteps: int) -> None:
         train_env = model.init_kwargs["env"]
-        callback_calls = math.ceil(produced_timesteps / train_env.num_envs)
         start_timesteps = model.num_timesteps - produced_timesteps
-        for call in range(self.save_freq, callback_calls + 1, self.save_freq):
-            checkpoint_timesteps = start_timesteps + call * train_env.num_envs
+        first_deadline = (start_timesteps // self.save_freq + 1) * self.save_freq
+        checkpoint_timesteps_values = {
+            math.ceil(deadline / train_env.num_envs) * train_env.num_envs
+            for deadline in range(first_deadline, model.num_timesteps + 1, self.save_freq)
+        }
+        for checkpoint_timesteps in sorted(checkpoint_timesteps_values):
+            if checkpoint_timesteps > model.num_timesteps:
+                continue
             checkpoint = (
                 self.save_path / f"{self.name_prefix}_{checkpoint_timesteps}_steps.zip"
             )
@@ -241,8 +246,9 @@ class FakeEvalCallback:
         self.training_env_closed_during_evaluation.append(train_env.closed)
         for environment in self.eval_env.envs:
             environment.reset(seed=self.validation_episode_seed)
-        callback_calls = math.ceil(produced_timesteps / train_env.num_envs)
-        if callback_calls >= self.eval_freq:
+        start_timesteps = model.num_timesteps - produced_timesteps
+        next_deadline = (start_timesteps // self.eval_freq + 1) * self.eval_freq
+        if next_deadline <= model.num_timesteps:
             checkpoint = self.best_model_save_path / "best_model.zip"
             model.write_checkpoint(checkpoint, "best")
             write_checkpoint_curriculum_state(self.controller.state, checkpoint)
@@ -1488,7 +1494,7 @@ def test_malformed_parent_descriptor_collection_blocks_publication(
     assert not run_dir.exists()
 
 
-def test_callback_frequencies_are_scaled_by_num_envs(tmp_path: Path) -> None:
+def test_callback_frequencies_are_absolute_model_timesteps(tmp_path: Path) -> None:
     checkpoint = CallbackFactory()
     evaluation = EvalCallbackFactory()
     config = make_config(
@@ -1500,13 +1506,14 @@ def test_callback_frequencies_are_scaled_by_num_envs(tmp_path: Path) -> None:
     run_with_fakes(
         config,
         tmp_path / "scaled",
+        smoke=False,
         subproc_factory=VecFactory(),
         checkpoint_factory=checkpoint,
         eval_factory=evaluation,
     )
 
-    assert checkpoint.calls[0]["save_freq"] == 2_500
-    assert evaluation.calls[0]["eval_freq"] == 1_250
+    assert checkpoint.calls[0]["save_freq"] == 10_003
+    assert evaluation.calls[0]["eval_freq"] == 8_003
 
 
 def test_callback_frequencies_have_a_minimum_of_one(tmp_path: Path) -> None:

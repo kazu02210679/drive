@@ -44,6 +44,16 @@ class FloatRangeConfig(StrictTypedFrozenModel):
         return self
 
 
+class PositiveFloatRangeConfig(FloatRangeConfig):
+    """One finite range whose complete sampling domain is strictly positive."""
+
+    @model_validator(mode="after")
+    def validate_positive_minimum(self) -> Self:
+        if self.minimum <= 0.0:
+            raise ValueError("minimum must be strictly positive")
+        return self
+
+
 class CurriculumConfig(StrictTypedFrozenModel):
     """Validated curriculum settings for Phase 5 scenarios."""
 
@@ -58,38 +68,74 @@ class CurriculumConfig(StrictTypedFrozenModel):
 class LeadBrakeScenarioConfig(StrictTypedFrozenModel):
     """Validated parameter ranges for the Lead Brake scenario."""
 
-    initial_gap_m: FloatRangeConfig = FloatRangeConfig(minimum=35.0, maximum=55.0)
-    speed_fraction: FloatRangeConfig = FloatRangeConfig(minimum=0.80, maximum=1.00)
-    trigger_s: FloatRangeConfig = FloatRangeConfig(minimum=1.0, maximum=3.0)
-    mild_deceleration_mps2: FloatRangeConfig = FloatRangeConfig(minimum=2.0, maximum=4.0)
-    severe_deceleration_mps2: FloatRangeConfig = FloatRangeConfig(minimum=4.0, maximum=8.0)
+    initial_gap_m: PositiveFloatRangeConfig = PositiveFloatRangeConfig(
+        minimum=35.0, maximum=55.0
+    )
+    speed_fraction: PositiveFloatRangeConfig = PositiveFloatRangeConfig(
+        minimum=0.80, maximum=1.00
+    )
+    trigger_s: PositiveFloatRangeConfig = PositiveFloatRangeConfig(
+        minimum=1.0, maximum=3.0
+    )
+    mild_deceleration_mps2: PositiveFloatRangeConfig = PositiveFloatRangeConfig(
+        minimum=2.0, maximum=4.0
+    )
+    severe_deceleration_mps2: PositiveFloatRangeConfig = PositiveFloatRangeConfig(
+        minimum=4.0, maximum=8.0
+    )
     survival_s: FiniteFloat = Field(default=4.0, gt=0.0)
 
 
 class CutInScenarioConfig(StrictTypedFrozenModel):
     """Validated parameter ranges for the Cut-in scenario."""
 
-    initial_gap_m: FloatRangeConfig = FloatRangeConfig(minimum=20.0, maximum=40.0)
-    trigger_s: FloatRangeConfig = FloatRangeConfig(minimum=1.0, maximum=3.0)
-    merge_duration_s: FloatRangeConfig = FloatRangeConfig(minimum=1.5, maximum=3.0)
-    speed_fraction: FloatRangeConfig = FloatRangeConfig(minimum=0.75, maximum=1.05)
+    initial_gap_m: PositiveFloatRangeConfig = PositiveFloatRangeConfig(
+        minimum=20.0, maximum=40.0
+    )
+    trigger_s: PositiveFloatRangeConfig = PositiveFloatRangeConfig(
+        minimum=1.0, maximum=3.0
+    )
+    merge_duration_s: PositiveFloatRangeConfig = PositiveFloatRangeConfig(
+        minimum=1.5, maximum=3.0
+    )
+    speed_fraction: PositiveFloatRangeConfig = PositiveFloatRangeConfig(
+        minimum=0.75, maximum=1.05
+    )
     survival_s: FiniteFloat = Field(default=3.0, gt=0.0)
 
 
 class OccludedCrossingScenarioConfig(StrictTypedFrozenModel):
     """Validated parameter ranges for the Level-3 cyclist crossing scenario."""
 
-    conflict_distance_m: FloatRangeConfig = FloatRangeConfig(minimum=20.0, maximum=40.0)
-    crossing_start_offset_m: FloatRangeConfig = FloatRangeConfig(minimum=6.0, maximum=12.0)
-    crossing_speed_mps: FloatRangeConfig = FloatRangeConfig(minimum=2.0, maximum=6.0)
-    trigger_s: FloatRangeConfig = FloatRangeConfig(minimum=1.0, maximum=3.0)
+    conflict_distance_m: PositiveFloatRangeConfig = PositiveFloatRangeConfig(
+        minimum=20.0, maximum=40.0
+    )
+    crossing_start_offset_m: PositiveFloatRangeConfig = PositiveFloatRangeConfig(
+        minimum=6.0, maximum=12.0
+    )
+    crossing_speed_mps: PositiveFloatRangeConfig = PositiveFloatRangeConfig(
+        minimum=2.0, maximum=6.0
+    )
+    trigger_s: PositiveFloatRangeConfig = PositiveFloatRangeConfig(
+        minimum=1.0, maximum=3.0
+    )
     survival_s: FiniteFloat = Field(default=2.0, gt=0.0)
     occluder_lane_edge_offset_m: FiniteFloat = Field(default=0.5, ge=0.5)
     reveal_lateral_m: FiniteFloat = Field(default=3.0, gt=0.0)
-    secondary_lead_gap_m: FloatRangeConfig = FloatRangeConfig(minimum=35.0, maximum=55.0)
-    secondary_lead_speed_fraction: FloatRangeConfig = FloatRangeConfig(
+    secondary_lead_gap_m: PositiveFloatRangeConfig = PositiveFloatRangeConfig(
+        minimum=35.0, maximum=55.0
+    )
+    secondary_lead_speed_fraction: PositiveFloatRangeConfig = PositiveFloatRangeConfig(
         minimum=0.80, maximum=1.00
     )
+
+    @model_validator(mode="after")
+    def validate_hidden_at_reset(self) -> Self:
+        if self.crossing_start_offset_m.minimum <= self.reveal_lateral_m:
+            raise ValueError(
+                "crossing_start_offset_m.minimum must exceed reveal_lateral_m"
+            )
+        return self
 
 
 class ScenarioSplitsConfig(StrictTypedFrozenModel):

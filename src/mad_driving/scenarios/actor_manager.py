@@ -5,10 +5,12 @@ from __future__ import annotations
 from math import cos, sin
 from typing import Any
 
+from metadrive.component.static_object.traffic_object import (  # type: ignore[import-untyped]
+    TrafficBarrier,
+)
 from metadrive.component.traffic_participants.cyclist import Cyclist  # type: ignore[import-untyped]
 from metadrive.component.vehicle.vehicle_type import (  # type: ignore[import-untyped]
     DefaultVehicle,
-    StaticDefaultVehicle,
 )
 from metadrive.manager.base_manager import BaseManager  # type: ignore[import-untyped]
 from metadrive.utils.utils import get_object_from_node  # type: ignore[import-untyped]
@@ -25,6 +27,41 @@ from mad_driving.scenarios.actors import (
 )
 
 
+class ScenarioOccluder(TrafficBarrier):  # type: ignore[misc]
+    """Supported MetaDrive traffic object with scenario-configured dimensions."""
+
+    def __init__(
+        self,
+        position: tuple[float, float],
+        heading_theta: float,
+        *,
+        length_m: float,
+        width_m: float,
+        lane: Any | None = None,
+        static: bool = True,
+        random_seed: int | None = None,
+        name: str | None = None,
+    ) -> None:
+        self._scenario_length_m = length_m
+        self._scenario_width_m = width_m
+        super().__init__(
+            position,
+            heading_theta,
+            lane=lane,
+            static=static,
+            random_seed=random_seed,
+            name=name,
+        )
+
+    @property
+    def LENGTH(self) -> float:
+        return self._scenario_length_m
+
+    @property
+    def WIDTH(self) -> float:
+        return self._scenario_width_m
+
+
 class ScenarioActorManager(BaseManager):  # type: ignore[misc]
     """Own, command, refresh, and clean simulator objects for scenario runtimes."""
 
@@ -34,6 +71,8 @@ class ScenarioActorManager(BaseManager):  # type: ignore[misc]
         self._engine_override = engine
         self._pending_commands: dict[str, ScenarioActorCommand] = {}
         self._states: dict[str, ScenarioActorState] = {}
+        self._pre_step_velocities: dict[str, tuple[float, float]] = {}
+        self._lane_reference_indices: dict[str, tuple[str, str, int]] = {}
         if engine is None:
             super().__init__()
         else:
@@ -57,7 +96,9 @@ class ScenarioActorManager(BaseManager):  # type: ignore[misc]
                 "spawn_lateral": spawn.lateral_m,
             },
         )
+        self._lane_reference_indices[actor_id] = spawn.lane_index
         self._set_speed(actor_id, spawn.speed_mps)
+        self._refresh_state(actor_id)
         return actor_id
 
     def spawn_crossing_actor(self, spawn: KinematicActorSpawn) -> str:
@@ -75,21 +116,21 @@ class ScenarioActorManager(BaseManager):  # type: ignore[misc]
         setter = getattr(actor, "set_velocity", None)
         if callable(setter):
             setter(spawn.velocity_xy_mps)
+        self._refresh_state(actor_id)
         return actor_id
 
     def spawn_occluder(self, spawn: StaticOccluderSpawn) -> str:
-        """Spawn and own one static vehicle-shaped occluder."""
+        """Spawn and own one static traffic-object occluder."""
 
         actor_id = self._spawn(
             spawn.actor_id,
-            StaticDefaultVehicle,
-            vehicle_config={},
+            ScenarioOccluder,
             position=spawn.position_xy_m,
-            heading=spawn.heading_rad,
+            heading_theta=spawn.heading_rad,
+            length_m=spawn.length_m,
+            width_m=spawn.width_m,
+            static=True,
         )
-        setter = getattr(self._require_actor(actor_id), "set_static", None)
-        if callable(setter):
-            setter(True)
         return actor_id
 
     def command_actor(self, actor_id: str, command: ScenarioActorCommand) -> None:
@@ -104,7 +145,6 @@ class ScenarioActorManager(BaseManager):  # type: ignore[misc]
         """Return the last refreshed finite state for one owned actor."""
 
         self._require_actor(actor_id)
-        self._refresh_state(actor_id)
         return self._states[actor_id]
 
     def actor_ids(self) -> tuple[str, ...]:
@@ -135,6 +175,10 @@ class ScenarioActorManager(BaseManager):  # type: ignore[misc]
         """Apply queued commands immediately before simulator advancement."""
 
         del args, kwargs
+        self._pre_step_velocities = {
+            actor_id: self._velocity_xy(self._require_actor(actor_id))
+            for actor_id in self.actor_ids()
+        }
         for actor_id, command in tuple(self._pending_commands.items()):
             actor = self._require_actor(actor_id)
             if isinstance(command, ActorCommand):
@@ -153,6 +197,7 @@ class ScenarioActorManager(BaseManager):  # type: ignore[misc]
             elif isinstance(command, LanePoseCommand):
                 lane = self.engine.current_map.road_network.get_lane(command.lane_index)
                 actor.set_position(lane.position(command.longitudinal_m, command.lateral_m))
+                self._lane_reference_indices[actor_id] = command.lane_index
             else:
                 actor.set_velocity(command.direction_xy, command.speed_mps)
         self._pending_commands.clear()
@@ -163,7 +208,11 @@ class ScenarioActorManager(BaseManager):  # type: ignore[misc]
 
         del args, kwargs
         for actor_id in self.actor_ids():
-            self._refresh_state(actor_id)
+            self._refresh_state(
+                actor_id,
+                previous_velocity=self._pre_step_velocities.get(actor_id),
+            )
+        self._pre_step_velocities.clear()
         return {}
 
     def before_reset(self) -> None:
@@ -171,6 +220,8 @@ class ScenarioActorManager(BaseManager):  # type: ignore[misc]
 
         self._pending_commands.clear()
         self._states.clear()
+        self._pre_step_velocities.clear()
+        self._lane_reference_indices.clear()
         self.clear_objects(list(self.spawned_objects), force_destroy=True)
         self.spawned_objects = {}
 
@@ -191,12 +242,19 @@ class ScenarioActorManager(BaseManager):  # type: ignore[misc]
             raise RuntimeError(f"missing scenario Actor: {actor_id}")
         return actor
 
-    def _refresh_state(self, actor_id: str) -> None:
+    def _refresh_state(
+        self,
+        actor_id: str,
+        *,
+        previous_velocity: tuple[float, float] | None = None,
+    ) -> None:
         actor = self._require_actor(actor_id)
         position = tuple(float(value) for value in actor.position[:2])
-        velocity = tuple(float(value) for value in actor.velocity[:2])
-        last_velocity = getattr(actor, "last_velocity", actor.velocity)
-        previous = tuple(float(value) for value in last_velocity[:2])
+        velocity = self._velocity_xy(actor)
+        if previous_velocity is None:
+            previous = velocity
+        else:
+            previous = previous_velocity
         decision_interval_s = self._decision_interval_s()
         self._states[actor_id] = ScenarioActorState(
             actor_id=actor_id,
@@ -207,7 +265,13 @@ class ScenarioActorManager(BaseManager):  # type: ignore[misc]
                 (velocity[1] - previous[1]) / decision_interval_s,
             ),
             heading_rad=float(actor.heading_theta),
+            lane_index=self._lane_reference_indices.get(actor_id),
         )
+
+    @staticmethod
+    def _velocity_xy(actor: Any) -> tuple[float, float]:
+        velocity = tuple(float(value) for value in actor.velocity[:2])
+        return velocity[0], velocity[1]
 
     def _set_speed(self, actor_id: str, speed_mps: float) -> None:
         actor = self._require_actor(actor_id)

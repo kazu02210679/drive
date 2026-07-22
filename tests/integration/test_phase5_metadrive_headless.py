@@ -1,11 +1,17 @@
 import json
 import math
+from dataclasses import replace
 from itertools import pairwise
 
 import numpy as np
 import pytest
+from metadrive.component.static_object.traffic_object import TrafficObject
 from metadrive.component.traffic_participants.cyclist import Cyclist
+from metadrive.component.vehicle.base_vehicle import BaseVehicle
 
+from mad_driving.agents.hazard import HazardAgent
+from mad_driving.agents.kinematics import project_vector
+from mad_driving.agents.nominal import NominalMotionAgent
 from mad_driving.config.loader import load_config
 from mad_driving.config.models import AppConfig
 from mad_driving.envs import MultiAgentSpeedEnv
@@ -241,6 +247,72 @@ def test_real_lead_brake_actor_is_deterministic_and_does_not_leak() -> None:
         environment.close()
 
 
+@pytest.mark.integration
+def test_real_lead_brake_frame_reports_braking_acceleration_to_nominal_agent() -> None:
+    config = load_config("configs/base.yaml", "configs/scenarios/lead_brake.yaml")
+    environment = MultiAgentSpeedEnv(config, role="train", worker_index=0)
+    try:
+        _observation, info = environment.reset(seed=42)
+        trigger_step = info["scenario_parameters"]["trigger_step"]
+        sampled_deceleration = info["scenario_parameters"]["deceleration_mps2"]
+        assert isinstance(trigger_step, int)
+        assert isinstance(sampled_deceleration, float)
+        manager = environment._environment.engine.scenario_actor_manager
+        simulator_lead = manager.engine.get_objects(["lead-brake"])["lead-brake"]
+        simulator_lead.set_velocity(
+            (math.cos(simulator_lead.heading_theta), math.sin(simulator_lead.heading_theta)),
+            8.0,
+        )
+
+        for _ in range(trigger_step):
+            _observation, _reward, terminated, truncated, _info = environment.step(0)
+            assert not (terminated or truncated)
+
+        frame = environment._frame
+        assert frame is not None
+        lead = next(
+            actor
+            for actor in frame.observation.visible_actors
+            if actor.actor_id == "lead-brake"
+        )
+        longitudinal_acceleration, _ = project_vector(
+            lead.acceleration_xy_mps2,
+            frame.observation.ego.heading_rad,
+        )
+        assert math.isfinite(longitudinal_acceleration)
+        assert longitudinal_acceleration == pytest.approx(-sampled_deceleration, abs=0.5)
+
+        nominal = NominalMotionAgent(config.agents.nominal)
+        braking_claim = next(
+            claim
+            for claim in nominal.analyze(frame.observation)
+            if claim.target_actor_id == "lead-brake"
+        )
+        zero_acceleration_observation = replace(
+            frame.observation,
+            visible_actors=tuple(
+                replace(actor, acceleration_xy_mps2=(0.0, 0.0))
+                if actor.actor_id == "lead-brake"
+                else actor
+                for actor in frame.observation.visible_actors
+            ),
+        )
+        zero_acceleration_claim = next(
+            claim
+            for claim in nominal.analyze(zero_acceleration_observation)
+            if claim.target_actor_id == "lead-brake"
+        )
+        assert braking_claim.probability is not None
+        assert zero_acceleration_claim.probability is not None
+        assert braking_claim.probability > zero_acceleration_claim.probability
+        assert (
+            braking_claim.recommended_max_speed_mps
+            < zero_acceleration_claim.recommended_max_speed_mps
+        )
+    finally:
+        environment.close()
+
+
 def run_cut_in_prefix() -> tuple[tuple[tuple[float, float], ...], float, float]:
     environment = MultiAgentSpeedEnv(
         load_config("configs/base.yaml", "configs/scenarios/cut_in.yaml"),
@@ -302,6 +374,44 @@ def test_real_cut_in_is_deterministic_merges_and_cleans_up() -> None:
         environment.reset(seed=43)
 
         assert previous_actor not in manager.engine.get_objects().values()
+    finally:
+        environment.close()
+
+
+@pytest.mark.integration
+def test_real_cut_in_frame_relocalizes_merged_actor_to_the_ego_lane() -> None:
+    config = load_config("configs/base.yaml", "configs/scenarios/cut_in.yaml")
+    environment = MultiAgentSpeedEnv(config, role="train", worker_index=0)
+    try:
+        _observation, info = environment.reset(seed=42)
+        parameters = info["scenario_parameters"]
+        trigger_step = parameters["trigger_step"]
+        merge_steps = parameters["merge_steps"]
+        assert isinstance(trigger_step, int)
+        assert isinstance(merge_steps, int)
+
+        for _ in range(trigger_step + merge_steps):
+            _observation, _reward, terminated, truncated, _info = environment.step(3)
+            assert not (terminated or truncated)
+
+        frame = environment._frame
+        assert frame is not None
+        cut_in = next(
+            actor for actor in frame.observation.visible_actors if actor.actor_id == "cut-in"
+        )
+        assert abs(cut_in.relative_lateral_m) < 0.1
+        assert cut_in.same_lane is True
+
+        hazard_claims = HazardAgent(config.agents.hazard).analyze(frame.observation)
+        assert any(
+            claim.target_actor_id == "cut-in" and claim.event_type == "hazard_lead_braking"
+            for claim in hazard_claims
+        )
+        nominal_claims = NominalMotionAgent(config.agents.nominal).analyze(frame.observation)
+        assert any(
+            claim.target_actor_id == "cut-in" and claim.event_type == "nominal_lead"
+            for claim in nominal_claims
+        )
     finally:
         environment.close()
 
@@ -417,6 +527,44 @@ def test_real_occluded_crossing_reports_cyclist_collision_as_scenario_failure() 
         frame = environment._frame
         assert frame is not None
         assert frame.privileged.collision_kind == "crossing_actor"
+    finally:
+        environment.close()
+
+
+@pytest.mark.integration
+def test_real_occluder_contact_is_attributed_as_a_static_object_collision() -> None:
+    environment = MultiAgentSpeedEnv(
+        load_config("configs/base.yaml", "configs/scenarios/occluded_crossing.yaml"),
+        role="train",
+        worker_index=0,
+    )
+    try:
+        environment.reset(seed=42)
+        manager = environment._environment.engine.scenario_actor_manager
+        occluder = manager.engine.get_objects(["static-occluder"])["static-occluder"]
+        assert occluder.id == "static-occluder"
+        assert environment._environment.scenario_ego_collided_with("static-occluder") is False
+
+        occluder.set_position(environment._environment.vehicle.position)
+        _observation, _reward, terminated, truncated, info = environment.step(3)
+
+        assert terminated is True
+        assert truncated is False
+        assert info["crash_object"] is True
+        assert info["crash_vehicle"] is False
+        frame = environment._frame
+        assert frame is not None
+        assert frame.privileged.collision_kind == "object"
+        assert occluder.LENGTH == pytest.approx(5.0)
+        assert occluder.WIDTH == pytest.approx(2.0)
+        privileged_occluder = next(
+            actor
+            for actor in frame.privileged.all_actors
+            if actor.actor_id == "static-occluder"
+        )
+        assert privileged_occluder.actor_type == "obstacle"
+        assert isinstance(occluder, TrafficObject)
+        assert not isinstance(occluder, BaseVehicle)
     finally:
         environment.close()
 

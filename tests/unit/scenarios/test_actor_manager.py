@@ -259,8 +259,9 @@ def test_actor_state_reports_acceleration_per_second() -> None:
     manager = ScenarioActorManager(engine=engine)
     manager.spawn_lane_vehicle(LaneVehicleSpawn("lead", (">", ">>", 0), 40.0, 0.0, 8.0))
     actor = engine.get_objects(["lead"])["lead"]
-    actor.last_velocity = (8.0, 0.0)
+    manager.before_step()
     actor.velocity = (7.6, 0.0)
+    manager.after_step()
 
     state = manager.actor_state("lead")
 

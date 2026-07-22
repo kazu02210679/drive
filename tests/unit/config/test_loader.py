@@ -222,3 +222,105 @@ def test_metadrive_ranges_are_validated(tmp_path: Path, field: str, bad_value: f
 
     with pytest.raises(ValidationError, match=field):
         load_config(write_config(tmp_path, text))
+
+
+@pytest.mark.parametrize(
+    ("scenario", "field", "maximum"),
+    [
+        ("lead_brake", "initial_gap_m", 55.0),
+        ("lead_brake", "speed_fraction", 1.0),
+        ("lead_brake", "trigger_s", 3.0),
+        ("lead_brake", "mild_deceleration_mps2", 4.0),
+        ("lead_brake", "severe_deceleration_mps2", 8.0),
+        ("cut_in", "initial_gap_m", 40.0),
+        ("cut_in", "trigger_s", 3.0),
+        ("cut_in", "merge_duration_s", 3.0),
+        ("cut_in", "speed_fraction", 1.05),
+        ("occluded_crossing", "conflict_distance_m", 40.0),
+        ("occluded_crossing", "crossing_start_offset_m", 12.0),
+        ("occluded_crossing", "crossing_speed_mps", 6.0),
+        ("occluded_crossing", "trigger_s", 3.0),
+        ("occluded_crossing", "secondary_lead_gap_m", 55.0),
+        ("occluded_crossing", "secondary_lead_speed_fraction", 1.0),
+    ],
+)
+@pytest.mark.parametrize("bad_minimum", [0.0, -0.1])
+def test_scenario_physical_ranges_require_strictly_positive_minimums(
+    tmp_path: Path,
+    scenario: str,
+    field: str,
+    maximum: float,
+    bad_minimum: float,
+) -> None:
+    overlay = tmp_path / f"invalid-{scenario}-{field}.yaml"
+    overlay.write_text(
+        "scenarios:\n"
+        f"  {scenario}:\n"
+        f"    {field}:\n"
+        f"      minimum: {bad_minimum}\n"
+        f"      maximum: {maximum}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValidationError, match=field):
+        load_config("configs/base.yaml", overlay)
+
+
+@pytest.mark.parametrize("scenario", ["lead_brake", "cut_in", "occluded_crossing"])
+@pytest.mark.parametrize("survival_s", [0.0, -0.1])
+def test_scenario_survival_duration_must_be_strictly_positive(
+    tmp_path: Path,
+    scenario: str,
+    survival_s: float,
+) -> None:
+    overlay = tmp_path / f"invalid-{scenario}-survival.yaml"
+    overlay.write_text(
+        "scenarios:\n"
+        f"  {scenario}:\n"
+        f"    survival_s: {survival_s}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValidationError, match="survival_s"):
+        load_config("configs/base.yaml", overlay)
+
+
+@pytest.mark.parametrize("crossing_start_minimum", [3.0, 2.5])
+def test_crossing_start_minimum_must_begin_outside_the_reveal_boundary(
+    tmp_path: Path,
+    crossing_start_minimum: float,
+) -> None:
+    overlay = tmp_path / "visible-at-reset.yaml"
+    overlay.write_text(
+        "scenarios:\n"
+        "  occluded_crossing:\n"
+        "    crossing_start_offset_m:\n"
+        f"      minimum: {crossing_start_minimum}\n"
+        "      maximum: 12.0\n"
+        "    reveal_lateral_m: 3.0\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValidationError, match="crossing_start_offset_m|reveal_lateral_m"):
+        load_config("configs/base.yaml", overlay)
+
+
+def test_crossing_start_minimum_may_be_just_outside_the_reveal_boundary(
+    tmp_path: Path,
+) -> None:
+    overlay = tmp_path / "hidden-at-reset.yaml"
+    overlay.write_text(
+        "scenarios:\n"
+        "  occluded_crossing:\n"
+        "    crossing_start_offset_m:\n"
+        "      minimum: 3.0001\n"
+        "      maximum: 12.0\n"
+        "    reveal_lateral_m: 3.0\n",
+        encoding="utf-8",
+    )
+
+    config = load_config("configs/base.yaml", overlay)
+
+    crossing = config.scenarios.occluded_crossing
+    assert crossing.crossing_start_offset_m.minimum == 3.0001
+    assert crossing.reveal_lateral_m == 3.0
