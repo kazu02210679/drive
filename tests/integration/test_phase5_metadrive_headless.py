@@ -77,6 +77,7 @@ def run_cut_in_prefix() -> tuple[tuple[tuple[float, float], ...], float, float]:
         assert info["scenario_id"] == "cut_in"
         manager = environment._environment.engine.scenario_actor_manager
         assert manager.actor_ids() == ("cut-in",)
+        assert environment._environment.scenario_ego_collided_with("cut-in") is False
         ego_lane = environment._environment.vehicle.navigation.current_lane
         _, initial_lateral_m = ego_lane.local_coordinates(
             manager.actor_state("cut-in").position_xy_m

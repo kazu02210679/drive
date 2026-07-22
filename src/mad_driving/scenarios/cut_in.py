@@ -135,7 +135,7 @@ class CutInRuntime:
             longitudinal_m = self._parameter_float(state, "initial_longitudinal_m") + (
                 self._parameter_float(state, "speed_mps")
                 * self._parameter_float(state, "decision_interval_s")
-                * step_index
+                * (step_index - 1)
             )
             environment.scenario_command_actor(
                 actor_id,
@@ -154,7 +154,10 @@ class CutInRuntime:
         raw_info: Mapping[str, object],
     ) -> ScenarioTransition:
         self._require_spawned_actor(environment, state)
-        collision = bool(raw_info.get("crash_vehicle", False))
+        vehicle_collision = bool(raw_info.get("crash_vehicle", False))
+        collision = vehicle_collision and environment.scenario_ego_collided_with(
+            self._parameter_str(state, "actor_id")
+        )
         success = not collision and step_index >= self._parameter_int(state, "success_step")
         return ScenarioTransition(state, ScenarioStepResult(success=success, failure=collision))
 

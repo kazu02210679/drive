@@ -10,6 +10,7 @@ from metadrive.component.vehicle.vehicle_type import (  # type: ignore[import-un
     StaticDefaultVehicle,
 )
 from metadrive.manager.base_manager import BaseManager  # type: ignore[import-untyped]
+from metadrive.utils.utils import get_object_from_node  # type: ignore[import-untyped]
 
 from mad_driving.scenarios.actors import (
     ActorCommand,
@@ -105,6 +106,25 @@ class ScenarioActorManager(BaseManager):  # type: ignore[misc]
         """Return scenario actor identifiers in spawn order."""
 
         return tuple(self.spawned_objects)
+
+    def ego_collided_with(self, ego_vehicle: Any, actor_id: str) -> bool:
+        """Return whether the ego chassis currently contacts one owned scenario actor."""
+
+        actor = self._require_actor(actor_id)
+        ego_node = ego_vehicle.chassis.node()
+        contacts = self.engine.physics_world.dynamic_world.contactTest(ego_node, True)
+        for contact in contacts.getContacts():
+            first = contact.getNode0()
+            second = contact.getNode1()
+            if first == ego_node:
+                other = second
+            elif second == ego_node:
+                other = first
+            else:
+                continue
+            if get_object_from_node(other) is actor:
+                return True
+        return False
 
     def before_step(self, *args: object, **kwargs: object) -> dict[str, object]:
         """Apply queued commands immediately before simulator advancement."""

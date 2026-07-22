@@ -20,6 +20,7 @@ class FakeEnvironment:
         self.spawns: list[object] = []
         self.commands: list[tuple[str, ActorCommand]] = []
         self.actor_ids = {"lead-brake"}
+        self.collided_actor_ids: set[str] = set()
         self.lead_speed_mps = 8.0
 
     def scenario_road_geometry(self) -> RoadGeometry:
@@ -36,6 +37,9 @@ class FakeEnvironment:
 
     def scenario_actor_ids(self) -> tuple[str, ...]:
         return tuple(sorted(self.actor_ids))
+
+    def scenario_ego_collided_with(self, actor_id: str) -> bool:
+        return actor_id in self.collided_actor_ids
 
     def scenario_actor_state(self, actor_id: str) -> ScenarioActorState:
         if actor_id not in self.actor_ids:
@@ -138,7 +142,7 @@ def test_nominal_does_not_succeed_when_ego_is_off_road() -> None:
     assert transition.outcome == ScenarioStepResult(success=False, failure=False)
 
 
-def test_lead_brake_fails_on_collision_with_present_actor() -> None:
+def test_lead_brake_does_not_fail_for_a_collision_with_another_vehicle() -> None:
     runtime, environment, state = reset_lead_brake()
 
     transition = runtime.after_step(
@@ -148,7 +152,35 @@ def test_lead_brake_fails_on_collision_with_present_actor() -> None:
         raw_info={"crash_vehicle": True},
     )
 
+    assert transition.outcome == ScenarioStepResult(success=False, failure=False)
+
+
+def test_lead_brake_fails_only_when_the_ego_contacts_its_actor() -> None:
+    runtime, environment, state = reset_lead_brake()
+    environment.collided_actor_ids.add("lead-brake")
+
+    transition = runtime.after_step(
+        environment,
+        state,
+        step_index=1,
+        raw_info={"crash_vehicle": True},
+    )
+
     assert transition.outcome == ScenarioStepResult(success=False, failure=True)
+
+
+def test_lead_brake_requires_the_typed_vehicle_collision_outcome() -> None:
+    runtime, environment, state = reset_lead_brake()
+    environment.collided_actor_ids.add("lead-brake")
+
+    transition = runtime.after_step(
+        environment,
+        state,
+        step_index=1,
+        raw_info={"crash_vehicle": False},
+    )
+
+    assert transition.outcome == ScenarioStepResult(success=False, failure=False)
 
 
 def test_missing_spawned_actor_is_internal_error() -> None:

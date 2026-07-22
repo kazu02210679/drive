@@ -178,8 +178,9 @@ class LeadBrakeRuntime:
         step_index: int,
         raw_info: Mapping[str, object],
     ) -> ScenarioTransition:
-        self._require_spawned_actor(environment, state)
-        collision = bool(raw_info.get("crash_vehicle", False))
+        actor_id = self._require_spawned_actor(environment, state)
+        vehicle_collision = bool(raw_info.get("crash_vehicle", False))
+        collision = vehicle_collision and environment.scenario_ego_collided_with(actor_id)
         off_road = bool(raw_info.get("out_of_road", False)) or bool(raw_info.get("off_road", False))
         success = (
             not collision

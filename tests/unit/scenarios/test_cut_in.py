@@ -30,6 +30,7 @@ class FakeEnvironment:
         self.spawns: list[object] = []
         self.commands: list[tuple[str, LanePoseCommand]] = []
         self.actor_ids = {"cut-in"}
+        self.collided_actor_ids: set[str] = set()
         self.geometry = geometry or RoadGeometry(
             (">", ">>", 0),
             10.0,
@@ -52,6 +53,9 @@ class FakeEnvironment:
 
     def scenario_actor_ids(self) -> tuple[str, ...]:
         return tuple(sorted(self.actor_ids))
+
+    def scenario_ego_collided_with(self, actor_id: str) -> bool:
+        return actor_id in self.collided_actor_ids
 
     def scenario_actor_state(self, actor_id: str) -> ScenarioActorState:
         return ScenarioActorState(
@@ -92,6 +96,33 @@ def test_cut_in_moves_from_adjacent_lane_to_ego_lane() -> None:
     assert abs(start.lateral_m) > abs(middle.lateral_m) > abs(end.lateral_m)
     assert end.lateral_m == pytest.approx(0.0)
     assert start.longitudinal_m < middle.longitudinal_m < end.longitudinal_m
+
+
+def test_cut_in_lane_pose_starts_at_completed_time_without_a_longitudinal_jump() -> None:
+    runtime, environment, state = reset_cut_in(trigger_s=1.0, merge_s=2.0)
+
+    runtime.before_step(environment, state, step_index=10)
+    at_trigger = environment.commands[-1][1]
+    runtime.before_step(environment, state, step_index=11)
+    after_trigger = environment.commands[-1][1]
+    runtime.before_step(environment, state, step_index=12)
+    later = environment.commands[-1][1]
+
+    initial_longitudinal_m = state.parameters["initial_longitudinal_m"]
+    speed_mps = state.parameters["speed_mps"]
+    decision_interval_s = state.parameters["decision_interval_s"]
+    assert isinstance(initial_longitudinal_m, float)
+    assert isinstance(speed_mps, float)
+    assert isinstance(decision_interval_s, float)
+    assert at_trigger.longitudinal_m == pytest.approx(
+        initial_longitudinal_m + speed_mps * decision_interval_s * 9
+    )
+    assert after_trigger.longitudinal_m - at_trigger.longitudinal_m == pytest.approx(
+        speed_mps * decision_interval_s
+    )
+    assert later.longitudinal_m - after_trigger.longitudinal_m == pytest.approx(
+        speed_mps * decision_interval_s
+    )
 
 
 def test_cut_in_spawns_in_the_sampled_adjacent_lane() -> None:
@@ -150,7 +181,7 @@ def test_cut_in_succeeds_after_merge_and_survival_window() -> None:
     assert transition.outcome.failure is False
 
 
-def test_cut_in_fails_when_ego_collides_with_its_actor() -> None:
+def test_cut_in_does_not_fail_for_a_collision_with_another_vehicle() -> None:
     runtime, environment, state = reset_cut_in(trigger_s=1.0, merge_s=2.0)
 
     transition = runtime.after_step(
@@ -158,4 +189,27 @@ def test_cut_in_fails_when_ego_collides_with_its_actor() -> None:
     )
 
     assert transition.outcome.success is False
+    assert transition.outcome.failure is False
+
+
+def test_cut_in_fails_only_when_the_ego_contacts_its_actor() -> None:
+    runtime, environment, state = reset_cut_in(trigger_s=1.0, merge_s=2.0)
+    environment.collided_actor_ids.add("cut-in")
+
+    transition = runtime.after_step(
+        environment, state, step_index=1, raw_info={"crash_vehicle": True}
+    )
+
+    assert transition.outcome.success is False
     assert transition.outcome.failure is True
+
+
+def test_cut_in_requires_the_typed_vehicle_collision_outcome() -> None:
+    runtime, environment, state = reset_cut_in(trigger_s=1.0, merge_s=2.0)
+    environment.collided_actor_ids.add("cut-in")
+
+    transition = runtime.after_step(
+        environment, state, step_index=1, raw_info={"crash_vehicle": False}
+    )
+
+    assert transition.outcome.failure is False

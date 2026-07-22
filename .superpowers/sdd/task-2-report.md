@@ -1,53 +1,189 @@
-# Task 2 report: reproducible role-scoped seed identities
+# Task 2: Cut-in report
 
-## Implementation
+## Delivered
 
-- Added `EnvironmentRole = Literal["train", "validation", "test"]`.
-- Added frozen `EpisodeSeeds` with the episode RNG seed, MetaDrive scenario index, and scenario-parameter seed.
-- Added frozen `EpisodeSeedAllocator`, consuming `SeedRangeConfig` and deriving two child sequences from NumPy `SeedSequence([episode_rng_seed, role_code, worker_index])`.
-- Each child emits one `uint32`, which is reduced modulo `seed_count` and offset by `seed_start`.
-- Added explicit `ValueError` validation for negative worker and episode RNG seeds.
-- Added the scenarios package initializer.
+Implemented the seeded `cut_in` Phase 5 scenario.
+
+- Added strict `CutInScenarioConfig` defaults: 20–40 m initial gap, 1–3 s trigger,
+  1.5–3 s merge duration, 0.75–1.05 speed fraction, and a 3 s survival window.
+- Added the level-2 `cut_in` overlay and registered the runtime in
+  `ScenarioManagerRuntime`; the existing no-runtime fail-fast behavior remains unchanged.
+- Added bounded cubic `smoothstep`, deterministic parameter/lane sampling, adjacent-lane
+  fail-fast, lane-pose interpolation into the ego lane, continuous longitudinal targets,
+  collision failure, and merge-plus-survival success.
+- Added `LanePoseCommand` and the validated `ScenarioActorCommand` union without changing
+  Lead Brake longitudinal command semantics.
+- Extended simulator-neutral road geometry with sorted, queried adjacent lane indices and
+  actual lane width. The MetaDrive binding queries its road network before reporting an
+  adjacent lane.
+- Force-destroys scenario-owned actors on reset so a previous Cut-in actor cannot be reused.
+- Added unit and real MetaDrive deterministic-replay/reset-cleanup coverage. The 24D
+  observation contracts remain untouched.
 
 ## Files
 
+Created:
+
+- `configs/scenarios/cut_in.yaml`
+- `src/mad_driving/scenarios/cut_in.py`
+- `tests/unit/scenarios/test_cut_in.py`
+
+Modified:
+
+- `src/mad_driving/config/models.py`
+- `src/mad_driving/envs/control_metadrive_env.py`
+- `src/mad_driving/envs/multi_agent_speed_env.py`
 - `src/mad_driving/scenarios/__init__.py`
-- `src/mad_driving/scenarios/seeding.py`
-- `tests/unit/scenarios/test_seeding.py`
+- `src/mad_driving/scenarios/actor_manager.py`
+- `src/mad_driving/scenarios/actors.py`
+- `src/mad_driving/scenarios/manager.py`
+- `src/mad_driving/scenarios/parameters.py`
+- `tests/integration/test_phase5_metadrive_headless.py`
+- `tests/unit/config/test_loader.py`
+- `tests/unit/scenarios/test_actor_manager.py`
+- `tests/unit/scenarios/test_manager.py`
 
-## TDD evidence
+## RED/GREEN record
 
-1. Wrote the two deterministic allocation tests before creating the scenarios production package.
-2. RED: `.venv\\Scripts\\python.exe -m pytest tests/unit/scenarios/test_seeding.py -q` failed during collection with `ModuleNotFoundError: No module named 'mad_driving.scenarios'`.
-3. Implemented the minimum allocator and ran the same focused command: GREEN, `2 passed in 0.18s`.
-4. Added tests for the required negative worker and episode seed validation, temporarily leaving validation absent.
-5. RED: the focused command reported `2 failed, 2 passed`; worker construction did not raise, and NumPy raised `ValueError: expected non-negative integer` rather than the required `episode_rng_seed` validation message.
-6. Added explicit validation and reran the focused command: GREEN, `4 passed in 0.17s`.
+1. RED: `.venv\Scripts\python.exe -m pytest tests/unit/scenarios/test_cut_in.py -q`
+   - Expected failure: `ModuleNotFoundError: mad_driving.scenarios.cut_in`.
+   GREEN after adding `smoothstep`: 3 passed.
+2. RED: same focused test after specifying the runtime/config behavior.
+   - Expected failure: `ImportError: cannot import name 'CutInScenarioConfig'`.
+   GREEN after the minimal runtime/config/geometry path: 4 passed.
+3. RED: `.venv\Scripts\python.exe -m pytest tests/unit/scenarios/test_actor_manager.py -q`
+   - Expected failure: `LanePoseCommand` rejected by `ScenarioActorManager`.
+   GREEN after command-union dispatch: 11 passed across Cut-in and actor-manager tests.
+4. RED: `.venv\Scripts\python.exe -m pytest tests/unit/scenarios/test_manager.py -q`
+   - Expected failure: `no registered runtime for selected scenario: cut_in`.
+   GREEN after runtime registration: 17 focused scenario tests passed.
+5. RED: `.venv\Scripts\python.exe -m pytest tests/unit/config/test_loader.py -q`
+   - Expected failure: missing `configs/scenarios/cut_in.yaml`.
+   GREEN after adding the overlay: 37 focused loader/scenario tests passed.
+6. RED: `.venv\Scripts\python.exe -m pytest tests/integration/test_phase5_metadrive_headless.py -q -m integration -k cut_in`
+   - First exposed a collision from an unsafe keep-speed smoke driver; the smoke was changed
+     to request `STOP` while observing the scripted merge.
+   - Second exposed MetaDrive object reuse after reset.
+   GREEN after force-destroy reset cleanup: 1 passed, 1 deselected.
+7. RED: focused Cut-in test after adding a public API assertion.
+   - Expected failure: `CutInRuntime` missing from `mad_driving.scenarios`.
+   GREEN after export: 16 focused scenario tests passed.
 
 ## Verification
 
-- Focused pytest: `4 passed`.
-- Ruff: `.venv\\Scripts\\ruff.exe check src/mad_driving/scenarios tests/unit/scenarios` — `All checks passed!`
-- Mypy: `.venv\\Scripts\\mypy.exe src/mad_driving/scenarios` — `Success: no issues found in 2 source files`.
-- Full pytest: `438 passed, 19 warnings in 26.79s`.
+- `.venv\Scripts\python.exe -m pytest tests/unit/scenarios/test_cut_in.py tests/unit/scenarios/test_manager.py -q` — passed.
+- `.venv\Scripts\python.exe -m pytest tests/integration/test_phase5_metadrive_headless.py -q -m integration -k cut_in` — passed.
+- `.venv\Scripts\python.exe -m ruff check src tests` — passed (`All checks passed!`).
+- `.venv\Scripts\python.exe -m mypy src` — passed (`Success: no issues found in 61 source files`).
+- `.venv\Scripts\python.exe -m pytest -q` — passed: **766 passed**. The suite emitted 25
+  pre-existing third-party deprecation/evaluation-wrapper warnings; no test failures.
+- `git diff --check` — passed.
 
 ## Self-review
 
-- The allocator is deterministic for identical role, range, worker, and episode inputs.
-- Role codes and worker indices are included in the entropy, while both derived identities remain inside the configured half-open range.
-- Both result and allocator dataclasses are frozen, and no environment integration was added.
-- The current five focused tests cover reproducibility and bounds, independent worker and role identity separation, package-level exports, and required negative-input validation.
+Standards review used the repository's `pyproject.toml` Ruff/mypy/pytest configuration and
+the requested task brief. No violations or new smell findings remain after static checks.
+
+Spec review confirmed:
+
+- Cut-in uses only actual, stably sorted adjacent lanes queried from MetaDrive.
+- Lane pose is a separate frozen command and Lead Brake's acceleration path is preserved.
+- No no-op fallback, Occluded Crossing, curriculum progression, contract v5, or Phase 6 work
+  was added.
+- Real MetaDrive replay verifies adjacent start, ego-lane arrival, finite state, identical
+  first 20 positions for the same seed, and old-actor absence after reset.
 
 ## Concerns
 
-- The full suite emitted 19 existing dependency/runtime warnings from matplotlib and Stable-Baselines3. They did not affect test outcomes and are unrelated to the new scenarios package.
+- The MetaDrive lane query deliberately relies on the pinned MetaDrive 0.4.3 procedural
+  `NodeRoadNetwork.graph` layout. The real headless integration test exercises this binding.
+- The full suite reports existing third-party warnings, but all tests and strict static checks
+  pass.
 
-## Review-fix evidence
+## Review follow-up: timing and collision attribution
 
-- Added explicit public exports from `mad_driving.scenarios` for `EnvironmentRole`, `EpisodeSeedAllocator`, and `EpisodeSeeds`, following the repository's `__all__` convention.
-- Added `test_scenario_seed_api_is_exported`, which imports all three names from `mad_driving.scenarios` and verifies the role literal and seed value behavior.
-- Extended `test_role_or_worker_changes_derived_seed_identity` to retain the worker comparison and independently compare train versus validation using the same numeric range, isolating the role code effect.
-- RED: `.venv\\Scripts\\python.exe -m pytest tests/unit/scenarios/test_seeding.py -q` failed during collection with `ImportError: cannot import name 'EnvironmentRole' from 'mad_driving.scenarios'`.
-- GREEN: the same focused command passed with `5 passed in 0.18s`.
-- Ruff: `.venv\\Scripts\\ruff.exe check src/mad_driving/scenarios tests/unit/scenarios` — `All checks passed!`
-- Mypy: `.venv\\Scripts\\mypy.exe src/mad_driving/scenarios` — `Success: no issues found in 2 source files`.
+### Diagnosis
+
+The Cut-in lane-pose command is issued from `before_step(step_index=k)`, where physics has
+already completed `k - 1` decision intervals. The old command used `k * dt`, producing a
+one-interval forward jump on the first merge pose.
+
+Pinned MetaDrive 0.4.3 provides exact contact-pair attribution. Its
+`BaseVehicle._state_check()` uses `engine.physics_world.dynamic_world.contactTest(
+vehicle.chassis.node(), True)`, and `metadrive.utils.utils.get_object_from_node()` resolves a
+contact node back to its Python actor. The adapter now uses this exact dynamic-world pair query
+and compares the resolved counterpart by identity with the requested scenario actor.
+
+### RED/GREEN evidence
+
+1. RED timing regression:
+
+   ```text
+   .venv\Scripts\python.exe -m pytest tests/unit/scenarios/test_cut_in.py -q
+   FAILED test_cut_in_lane_pose_starts_at_completed_time_without_a_longitudinal_jump
+   Obtained: 40.0
+   Expected: 39.0 ± 3.9e-05
+   ```
+
+   GREEN after anchoring lane poses to `(step_index - 1) * decision_interval_s`:
+
+   ```text
+   11 passed, 14 warnings in 4.04s
+   ```
+
+2. RED collision-attribution regressions:
+
+   ```text
+   .venv\Scripts\python.exe -m pytest tests/unit/scenarios/test_cut_in.py tests/unit/scenarios/test_lead_brake.py tests/unit/scenarios/test_actor_manager.py -q
+   4 failed, 26 passed, 14 warnings in 3.38s
+   ```
+
+   The failures showed that generic `raw_info["crash_vehicle"]` marked both scenarios as failed
+   without an actor contact, and that `ScenarioActorManager.ego_collided_with` did not yet exist.
+
+   GREEN after adding `scenario_ego_collided_with(actor_id)`, exact dynamic-world contact-pair
+   lookup, and the two-signal failure predicate:
+
+   ```text
+   30 passed, 14 warnings in 5.80s
+   ```
+
+3. Final focused regressions, including a true contact with a false typed collision outcome:
+
+   ```text
+   .venv\Scripts\python.exe -m pytest tests/unit/scenarios/test_cut_in.py tests/unit/scenarios/test_lead_brake.py tests/unit/scenarios/test_actor_manager.py -q
+   32 passed, 14 warnings in 3.39s
+
+   .venv\Scripts\python.exe -m pytest tests/integration/test_phase5_metadrive_headless.py -q -m integration
+   2 passed, 14 warnings in 6.15s
+
+   .venv\Scripts\python.exe -m pytest tests/unit/scenarios/test_cut_in.py tests/unit/scenarios/test_lead_brake.py tests/unit/scenarios/test_actor_manager.py tests/unit/envs/test_multi_agent_speed_env.py -q
+   106 passed, 14 warnings in 3.78s
+   ```
+
+   The real Cut-in smoke calls `scenario_ego_collided_with("cut-in")` at reset and verifies no
+   false-positive contact before the scripted merge.
+
+### Final verification
+
+```text
+.venv\Scripts\python.exe -m ruff check src tests
+All checks passed!
+
+.venv\Scripts\python.exe -m mypy src
+Success: no issues found in 61 source files
+
+.venv\Scripts\python.exe -m pytest -q
+773 passed, 25 warnings in 61.20s
+
+git diff --check
+exit 0
+```
+
+### Follow-up concerns
+
+- The exact attribution intentionally relies on MetaDrive 0.4.3's documented-in-source Bullet
+  `dynamic_world.contactTest`/`get_object_from_node` behavior; the pinned dependency and unit
+  contact-pair tests make this explicit.
+- Existing third-party matplotlib and Stable-Baselines evaluation-wrapper warnings remain, with
+  no test or static-check failures.

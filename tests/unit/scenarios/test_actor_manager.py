@@ -21,6 +21,7 @@ class FakeActor:
         self.WIDTH = 1.8
         self.commands: list[ActorCommand] = []
         self.position_calls: list[tuple[float, float]] = []
+        self.chassis = FakeChassis()
 
     def set_longitudinal_acceleration(self, command: ActorCommand) -> None:
         self.commands.append(command)
@@ -28,6 +29,49 @@ class FakeActor:
     def set_position(self, position: tuple[float, float]) -> None:
         self.position_calls.append(position)
         self.position = position
+
+
+class FakeChassis:
+    def __init__(self) -> None:
+        self._node = object()
+
+    def node(self) -> object:
+        return self._node
+
+
+class FakeContact:
+    def __init__(self, node0: object, node1: object) -> None:
+        self._node0 = node0
+        self._node1 = node1
+
+    def getNode0(self) -> object:
+        return self._node0
+
+    def getNode1(self) -> object:
+        return self._node1
+
+
+class FakeContactResult:
+    def __init__(self, contacts: list[FakeContact]) -> None:
+        self._contacts = contacts
+
+    def getContacts(self) -> list[FakeContact]:
+        return self._contacts
+
+
+class FakeDynamicWorld:
+    def __init__(self) -> None:
+        self.contacts: list[FakeContact] = []
+        self.queries: list[tuple[object, bool]] = []
+
+    def contactTest(self, node: object, include_descendants: bool) -> FakeContactResult:
+        self.queries.append((node, include_descendants))
+        return FakeContactResult(self.contacts)
+
+
+class FakePhysicsWorld:
+    def __init__(self) -> None:
+        self.dynamic_world = FakeDynamicWorld()
 
 
 class FakeLane:
@@ -51,6 +95,7 @@ class FakeEngine:
         self.spawn_calls: list[dict[str, object]] = []
         self.global_config = {"physics_world_step_size": 0.02, "decision_repeat": 5}
         self.current_map = FakeMap()
+        self.physics_world = FakePhysicsWorld()
 
     def spawn_object(self, object_class: object, **kwargs: object) -> FakeActor:
         del object_class
@@ -120,6 +165,45 @@ def test_actor_manager_applies_lane_pose_command_before_step() -> None:
 
     actor = manager.engine.get_objects(["cut-in"])["cut-in"]
     assert actor.position_calls == [(42.0, 1.5)]
+
+
+def test_actor_manager_attributes_an_ego_contact_to_the_requested_actor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = manager_with_fake_engine()
+    manager.spawn_lane_vehicle(LaneVehicleSpawn("cut-in", (">", ">>", 1), 40.0, 0.0, 8.0))
+    actor = manager.engine.get_objects(["cut-in"])["cut-in"]
+    ego = FakeActor("ego")
+    manager.engine.physics_world.dynamic_world.contacts = [
+        FakeContact(ego.chassis.node(), actor.chassis.node())
+    ]
+    monkeypatch.setattr(
+        "mad_driving.scenarios.actor_manager.get_object_from_node",
+        lambda node: actor if node is actor.chassis.node() else None,
+        raising=False,
+    )
+
+    assert manager.ego_collided_with(ego, "cut-in") is True
+    assert manager.engine.physics_world.dynamic_world.queries == [(ego.chassis.node(), True)]
+
+
+def test_actor_manager_rejects_a_contact_with_a_different_actor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = manager_with_fake_engine()
+    manager.spawn_lane_vehicle(LaneVehicleSpawn("cut-in", (">", ">>", 1), 40.0, 0.0, 8.0))
+    ego = FakeActor("ego")
+    other = FakeActor("traffic")
+    manager.engine.physics_world.dynamic_world.contacts = [
+        FakeContact(ego.chassis.node(), other.chassis.node())
+    ]
+    monkeypatch.setattr(
+        "mad_driving.scenarios.actor_manager.get_object_from_node",
+        lambda node: other if node is other.chassis.node() else None,
+        raising=False,
+    )
+
+    assert manager.ego_collided_with(ego, "cut-in") is False
 
 
 def test_actor_manager_rejects_duplicate_actor_ids() -> None:

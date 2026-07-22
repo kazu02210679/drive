@@ -128,6 +128,9 @@ def create_control_metadrive_env(
         def scenario_actor_ids(self) -> tuple[str, ...]:
             return self._scenario_actor_manager().actor_ids()
 
+        def scenario_ego_collided_with(self, actor_id: str) -> bool:
+            return self._scenario_actor_manager().ego_collided_with(self.vehicle, actor_id)
+
         def _scenario_actor_manager(self) -> ScenarioActorManager:
             manager = self.engine.scenario_actor_manager
             if not isinstance(manager, ScenarioActorManager):
