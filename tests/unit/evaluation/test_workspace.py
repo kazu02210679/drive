@@ -1,5 +1,8 @@
 import json
+import os
+import stat
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -95,6 +98,89 @@ def test_manifest_is_deterministic_sorted_compact_json(tmp_path: Path) -> None:
     assert manifests[0] == (
         json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
     ).encode("utf-8")
+
+
+def test_nested_regular_directories_manifest_and_publish(tmp_path: Path) -> None:
+    destination = tmp_path / "evaluation"
+    workspace = EvaluationWorkspace.stage(destination)
+    workspace.path.joinpath("nested", "deeper").mkdir(parents=True)
+    workspace.path.joinpath("root.jsonl").write_bytes(b"root\n")
+    workspace.path.joinpath("nested", "deeper", "step.jsonl").write_bytes(b"step\n")
+
+    manifest_path = workspace.write_manifest()
+    payload = json.loads(manifest_path.read_bytes())
+    published = workspace.publish()
+
+    assert [item["path"] for item in payload["artifacts"]] == [
+        "nested/deeper/step.jsonl",
+        "root.jsonl",
+    ]
+    assert published.joinpath("nested", "deeper", "step.jsonl").read_bytes() == b"step\n"
+
+
+@pytest.mark.parametrize("link_kind", ["directory", "dangling"])
+@pytest.mark.parametrize("after_manifest", [False, True])
+def test_manifest_rejects_symlinks_before_regular_file_filtering(
+    tmp_path: Path, link_kind: str, after_manifest: bool
+) -> None:
+    destination = tmp_path / "evaluation"
+    workspace = EvaluationWorkspace.stage(destination)
+    workspace.path.joinpath("steps.jsonl").write_bytes(b"step\n")
+    if after_manifest:
+        workspace.write_manifest()
+    link = workspace.path / f"{link_kind}-link"
+    target = tmp_path / "real-directory" if link_kind == "directory" else tmp_path / "missing"
+    if link_kind == "directory":
+        target.mkdir()
+    try:
+        os.symlink(target, link, target_is_directory=link_kind == "directory")
+    except OSError as error:
+        pytest.skip(f"symlink creation unavailable: {error}")
+
+    with pytest.raises(ValueError, match="symbolic|reparse|link"):
+        if after_manifest:
+            workspace.publish()
+        else:
+            workspace.write_manifest()
+
+    assert not destination.exists()
+
+
+class FakeReparseDirectoryEntry:
+    name = "junction"
+    path = "junction"
+
+    @staticmethod
+    def is_symlink() -> bool:
+        return False
+
+    @staticmethod
+    def stat(*, follow_symlinks: bool = True) -> SimpleNamespace:
+        assert follow_symlinks is False
+        return SimpleNamespace(
+            st_mode=stat.S_IFDIR,
+            st_file_attributes=getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400),
+        )
+
+
+def test_windows_junction_reparse_entry_is_rejected_without_following() -> None:
+    with pytest.raises(ValueError, match="reparse"):
+        workspace_module._validated_entry_kind(FakeReparseDirectoryEntry())
+
+
+class FakeSpecialEntry(FakeReparseDirectoryEntry):
+    name = "named-pipe"
+    path = "named-pipe"
+
+    @staticmethod
+    def stat(*, follow_symlinks: bool = True) -> SimpleNamespace:
+        assert follow_symlinks is False
+        return SimpleNamespace(st_mode=stat.S_IFIFO, st_file_attributes=0)
+
+
+def test_non_regular_non_directory_entry_is_rejected() -> None:
+    with pytest.raises(ValueError, match="regular file or directory"):
+        workspace_module._validated_entry_kind(FakeSpecialEntry())
 
 
 def test_publish_rejects_file_modified_after_manifest(tmp_path: Path) -> None:

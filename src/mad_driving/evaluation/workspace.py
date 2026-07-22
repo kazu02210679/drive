@@ -6,15 +6,18 @@ import hashlib
 import json
 import os
 import re
+import stat
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any, Self
+from typing import Any, Literal, Self
 
 from mad_driving.atomic import rename_no_replace
 
 _MANIFEST_NAME = "evaluation_manifest.json"
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
+_FILE_ATTRIBUTE_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+_EntryKind = Literal["file", "directory"]
 
 
 @dataclass
@@ -36,8 +39,6 @@ class EvaluationWorkspace:
     def publish(self) -> Path:
         if self.destination.exists():
             raise FileExistsError(self.destination)
-        if not self.path.is_dir():
-            raise RuntimeError("evaluation staging workspace is unavailable")
         self._validate_manifest()
         self._fsync_files()
         rename_no_replace(self.path, self.destination)
@@ -67,7 +68,8 @@ class EvaluationWorkspace:
 
     def _validate_manifest(self) -> None:
         manifest_path = self.path / _MANIFEST_NAME
-        if not manifest_path.is_file() or manifest_path.is_symlink():
+        staged_files = self._staged_files()
+        if manifest_path not in staged_files:
             raise ValueError("evaluation manifest is missing")
         encoded = manifest_path.read_bytes()
         try:
@@ -102,7 +104,7 @@ class EvaluationWorkspace:
             raise ValueError("evaluation manifest inventory is not sorted")
         if encoded != _canonical_json(payload):
             raise ValueError("evaluation manifest encoding is not canonical")
-        actual_paths = self._artifact_paths()
+        actual_paths = [path for path in staged_files if path != manifest_path]
         actual = {path.relative_to(self.path).as_posix(): path for path in actual_paths}
         if set(inventory) != set(actual):
             raise ValueError("evaluation manifest inventory does not match staged files")
@@ -113,23 +115,56 @@ class EvaluationWorkspace:
 
     def _artifact_paths(self) -> list[Path]:
         manifest_path = self.path / _MANIFEST_NAME
-        paths = sorted(
-            (
-                candidate
-                for candidate in self.path.rglob("*")
-                if candidate.is_file() and candidate != manifest_path
-            ),
-            key=lambda path: path.relative_to(self.path).as_posix(),
-        )
-        if any(path.is_symlink() for path in paths):
-            raise ValueError("evaluation manifest cannot inventory symbolic links")
-        return paths
+        return [path for path in self._staged_files() if path != manifest_path]
+
+    def _staged_files(self) -> list[Path]:
+        _validate_staging_root(self.path)
+        directories = [self.path]
+        files: list[Path] = []
+        while directories:
+            directory = directories.pop()
+            with os.scandir(directory) as entries:
+                ordered_entries = sorted(entries, key=lambda entry: entry.name)
+            for entry in ordered_entries:
+                kind = _validated_entry_kind(entry)
+                path = Path(entry.path)
+                if kind == "directory":
+                    directories.append(path)
+                else:
+                    files.append(path)
+        return sorted(files, key=lambda path: path.relative_to(self.path).as_posix())
 
     def _fsync_files(self) -> None:
-        for path in sorted(candidate for candidate in self.path.rglob("*") if candidate.is_file()):
+        for path in self._staged_files():
             with path.open("ab") as output:
                 output.flush()
                 os.fsync(output.fileno())
+
+
+def _validate_staging_root(path: Path) -> None:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError as error:
+        raise RuntimeError("evaluation staging workspace is unavailable") from error
+    if stat.S_ISLNK(metadata.st_mode):
+        raise ValueError("evaluation staging workspace cannot be a symbolic link")
+    if getattr(metadata, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT:
+        raise ValueError("evaluation staging workspace cannot be a reparse point")
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise RuntimeError("evaluation staging workspace is unavailable")
+
+
+def _validated_entry_kind(entry: os.DirEntry[str]) -> _EntryKind:
+    if entry.is_symlink():
+        raise ValueError(f"evaluation staging entry is a symbolic link: {entry.name}")
+    metadata = entry.stat(follow_symlinks=False)
+    if getattr(metadata, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT:
+        raise ValueError(f"evaluation staging entry is a reparse point: {entry.name}")
+    if stat.S_ISREG(metadata.st_mode):
+        return "file"
+    if stat.S_ISDIR(metadata.st_mode):
+        return "directory"
+    raise ValueError(f"evaluation staging entry is not a regular file or directory: {entry.name}")
 
 
 def _sha256_file(path: Path) -> str:
