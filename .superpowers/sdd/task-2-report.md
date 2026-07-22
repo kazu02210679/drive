@@ -187,3 +187,77 @@ exit 0
   contact-pair tests make this explicit.
 - Existing third-party matplotlib and Stable-Baselines evaluation-wrapper warnings remain, with
   no test or static-check failures.
+
+## Review follow-up: physical-collision success boundary
+
+### Change
+
+Added `typed_collision_flags(raw_info)` in `scenarios.runtime`. It strictly validates and
+returns the project-supported raw flags: `crash_vehicle`, `crash_human`, `crash_object`,
+`crash_sidewalk`, and `crash_building`.
+
+- Cut-in and Lead Brake retain actor-specific failure: only `crash_vehicle` plus exact contact
+  with the owned scenario actor yields `scenario_failure`.
+- Their success predicates now require no active typed physical-collision flags and no off-road
+  outcome at the survival boundary.
+- Nominal has no scenario actor, so physical collisions suppress success but never produce
+  `scenario_failure`; outer-environment physical-collision termination remains authoritative.
+
+### RED/GREEN evidence
+
+1. Cut-in boundary RED:
+
+   ```text
+   .venv\Scripts\python.exe -m pytest tests/unit/scenarios/test_cut_in.py -q
+   FAILED test_cut_in_does_not_succeed_at_the_boundary_after_another_vehicle_collision
+   Obtained: ScenarioStepResult(success=True, failure=False)
+   Expected: success=False, failure=False
+   1 failed, 13 passed, 14 warnings in 4.38s
+   ```
+
+   GREEN after the shared helper and Cut-in physical-collision success guard:
+
+   ```text
+   14 passed, 14 warnings in 3.75s
+   ```
+
+2. Lead Brake and Nominal boundary RED:
+
+   ```text
+   .venv\Scripts\python.exe -m pytest tests/unit/scenarios/test_cut_in.py tests/unit/scenarios/test_lead_brake.py tests/unit/scenarios/test_runtime.py -q
+   FAILED test_lead_brake_does_not_succeed_at_the_boundary_after_another_vehicle_collision
+   FAILED test_nominal_does_not_succeed_or_fail_after_a_physical_collision
+   2 failed, 46 passed, 14 warnings in 6.56s
+   ```
+
+   GREEN after applying `typed_collision_flags` consistently:
+
+   ```text
+   48 passed, 14 warnings in 7.90s
+   ```
+
+3. Focused environment and real Phase 5 verification:
+
+   ```text
+   .venv\Scripts\python.exe -m pytest tests/unit/envs/test_multi_agent_speed_env.py -q
+   76 passed, 14 warnings in 3.15s
+
+   .venv\Scripts\python.exe -m pytest tests/integration/test_phase5_metadrive_headless.py -q -m integration
+   2 passed, 14 warnings in 5.88s
+   ```
+
+### Final verification
+
+```text
+.venv\Scripts\python.exe -m ruff check src tests
+All checks passed!
+
+.venv\Scripts\python.exe -m mypy src
+Success: no issues found in 61 source files
+
+.venv\Scripts\python.exe -m pytest -q
+780 passed, 25 warnings in 57.66s
+
+git diff --check
+exit 0
+```

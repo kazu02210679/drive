@@ -17,10 +17,24 @@ from mad_driving.scenarios import (
     ScenarioStepResult,
     ScenarioTransition,
 )
+from mad_driving.scenarios.runtime import typed_collision_flags
 
 
 class FakeEnvironment:
     pass
+
+
+def test_typed_collision_flags_returns_only_supported_active_boolean_flags() -> None:
+    flags = typed_collision_flags(
+        {"crash_vehicle": True, "crash_human": False, "crash_building": True}
+    )
+
+    assert flags == frozenset({"crash_vehicle", "crash_building"})
+
+
+def test_typed_collision_flags_rejects_non_boolean_values() -> None:
+    with pytest.raises(TypeError, match="crash_vehicle.*boolean"):
+        typed_collision_flags({"crash_vehicle": 1})
 
 
 def test_scenarios_package_imports_in_a_fresh_process() -> None:

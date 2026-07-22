@@ -155,6 +155,37 @@ def test_lead_brake_does_not_fail_for_a_collision_with_another_vehicle() -> None
     assert transition.outcome == ScenarioStepResult(success=False, failure=False)
 
 
+def test_lead_brake_does_not_succeed_at_the_boundary_after_another_vehicle_collision() -> None:
+    runtime, environment, state = reset_lead_brake(trigger_s=1.0, survival_s=4.0)
+
+    transition = runtime.after_step(
+        environment,
+        state,
+        step_index=50,
+        raw_info={"crash_vehicle": True},
+    )
+
+    assert transition.outcome == ScenarioStepResult(success=False, failure=False)
+
+
+def test_nominal_does_not_succeed_or_fail_after_a_physical_collision() -> None:
+    environment = FakeEnvironment()
+    runtime = NominalScenarioRuntime(survival_s=4.0)
+    state = runtime.after_simulator_reset(
+        environment,
+        runtime.reset(environment, seeds=EpisodeSeeds(1, 2, 3)),
+    )
+
+    transition = runtime.after_step(
+        environment,
+        state,
+        step_index=40,
+        raw_info={"crash_vehicle": True},
+    )
+
+    assert transition.outcome == ScenarioStepResult(success=False, failure=False)
+
+
 def test_lead_brake_fails_only_when_the_ego_contacts_its_actor() -> None:
     runtime, environment, state = reset_lead_brake()
     environment.collided_actor_ids.add("lead-brake")

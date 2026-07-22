@@ -15,6 +15,7 @@ from mad_driving.scenarios.runtime import (
     ScenarioState,
     ScenarioStepResult,
     ScenarioTransition,
+    typed_collision_flags,
 )
 from mad_driving.scenarios.seeding import EpisodeSeeds
 
@@ -154,11 +155,16 @@ class CutInRuntime:
         raw_info: Mapping[str, object],
     ) -> ScenarioTransition:
         self._require_spawned_actor(environment, state)
-        vehicle_collision = bool(raw_info.get("crash_vehicle", False))
-        collision = vehicle_collision and environment.scenario_ego_collided_with(
+        collisions = typed_collision_flags(raw_info)
+        collision = "crash_vehicle" in collisions and environment.scenario_ego_collided_with(
             self._parameter_str(state, "actor_id")
         )
-        success = not collision and step_index >= self._parameter_int(state, "success_step")
+        off_road = bool(raw_info.get("out_of_road", False)) or bool(raw_info.get("off_road", False))
+        success = (
+            not collisions
+            and not off_road
+            and step_index >= self._parameter_int(state, "success_step")
+        )
         return ScenarioTransition(state, ScenarioStepResult(success=success, failure=collision))
 
     def observation_context(self, state: ScenarioState) -> ScenarioObservationContext:

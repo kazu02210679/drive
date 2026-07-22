@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
 from mad_driving.interfaces import OcclusionRegion
 from mad_driving.interfaces._validation import require_finite, require_non_empty
@@ -14,6 +14,35 @@ from mad_driving.scenarios.seeding import EpisodeSeeds
 if TYPE_CHECKING:
     from mad_driving.envs.multi_agent_speed_env import DrivingEnvironment
 
+
+TypedCollisionFlag = Literal[
+    "crash_vehicle",
+    "crash_human",
+    "crash_object",
+    "crash_sidewalk",
+    "crash_building",
+]
+
+_TYPED_COLLISION_FLAGS: tuple[TypedCollisionFlag, ...] = (
+    "crash_vehicle",
+    "crash_human",
+    "crash_object",
+    "crash_sidewalk",
+    "crash_building",
+)
+
+
+def typed_collision_flags(raw_info: Mapping[str, object]) -> frozenset[TypedCollisionFlag]:
+    """Return validated physical-collision flags reported by the simulator."""
+
+    active: set[TypedCollisionFlag] = set()
+    for flag in _TYPED_COLLISION_FLAGS:
+        value = raw_info.get(flag, False)
+        if not isinstance(value, bool):
+            raise TypeError(f"raw collision flag {flag} must be boolean")
+        if value:
+            active.add(flag)
+    return frozenset(active)
 
 def _freeze_parameter(value: object) -> object:
     """Copy JSON-like scenario parameters into recursively immutable containers."""

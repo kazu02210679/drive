@@ -192,6 +192,39 @@ def test_cut_in_does_not_fail_for_a_collision_with_another_vehicle() -> None:
     assert transition.outcome.failure is False
 
 
+def test_cut_in_does_not_succeed_at_the_boundary_after_another_vehicle_collision() -> None:
+    runtime, environment, state = reset_cut_in(trigger_s=1.0, merge_s=2.0)
+
+    transition = runtime.after_step(
+        environment, state, step_index=60, raw_info={"crash_vehicle": True}
+    )
+
+    assert transition.outcome.success is False
+    assert transition.outcome.failure is False
+
+
+def test_cut_in_does_not_succeed_at_the_boundary_after_a_human_collision() -> None:
+    runtime, environment, state = reset_cut_in(trigger_s=1.0, merge_s=2.0)
+
+    transition = runtime.after_step(
+        environment, state, step_index=60, raw_info={"crash_human": True}
+    )
+
+    assert transition.outcome.success is False
+    assert transition.outcome.failure is False
+
+
+def test_cut_in_does_not_succeed_at_the_boundary_when_off_road() -> None:
+    runtime, environment, state = reset_cut_in(trigger_s=1.0, merge_s=2.0)
+
+    transition = runtime.after_step(
+        environment, state, step_index=60, raw_info={"off_road": True}
+    )
+
+    assert transition.outcome.success is False
+    assert transition.outcome.failure is False
+
+
 def test_cut_in_fails_only_when_the_ego_contacts_its_actor() -> None:
     runtime, environment, state = reset_cut_in(trigger_s=1.0, merge_s=2.0)
     environment.collided_actor_ids.add("cut-in")

@@ -15,6 +15,7 @@ from mad_driving.scenarios.runtime import (
     ScenarioState,
     ScenarioStepResult,
     ScenarioTransition,
+    typed_collision_flags,
 )
 from mad_driving.scenarios.seeding import EpisodeSeeds
 
@@ -59,12 +60,12 @@ class NominalScenarioRuntime:
         raw_info: Mapping[str, object],
     ) -> ScenarioTransition:
         del environment
-        collision = bool(raw_info.get("crash_vehicle", False))
+        collisions = typed_collision_flags(raw_info)
         off_road = bool(raw_info.get("out_of_road", False)) or bool(raw_info.get("off_road", False))
-        success = not collision and not off_road and step_index >= self._require_success_step()
+        success = not collisions and not off_road and step_index >= self._require_success_step()
         return ScenarioTransition(
             state,
-            ScenarioStepResult(success=success, failure=collision),
+            ScenarioStepResult(success=success, failure=False),
         )
 
     def observation_context(self, state: ScenarioState) -> ScenarioObservationContext:
@@ -179,11 +180,13 @@ class LeadBrakeRuntime:
         raw_info: Mapping[str, object],
     ) -> ScenarioTransition:
         actor_id = self._require_spawned_actor(environment, state)
-        vehicle_collision = bool(raw_info.get("crash_vehicle", False))
-        collision = vehicle_collision and environment.scenario_ego_collided_with(actor_id)
+        collisions = typed_collision_flags(raw_info)
+        collision = "crash_vehicle" in collisions and environment.scenario_ego_collided_with(
+            actor_id
+        )
         off_road = bool(raw_info.get("out_of_road", False)) or bool(raw_info.get("off_road", False))
         success = (
-            not collision
+            not collisions
             and not off_road
             and step_index >= self._parameter_int(state, "success_step")
         )
