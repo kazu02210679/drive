@@ -1,3 +1,4 @@
+import json
 import math
 from itertools import pairwise
 
@@ -7,6 +8,110 @@ from metadrive.component.traffic_participants.cyclist import Cyclist
 
 from mad_driving.config.loader import load_config
 from mad_driving.envs import MultiAgentSpeedEnv
+from mad_driving.interfaces import DecisionTrace
+
+ALLOWED_SCENARIOS_BY_LEVEL = {
+    0: {"nominal"},
+    1: {"lead_brake"},
+    2: {"lead_brake", "cut_in"},
+    3: {"occluded_crossing"},
+}
+
+
+def fixed_level_config(level: int):
+    payload = load_config("configs/base.yaml").model_dump(mode="python")
+    payload["scenario_id"] = "phase5"
+    payload["scenarios"]["selection"] = "auto"
+    payload["scenarios"]["curriculum"] = {
+        "mode": "fixed",
+        "fixed_level": level,
+    }
+    return type(load_config("configs/base.yaml")).model_validate(payload)
+
+
+def run_fixed_level_replay(level: int) -> bytes:
+    environment = MultiAgentSpeedEnv(
+        fixed_level_config(level),
+        role="train",
+        worker_index=0,
+    )
+    try:
+        observation, reset_info = environment.reset(seed=42)
+        assert observation.shape == (24,)
+        assert np.isfinite(observation).all()
+        manager = environment._environment.engine.scenario_actor_manager
+        trajectory: list[dict[str, object]] = []
+        outcomes: list[dict[str, bool]] = []
+        trace_metadata: list[dict[str, object]] = []
+        for _ in range(3):
+            observation, reward, terminated, truncated, info = environment.step(3)
+            assert observation.shape == (24,)
+            assert np.isfinite(observation).all()
+            assert math.isfinite(reward)
+            trajectory.append(
+                {
+                    actor_id: {
+                        "position_xy_m": list(manager.actor_state(actor_id).position_xy_m),
+                        "velocity_xy_mps": list(manager.actor_state(actor_id).velocity_xy_mps),
+                    }
+                    for actor_id in manager.actor_ids()
+                }
+            )
+            outcomes.append(
+                {
+                    "scenario_success": info["scenario_success"],
+                    "scenario_failure": info["scenario_failure"],
+                    "collision_occurred": info["collision_occurred"],
+                    "terminated": terminated,
+                    "truncated": truncated,
+                }
+            )
+            trace = info["decision_trace"]
+            assert isinstance(trace, DecisionTrace)
+            trace_metadata.append(
+                {
+                    "environment_seed": trace.episode_rng_seed,
+                    "scenario_selection_seed": trace.metadrive_scenario_index,
+                    "scenario_parameter_seed": trace.scenario_parameter_seed,
+                    "scenario_id": trace.scenario_id,
+                    "difficulty_level": trace.difficulty_level,
+                    "role": trace.role,
+                    "worker_index": trace.worker_index,
+                }
+            )
+            if terminated or truncated:
+                break
+        return json.dumps(
+            {
+                "scenario_id": reset_info["scenario_id"],
+                "difficulty_level": reset_info["difficulty_level"],
+                "scenario_parameters": reset_info["scenario_parameters"],
+                "trajectory": trajectory,
+                "outcomes": outcomes,
+                "trace_metadata": trace_metadata,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    finally:
+        environment.close()
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("level", range(4))
+def test_real_fixed_levels_select_only_allowed_scenarios_and_replay_byte_for_byte(
+    level: int,
+) -> None:
+    first = run_fixed_level_replay(level)
+    second = run_fixed_level_replay(level)
+
+    assert first == second
+    payload = json.loads(first)
+    assert payload["scenario_id"] in ALLOWED_SCENARIOS_BY_LEVEL[level]
+    assert payload["difficulty_level"] == level
+    assert all(item["scenario_id"] == payload["scenario_id"] for item in payload["trace_metadata"])
+    assert all(item["difficulty_level"] == level for item in payload["trace_metadata"])
 
 
 def run_prefix() -> tuple[np.ndarray, tuple[float, ...], tuple[float, ...]]:

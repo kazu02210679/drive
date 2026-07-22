@@ -46,17 +46,30 @@ class ResetInfoEnv(gym.Env[NDArray[np.float32], int]):
         return np.zeros(24, dtype=np.float32), 0.0, False, False, {}
 
 
-def seed_info(episode: int, road: int, parameters: int) -> dict[str, int]:
+def seed_info(
+    environment: object,
+    selection: object,
+    parameters: object,
+    *,
+    scenario_parameters: object | None = None,
+) -> dict[str, object]:
     return {
-        "episode_rng_seed": episode,
-        "metadrive_scenario_index": road,
+        "environment_seed": environment,
+        "scenario_selection_seed": selection,
         "scenario_parameter_seed": parameters,
+        "scenario_id": "lead_brake",
+        "difficulty_level": 1,
+        "scenario_parameters": (
+            {"initial_gap_m": 40.0, "nested": {"finite": [1, 2.5, True, None]}}
+            if scenario_parameters is None
+            else scenario_parameters
+        ),
     }
 
 
 def read_jsonl(path: Path) -> list[dict[str, object]]:
     values = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
-    return [value for value in values if "episode_rng_seed" in value]
+    return [value for value in values if "environment_seed" in value]
 
 
 def replace_artifact_if_permitted(path: Path, replacement: bytes) -> bool:
@@ -98,10 +111,13 @@ def test_replacement_after_exclusive_create_cannot_inject_history(tmp_path: Path
     injected = (
         json.dumps(
             {
-                "episode_rng_seed": 1,
-                "metadrive_scenario_index": 2,
+                "difficulty_level": 1,
+                "environment_seed": 1,
                 "role": "train",
                 "scenario_parameter_seed": 3,
+                "scenario_parameters": {"initial_gap_m": 40.0},
+                "scenario_id": "lead_brake",
+                "scenario_selection_seed": 2,
                 "worker_index": 0,
             },
             sort_keys=True,
@@ -169,7 +185,7 @@ def test_replacement_between_parse_and_hash_is_rejected(
     def replace_after_record_parse(*args: Any, **kwargs: Any) -> Any:
         nonlocal replacement_attempted, replacement_succeeded
         parsed = real_loads(*args, **kwargs)
-        if not replacement_attempted and isinstance(parsed, dict) and "episode_rng_seed" in parsed:
+        if not replacement_attempted and isinstance(parsed, dict) and "environment_seed" in parsed:
             replacement_attempted = True
             replacement_succeeded = replace_artifact_if_permitted(artifact, original)
         return parsed
@@ -215,14 +231,17 @@ def test_parent_held_identity_rejects_post_close_self_attested_replacement(
         },
         "record_type": "episode_seed_artifact",
         "role": "train",
-        "schema_version": 2,
+        "schema_version": 3,
         "worker_index": 0,
     }
     replacement_record = {
-        "episode_rng_seed": 999,
-        "metadrive_scenario_index": 1000,
+        "difficulty_level": 1,
+        "environment_seed": 999,
         "role": "train",
         "scenario_parameter_seed": 1001,
+        "scenario_parameters": {"initial_gap_m": 40.0},
+        "scenario_id": "lead_brake",
+        "scenario_selection_seed": 1000,
         "worker_index": 0,
     }
     artifact.write_text(
@@ -384,17 +403,29 @@ def test_records_each_actual_reset_info_in_order_and_summarizes_it(tmp_path: Pat
     artifact = workspace / "episode_seeds" / "train-worker-000.jsonl"
     assert read_jsonl(artifact) == [
         {
-            "episode_rng_seed": 41,
-            "metadrive_scenario_index": 101,
+            "difficulty_level": 1,
+            "environment_seed": 41,
             "role": "train",
             "scenario_parameter_seed": 201,
+            "scenario_parameters": {
+                "initial_gap_m": 40.0,
+                "nested": {"finite": [1, 2.5, True, None]},
+            },
+            "scenario_id": "lead_brake",
+            "scenario_selection_seed": 101,
             "worker_index": 0,
         },
         {
-            "episode_rng_seed": 42,
-            "metadrive_scenario_index": 102,
+            "difficulty_level": 1,
+            "environment_seed": 42,
             "role": "train",
             "scenario_parameter_seed": 202,
+            "scenario_parameters": {
+                "initial_gap_m": 40.0,
+                "nested": {"finite": [1, 2.5, True, None]},
+            },
+            "scenario_id": "lead_brake",
+            "scenario_selection_seed": 102,
             "worker_index": 0,
         },
     ]
@@ -408,7 +439,7 @@ def test_records_each_actual_reset_info_in_order_and_summarizes_it(tmp_path: Pat
             "path": "episode_seeds/train-worker-000.jsonl",
             "record_count": 2,
             "role": "train",
-            "schema_version": 2,
+            "schema_version": 3,
             "sha256": summaries[0]["sha256"],
             "worker_index": 0,
         },
@@ -452,7 +483,7 @@ def test_role_and_worker_artifacts_never_collide(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "malformed_info",
     [
-        {"metadrive_scenario_index": 1, "scenario_parameter_seed": 2},
+        {"scenario_selection_seed": 1, "scenario_parameter_seed": 2},
         seed_info(True, 1, 2),
         seed_info(-1, 1, 2),
         seed_info(1, 1.5, 2),
@@ -478,6 +509,64 @@ def test_malformed_reset_seed_info_fails_closed_without_a_record(
     artifact = workspace / "episode_seeds" / "validation-worker-000.jsonl"
     assert read_jsonl(artifact) == []
     wrapped.close()
+
+
+@pytest.mark.parametrize(
+    "scenario_parameters",
+    [
+        {"value": math.nan},
+        {"value": math.inf},
+        {1: "non-string key"},
+        {"value": object()},
+    ],
+)
+def test_scenario_parameters_must_be_recursively_json_safe_and_finite(
+    tmp_path: Path,
+    scenario_parameters: object,
+) -> None:
+    workspace = tmp_path / "private-workspace"
+    workspace.mkdir()
+    wrapped = EpisodeSeedRecordingWrapper(
+        ResetInfoEnv([seed_info(1, 2, 3, scenario_parameters=scenario_parameters)]),
+        workspace=workspace,
+        role="train",
+        worker_index=0,
+    )
+
+    with pytest.raises(ValueError, match="scenario_parameters"):
+        wrapped.reset()
+
+    artifact = workspace / "episode_seeds" / "train-worker-000.jsonl"
+    assert read_jsonl(artifact) == []
+    wrapped.close()
+
+
+def test_seed_artifact_record_has_exact_phase5_provenance_fields(tmp_path: Path) -> None:
+    workspace = tmp_path / "private-workspace"
+    workspace.mkdir()
+    wrapped = EpisodeSeedRecordingWrapper(
+        ResetInfoEnv([seed_info(11, 12, 13)]),
+        workspace=workspace,
+        role="validation",
+        worker_index=4,
+    )
+
+    wrapped.reset()
+    wrapped.close()
+
+    record = read_jsonl(
+        workspace / "episode_seeds" / "validation-worker-004.jsonl"
+    )[0]
+    assert set(record) == {
+        "role",
+        "worker_index",
+        "environment_seed",
+        "scenario_selection_seed",
+        "scenario_parameter_seed",
+        "scenario_id",
+        "difficulty_level",
+        "scenario_parameters",
+    }
 
 
 def test_summary_rejects_malformed_or_unowned_artifacts(tmp_path: Path) -> None:
@@ -556,7 +645,7 @@ def test_reset_forwards_nonempty_options_and_records_actual_info(tmp_path: Path)
     wrapped.close()
 
     artifact = workspace / "episode_seeds" / "train-worker-000.jsonl"
-    assert read_jsonl(artifact)[0]["episode_rng_seed"] == 1
+    assert read_jsonl(artifact)[0]["environment_seed"] == 1
 
 
 def test_summary_rejects_an_extra_file_in_owned_artifact_inventory(tmp_path: Path) -> None:
@@ -620,12 +709,15 @@ def test_single_read_inventory_rejects_each_malformed_jsonl_boundary(
         "bad_header": b"{\n",
         "blank_record": header + b"\n\n",
         "bad_record_json": header + b"\n{\n",
-        "duplicate_record_field": header + b'\n{"episode_rng_seed":1,"episode_rng_seed":9,'
-        b'"metadrive_scenario_index":2,"role":"train",'
-        b'"scenario_parameter_seed":3,"worker_index":0}\n',
+        "duplicate_record_field": header + b'\n{"difficulty_level":1,'
+        b'"environment_seed":1,"environment_seed":9,"role":"train",'
+        b'"scenario_id":"lead_brake","scenario_parameter_seed":3,'
+        b'"scenario_parameters":{},"scenario_selection_seed":2,"worker_index":0}\n',
         "bad_record_fields": header + b'\n{"role":"train"}\n',
-        "bad_record_identity": header + b'\n{"episode_rng_seed":1,"metadrive_scenario_index":2,'
-        b'"role":"validation","scenario_parameter_seed":3,"worker_index":0}\n',
+        "bad_record_identity": header + b'\n{"difficulty_level":1,"environment_seed":1,'
+        b'"role":"validation","scenario_id":"lead_brake",'
+        b'"scenario_parameter_seed":3,"scenario_parameters":{},'
+        b'"scenario_selection_seed":2,"worker_index":0}\n',
     }
     artifact.write_bytes(payloads[mode])
 

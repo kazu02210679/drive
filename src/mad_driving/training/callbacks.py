@@ -5,11 +5,19 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from numbers import Integral, Real
+from pathlib import Path
 from typing import Any, Final
 
 import gymnasium as gym
+import numpy as np
 from stable_baselines3.common.callbacks import BaseCallback, EvalCallback
 from stable_baselines3.common.vec_env import VecEnv
+
+from mad_driving.training.curriculum import (
+    CurriculumController,
+    CurriculumState,
+    write_curriculum_state,
+)
 
 REWARD_COMPONENT_KEYS: Final = (
     "progress_reward",
@@ -75,6 +83,102 @@ class SeededEvalCallback(EvalCallback):
             if assigned_seeds != (self.validation_episode_seed,):
                 raise RuntimeError("Validation environment did not accept its fixed episode seed")
         return super()._on_step()
+
+
+class CurriculumEvalCallback(SeededEvalCallback):
+    """Observe typed validation outcomes and broadcast reset-boundary level changes."""
+
+    def __init__(
+        self,
+        eval_env: gym.Env[Any, Any] | VecEnv,
+        *,
+        validation_episode_seed: int,
+        controller: CurriculumController,
+        curriculum_state_path: Path,
+        callback_on_new_best: BaseCallback | None = None,
+        callback_after_eval: BaseCallback | None = None,
+        n_eval_episodes: int = 5,
+        eval_freq: int = 10_000,
+        log_path: str | None = None,
+        best_model_save_path: str | None = None,
+        deterministic: bool = True,
+        render: bool = False,
+        verbose: int = 1,
+        warn: bool = True,
+    ) -> None:
+        if not isinstance(controller, CurriculumController):
+            raise TypeError("controller must be a CurriculumController")
+        super().__init__(
+            eval_env,
+            validation_episode_seed=validation_episode_seed,
+            callback_on_new_best=callback_on_new_best,
+            callback_after_eval=callback_after_eval,
+            n_eval_episodes=n_eval_episodes,
+            eval_freq=eval_freq,
+            log_path=log_path,
+            best_model_save_path=best_model_save_path,
+            deterministic=deterministic,
+            render=render,
+            verbose=verbose,
+            warn=warn,
+        )
+        self.controller = controller
+        self.curriculum_state_path = Path(curriculum_state_path)
+        self._terminal_records: list[tuple[bool, bool]] = []
+
+    @property
+    def terminal_records(self) -> tuple[tuple[bool, bool], ...]:
+        """Return the records captured during the current scheduled evaluation."""
+
+        return tuple(self._terminal_records)
+
+    def _log_success_callback(
+        self,
+        locals_: dict[str, Any],
+        globals_: dict[str, Any],
+    ) -> None:
+        super()._log_success_callback(locals_, globals_)
+        done = locals_.get("done")
+        if not isinstance(done, bool | np.bool_):
+            raise ValueError("validation done must be a boolean")
+        if not bool(done):
+            return
+        info = locals_.get("info")
+        if not isinstance(info, Mapping):
+            raise ValueError("terminal validation info must be a mapping")
+        scenario_success = info.get("scenario_success")
+        collision_occurred = info.get("collision_occurred")
+        if type(scenario_success) is not bool:
+            raise ValueError("terminal scenario_success must be a boolean")
+        if type(collision_occurred) is not bool:
+            raise ValueError("terminal collision_occurred must be a boolean")
+        self._terminal_records.append((scenario_success, collision_occurred))
+
+    def _on_step(self) -> bool:
+        scheduled = self.eval_freq > 0 and self.n_calls % self.eval_freq == 0
+        previous_state: CurriculumState | None = None
+        if scheduled:
+            self._terminal_records = []
+            previous_state = self.controller.state
+        continue_training = super()._on_step()
+        if not scheduled:
+            return continue_training
+        if len(self._terminal_records) != self.n_eval_episodes:
+            raise RuntimeError(
+                "scheduled validation did not produce exactly one terminal curriculum record "
+                "per episode"
+            )
+        state = self.controller.observe(
+            "validation",
+            successes=sum(success for success, _collision in self._terminal_records),
+            collisions=sum(collision for _success, collision in self._terminal_records),
+            episodes=len(self._terminal_records),
+        )
+        write_curriculum_state(state, self.curriculum_state_path)
+        if previous_state is not None and state.level != previous_state.level:
+            self.training_env.env_method("set_difficulty_level", state.level)
+            self.eval_env.env_method("set_difficulty_level", state.level)
+        return continue_training
 
 
 class RewardComponentsCallback(BaseCallback):

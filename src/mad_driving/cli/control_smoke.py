@@ -145,6 +145,8 @@ def run_control_smoke(
                 scenario_parameter_seed=seeds.scenario_parameter_seed,
                 role="train",
                 worker_index=0,
+                scenario_id=frame.scenario_id,
+                difficulty_level=0,
             )
             transition = runtime.after_step(
                 env,

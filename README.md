@@ -4,7 +4,88 @@ MetaDrive上の1台の自車内部に、複数の決定論的な専門Agentと�
 
 最上位要件は [`docs/multi_agent_driving_mvp_spec.md`](docs/multi_agent_driving_mvp_spec.md) です。
 
+## Phase 5 scenarios and curriculum
+
+Phase 5 adds deterministic Lead Brake, Cut-in, and Occluded Crossing hazards plus
+a validation-driven Levels 0--3 curriculum. The Coordinator contract is unchanged:
+the Agent still receives exactly one 24-dimensional `float32` observation and
+chooses from `KEEP=0`, `SLOW=1`, `PREPARE_STOP=2`, and `STOP=3`. Scenario identity,
+scenario parameters, and seed identities are provenance only; they are never added
+to the Agent observation.
+
+Configuration is loaded as one base YAML followed by ordered recursive overlays.
+The training CLI accepts repeatable `--overlay` arguments:
+
+```powershell
+# Fixed Level 1: Lead Brake
+python -m mad_driving.cli.train --config configs/base.yaml --overlay configs/scenarios/lead_brake.yaml --smoke --run-dir runs/phase5_lead_brake_smoke
+
+# Fixed Level 2: Cut-in
+python -m mad_driving.cli.train --config configs/base.yaml --overlay configs/scenarios/cut_in.yaml --smoke --run-dir runs/phase5_cut_in_smoke
+
+# Fixed Level 3: Occluded Crossing with its seeded secondary lead vehicle
+python -m mad_driving.cli.train --config configs/base.yaml --overlay configs/scenarios/occluded_crossing.yaml --smoke --run-dir runs/phase5_occluded_crossing_smoke
+```
+
+The same merge is available from Python as
+`load_config("configs/base.yaml", "configs/scenarios/lead_brake.yaml")`.
+Overlay order is significant, mapping/scalar conflicts are rejected, and only the
+fully resolved configuration is written to `config_resolved.yaml`.
+
+Curriculum levels have a stable mapping:
+
+- Level 0: `nominal`.
+- Level 1: `lead_brake`.
+- Level 2: a uniform seeded choice of `lead_brake` or `cut_in`.
+- Level 3: `occluded_crossing` plus its secondary lead vehicle.
+
+`fixed` mode holds `fixed_level`. `automatic` mode starts at `initial_level` and
+advances exactly one level only after the configured number of consecutive
+scheduled validations satisfy both the success-rate and collision-rate thresholds.
+Only validation episodes can update it; test episodes are rejected. Level changes
+are queued in training and validation environments and activate on the next reset.
+For example, an automatic overlay can contain:
+
+```yaml
+scenario_id: phase5
+scenarios:
+  selection: auto
+  curriculum:
+    mode: automatic
+    initial_level: 0
+    success_rate_threshold: 0.80
+    collision_rate_threshold: 0.05
+    consecutive_evaluations: 2
+```
+
+Every actual reset is appended and `fsync`ed to a schema-v3 per-worker JSONL file.
+Each record has exactly `role`, `worker_index`, `environment_seed`,
+`scenario_selection_seed`, `scenario_parameter_seed`, `scenario_id`,
+`difficulty_level`, and recursively finite JSON-safe `scenario_parameters`.
+`environment_seed` is the Gymnasium episode RNG identity;
+`scenario_selection_seed` is the role-bounded MetaDrive scenario index; and
+`scenario_parameter_seed` alone drives the Phase 5 scenario choice and parameter
+sampling. Train `[0, 10000)`, validation `[10000, 11000)`, and test
+`[20000, 21000)` scenario identities remain disjoint. Test seeds are never used for
+training, validation, checkpoint selection, or curriculum progression.
+
+`curriculum_state.yaml` is atomically replaced with flush/`fsync` semantics. Its
+state values and SHA-256, together with schema-v3 JSONL counts and hashes, are bound
+into research contract v5 in `run_metadata.json`. Resume requires an exact parent
+state, matching hash, and compatible curriculum configuration.
+
+Useful commands:
+
+```powershell
+python -m mad_driving.cli.train --help
+python -m mad_driving.cli.train --config configs/base.yaml --smoke --run-dir runs/phase5_nominal_smoke
+python -m pytest tests/integration/test_phase5_metadrive_headless.py -m integration -q
+```
+
 ## Current status
+
+Phase 5 scenario generation, curriculum progression, provenance, and exact resume are
+implemented. The Phase 4.2 control and PPO behavior described below remains preserved.
 
 Phase 4.2（comparison-validity remediation）まで実装済みです。Phase 1の厳密な設定検証とMetaDrive境界、Phase 2の専門Agent、Phase 3の安全制御、Phase 4のGymnasium/PPO経路に加え、次を含みます。
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 from collections.abc import Mapping, Sequence
 from numbers import Integral
@@ -14,21 +15,24 @@ import gymnasium as gym
 
 from mad_driving.scenarios import EnvironmentRole
 
-EPISODE_SEED_ARTIFACT_SCHEMA_VERSION: Final = 2
+EPISODE_SEED_ARTIFACT_SCHEMA_VERSION: Final = 3
 _ARTIFACT_DIRECTORY: Final = "episode_seeds"
 _HEADER_RECORD_TYPE: Final = "episode_seed_artifact"
 _RECORD_FIELDS: Final = frozenset(
     {
         "role",
         "worker_index",
-        "episode_rng_seed",
-        "metadrive_scenario_index",
+        "environment_seed",
+        "scenario_selection_seed",
         "scenario_parameter_seed",
+        "scenario_id",
+        "difficulty_level",
+        "scenario_parameters",
     }
 )
 _SEED_FIELDS: Final = (
-    "episode_rng_seed",
-    "metadrive_scenario_index",
+    "environment_seed",
+    "scenario_selection_seed",
     "scenario_parameter_seed",
 )
 
@@ -93,11 +97,54 @@ def _validate_reset_info(
                 f"Environment reset seed info {field} must be a non-negative non-bool integer"
             )
         seeds[field] = int(value)
+    scenario_id = info.get("scenario_id")
+    if not isinstance(scenario_id, str) or not scenario_id:
+        raise ValueError("Environment reset seed info scenario_id must be a non-empty string")
+    difficulty_level = info.get("difficulty_level")
+    if (
+        isinstance(difficulty_level, bool)
+        or not isinstance(difficulty_level, Integral)
+        or not 0 <= int(difficulty_level) <= 3
+    ):
+        raise ValueError(
+            "Environment reset seed info difficulty_level must be an integer from 0 through 3"
+        )
+    scenario_parameters = _validated_json_value(
+        info.get("scenario_parameters"),
+        "scenario_parameters",
+    )
+    if not isinstance(scenario_parameters, dict):
+        raise ValueError("Environment reset seed info scenario_parameters must be a JSON object")
     return {
         "role": role,
         "worker_index": worker_index,
         **seeds,
+        "scenario_id": scenario_id,
+        "difficulty_level": int(difficulty_level),
+        "scenario_parameters": scenario_parameters,
     }
+
+
+def _validated_json_value(value: object, name: str) -> object:
+    if isinstance(value, Mapping):
+        result: dict[str, object] = {}
+        for key, nested in value.items():
+            if not isinstance(key, str):
+                raise ValueError(f"Environment reset seed info {name} keys must be strings")
+            result[key] = _validated_json_value(nested, f"{name}.{key}")
+        return result
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+        return [
+            _validated_json_value(nested, f"{name}[]")
+            for nested in value
+        ]
+    if value is None or type(value) in (bool, int, str):
+        return value
+    if type(value) is float and math.isfinite(value):
+        return value
+    raise ValueError(
+        f"Environment reset seed info {name} must contain only finite JSON-safe values"
+    )
 
 
 def _file_identity(stat_result: os.stat_result) -> tuple[int, int]:

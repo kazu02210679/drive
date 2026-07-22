@@ -29,9 +29,56 @@ def test_help_lists_all_training_options(capsys: pytest.CaptureFixture[str]) -> 
     assert exc_info.value.code == 0
     output = capsys.readouterr().out
     assert "--config" in output
+    assert "--overlay" in output
     assert "--smoke" in output
     assert "--run-dir" in output
     assert "--resume-from" in output
+
+
+def test_ordered_overlays_are_validated_and_forwarded_to_config_loader(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "base.yaml"
+    first_overlay = tmp_path / "lead.yaml"
+    second_overlay = tmp_path / "automatic.yaml"
+    for path in (config_path, first_overlay, second_overlay):
+        path.write_text("placeholder: true\n", encoding="utf-8")
+    config = make_config()
+    calls: list[tuple[Path, tuple[Path, ...]]] = []
+
+    def capture_load(path: Path, *overlays: Path) -> AppConfig:
+        calls.append((path, overlays))
+        return config
+
+    monkeypatch.setattr(train_module, "load_config", capture_load)
+    monkeypatch.setattr(
+        train_module,
+        "run_training",
+        lambda received, **kwargs: TrainingResult(
+            run_dir=kwargs["run_dir"],
+            final_checkpoint=kwargs["run_dir"] / "checkpoints" / "final_model.zip",
+            best_checkpoint=kwargs["run_dir"] / "checkpoints" / "best_model.zip",
+            timesteps=8,
+        ),
+    )
+
+    assert (
+        main(
+            [
+                "--config",
+                str(config_path),
+                "--overlay",
+                str(first_overlay),
+                "--overlay",
+                str(second_overlay),
+                "--run-dir",
+                str(tmp_path / "run"),
+            ]
+        )
+        == 0
+    )
+    assert calls == [(config_path, (first_overlay, second_overlay))]
 
 
 def test_config_is_required(capsys: pytest.CaptureFixture[str]) -> None:

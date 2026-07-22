@@ -19,14 +19,20 @@ from gymnasium import spaces
 from stable_baselines3.common.utils import ConstantSchedule, FloatSchedule
 
 from mad_driving.config.models import AppConfig
+from mad_driving.training.curriculum import (
+    CURRICULUM_STATE_FILENAME,
+    CurriculumController,
+    CurriculumState,
+    read_curriculum_state,
+)
 
-RESEARCH_CONTRACT_VERSION: Final = 4
+RESEARCH_CONTRACT_VERSION: Final = 5
 OBSERVATION_SCHEMA_VERSION: Final = 1
 OBSERVATION_SHAPE: Final = (24,)
 OBSERVATION_DTYPE: Final = "float32"
 ACTION_SCHEMA_VERSION: Final = 1
 ACTION_ORDER: Final = ("KEEP", "SLOW", "PREPARE_STOP", "STOP")
-EPISODE_SEED_ARTIFACT_SCHEMA_VERSION: Final = 2
+EPISODE_SEED_ARTIFACT_SCHEMA_VERSION: Final = 3
 _ALLOWED_CONFIG_DIFFS: Final = frozenset(
     {
         "training.checkpoint_interval_steps",
@@ -210,6 +216,7 @@ class RunMetadata:
     action_schema_version: int = ACTION_SCHEMA_VERSION
     action_count: int = len(ACTION_ORDER)
     action_order: tuple[str, ...] = ACTION_ORDER
+    curriculum_state: Mapping[str, Any] | None = None
     episode_seed_artifacts: tuple[Mapping[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
@@ -277,9 +284,63 @@ class RunMetadata:
             raise ValueError("resume must be ResumeMetadata or null")
         object.__setattr__(
             self,
+            "curriculum_state",
+            _validated_curriculum_state_artifact(self.curriculum_state),
+        )
+        object.__setattr__(
+            self,
             "episode_seed_artifacts",
             _validated_episode_seed_artifacts(self.episode_seed_artifacts),
         )
+
+
+def _validated_curriculum_state_artifact(
+    value: object,
+) -> Mapping[str, Any] | None:
+    if value is None:
+        return None
+    required = {
+        "path",
+        "sha256",
+        "level",
+        "consecutive_passes",
+        "evaluations",
+    }
+    if not isinstance(value, Mapping) or set(value) != required:
+        raise ValueError("curriculum_state fields are malformed")
+    if value["path"] != CURRICULUM_STATE_FILENAME:
+        raise ValueError(
+            f"curriculum_state.path must equal {CURRICULUM_STATE_FILENAME!r}"
+        )
+    digest = value["sha256"]
+    if (
+        not isinstance(digest, str)
+        or len(digest) != 64
+        or digest != digest.lower()
+        or any(character not in "0123456789abcdef" for character in digest)
+    ):
+        raise ValueError("curriculum_state.sha256 must be a lowercase SHA-256 digest")
+    try:
+        state = CurriculumState(
+            level=value["level"],
+            consecutive_passes=value["consecutive_passes"],
+            evaluations=value["evaluations"],
+        )
+    except (TypeError, ValueError) as error:
+        raise ValueError("curriculum_state values are malformed") from error
+    return cast(
+        Mapping[str, Any],
+        _freeze_json(
+            {
+                "path": CURRICULUM_STATE_FILENAME,
+                "sha256": digest,
+                "level": state.level,
+                "consecutive_passes": state.consecutive_passes,
+                "evaluations": state.evaluations,
+            },
+            "curriculum_state",
+        ),
+    )
 
 
 def _validated_episode_seed_artifacts(
@@ -376,6 +437,7 @@ class ResumeSource:
     resolved_config: dict[str, Any]
     checkpoint_sha256: str
     config_diff: dict[str, Any]
+    curriculum_state: CurriculumState
 
 
 def sha256_file(path: str | Path) -> str:
@@ -383,6 +445,31 @@ def sha256_file(path: str | Path) -> str:
 
     with Path(path).open("rb") as source:
         return hashlib.file_digest(source, "sha256").hexdigest()
+
+
+def curriculum_state_artifact(
+    path: str | Path,
+    state: CurriculumState,
+) -> Mapping[str, Any]:
+    """Return the validated metadata identity of one curriculum state file."""
+
+    state_path = Path(path)
+    if state_path.name != CURRICULUM_STATE_FILENAME:
+        raise ValueError(
+            f"curriculum state path must be named {CURRICULUM_STATE_FILENAME}"
+        )
+    return cast(
+        Mapping[str, Any],
+        _validated_curriculum_state_artifact(
+            {
+                "path": CURRICULUM_STATE_FILENAME,
+                "sha256": sha256_file(state_path),
+                "level": state.level,
+                "consecutive_passes": state.consecutive_passes,
+                "evaluations": state.evaluations,
+            }
+        ),
+    )
 
 
 def _require_int(value: object, name: str) -> int:
@@ -452,6 +539,7 @@ def _parse_run_metadata(payload: object) -> RunMetadata:
         "action_order",
         "resolved_config",
         "resume",
+        "curriculum_state",
     }
     optional = {"episode_seed_artifacts"}
     if not required <= set(values) or set(values) - required - optional:
@@ -482,6 +570,7 @@ def _parse_run_metadata(payload: object) -> RunMetadata:
         ),
         action_count=_require_int(values["action_count"], "action_count"),
         action_order=tuple(action_order_value),
+        curriculum_state=values["curriculum_state"],
         episode_seed_artifacts=values.get("episode_seed_artifacts", ()),
     )
 
@@ -583,6 +672,26 @@ def resolve_resume_source(checkpoint: str | Path, current_config: AppConfig) -> 
         raise ValueError(f"Resume source resolved config is malformed: {config_path}") from exc
     current_payload = current_config.model_dump(mode="json")
     config_diff = _allowed_config_diff(parent_config, current_payload)
+    curriculum_summary = metadata.curriculum_state
+    if curriculum_summary is None:
+        raise ValueError("Resume source curriculum state metadata is missing")
+    curriculum_path = run_dir / CURRICULUM_STATE_FILENAME
+    if not curriculum_path.is_file():
+        raise ValueError(f"Resume source curriculum state not found: {curriculum_path}")
+    expected_digest = cast(str, curriculum_summary["sha256"])
+    if sha256_file(curriculum_path) != expected_digest:
+        raise ValueError("Resume source curriculum state hash mismatch")
+    curriculum_state = read_curriculum_state(curriculum_path)
+    if sha256_file(curriculum_path) != expected_digest:
+        raise ValueError("Resume source curriculum state changed while being validated")
+    expected_state = CurriculumState(
+        level=curriculum_summary["level"],
+        consecutive_passes=curriculum_summary["consecutive_passes"],
+        evaluations=curriculum_summary["evaluations"],
+    )
+    if curriculum_state != expected_state:
+        raise ValueError("Resume source curriculum state does not match run metadata")
+    CurriculumController(current_config.scenarios.curriculum, curriculum_state)
     return ResumeSource(
         checkpoint=checkpoint_path,
         run_dir=run_dir.resolve(strict=True),
@@ -590,6 +699,7 @@ def resolve_resume_source(checkpoint: str | Path, current_config: AppConfig) -> 
         resolved_config=parent_config,
         checkpoint_sha256=sha256_file(checkpoint_path),
         config_diff=config_diff,
+        curriculum_state=curriculum_state,
     )
 
 
@@ -653,6 +763,7 @@ def write_run_metadata(metadata: RunMetadata, destination: Path) -> None:
         action_schema_version=metadata.action_schema_version,
         action_count=metadata.action_count,
         action_order=metadata.action_order,
+        curriculum_state=metadata.curriculum_state,
         episode_seed_artifacts=metadata.episode_seed_artifacts,
     )
     payload = {
@@ -665,6 +776,11 @@ def write_run_metadata(metadata: RunMetadata, destination: Path) -> None:
         "action_schema_version": validated.action_schema_version,
         "action_count": validated.action_count,
         "action_order": list(validated.action_order),
+        "curriculum_state": (
+            None
+            if validated.curriculum_state is None
+            else _thaw_json(validated.curriculum_state, "curriculum_state")
+        ),
         "episode_seed_artifacts": _thaw_json(
             validated.episode_seed_artifacts,
             "episode_seed_artifacts",
@@ -761,6 +877,7 @@ def validate_resume_contract(model: object, config: AppConfig, metadata: RunMeta
 __all__ = [
     "ResumeMetadata",
     "RunMetadata",
+    "curriculum_state_artifact",
     "sha256_file",
     "validate_resume_contract",
 ]

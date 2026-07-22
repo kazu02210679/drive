@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
-from math import isclose
+from math import isclose, isfinite
 from numbers import Integral
 from typing import Any, Protocol, cast
 
@@ -508,6 +508,8 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
                 scenario_parameter_seed=seeds.scenario_parameter_seed,
                 role=self._role,
                 worker_index=self._worker_index,
+                scenario_id=scenario_state.scenario_id,
+                difficulty_level=self._difficulty_level(scenario_state),
             )
             info = step_info
             info.update(self._episode_metadata(seeds, actual_scenario_index))
@@ -524,6 +526,7 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
                     "failed_agent_ids": tuple(analysis.failed_agent_ids),
                     "analysis_errors": tuple(analysis.errors),
                     "reward_components": dict(reward_result.components),
+                    "collision_occurred": privileged.collision_occurred,
                     "control_fail_safe": control_fail_safe,
                     "control_fail_safe_reason": control_fail_safe_reason,
                     "decision_trace": trace,
@@ -629,22 +632,22 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
     ) -> dict[str, object]:
         return {
             "episode_rng_seed": int(seeds.episode_rng_seed),
+            "environment_seed": int(seeds.episode_rng_seed),
             "simulator_seed": int(seeds.metadrive_scenario_index),
             "scenario_seed": int(seeds.scenario_parameter_seed),
             "metadrive_scenario_index": int(actual_scenario_index),
+            "scenario_selection_seed": int(actual_scenario_index),
             "scenario_parameter_seed": int(seeds.scenario_parameter_seed),
             "role": self._role,
             "worker_index": int(self._worker_index),
         }
 
-    @staticmethod
     def _scenario_metadata(
+        self,
         state: ScenarioState,
         result: ScenarioStepResult,
     ) -> dict[str, object]:
-        difficulty_level = state.parameters.get("difficulty_level")
-        if isinstance(difficulty_level, bool) or not isinstance(difficulty_level, int):
-            difficulty_level = None
+        difficulty_level = self._difficulty_level(state)
         return {
             "scenario_id": state.scenario_id,
             "difficulty_level": difficulty_level,
@@ -653,15 +656,33 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
             "scenario_failure": result.failure,
         }
 
+    def _difficulty_level(self, state: ScenarioState) -> int:
+        value = state.parameters.get("difficulty_level")
+        if value is None and self._config.scenario_id != "phase5":
+            return 0
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not 0 <= value <= 3
+        ):
+            raise ValueError("Phase 5 difficulty_level must be an integer from 0 through 3")
+        return value
+
     @staticmethod
     def _json_safe_copy(value: object) -> object:
-        if value is None or isinstance(value, str | bool | int | float):
+        if value is None or type(value) in (str, bool, int):
+            return value
+        if type(value) is float:
+            if not isfinite(value):
+                raise ValueError("scenario parameters must contain only finite numbers")
             return value
         if isinstance(value, Mapping):
-            return {
-                str(key): MultiAgentSpeedEnv._json_safe_copy(nested)
-                for key, nested in value.items()
-            }
+            copied: dict[str, object] = {}
+            for key, nested in value.items():
+                if not isinstance(key, str):
+                    raise ValueError("scenario parameter mapping keys must be strings")
+                copied[key] = MultiAgentSpeedEnv._json_safe_copy(nested)
+            return copied
         if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
             return [MultiAgentSpeedEnv._json_safe_copy(item) for item in value]
         raise ValueError("scenario parameters must be JSON-safe")

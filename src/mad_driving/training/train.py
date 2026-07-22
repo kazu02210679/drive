@@ -21,7 +21,13 @@ from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 from mad_driving.config.models import AppConfig
 from mad_driving.envs.multi_agent_speed_env import MultiAgentSpeedEnv
 from mad_driving.scenarios import EnvironmentRole
-from mad_driving.training.callbacks import RewardComponentsCallback, SeededEvalCallback
+from mad_driving.training.callbacks import CurriculumEvalCallback, RewardComponentsCallback
+from mad_driving.training.curriculum import (
+    CURRICULUM_STATE_FILENAME,
+    CurriculumController,
+    CurriculumState,
+    write_curriculum_state,
+)
 from mad_driving.training.episode_seeds import (
     EpisodeSeedArtifactDescriptor,
     EpisodeSeedRecordingWrapper,
@@ -30,6 +36,7 @@ from mad_driving.training.episode_seeds import (
 from mad_driving.training.metadata import (
     ResumeMetadata,
     RunMetadata,
+    curriculum_state_artifact,
     resolve_resume_source,
     sha256_file,
     validate_resume_contract,
@@ -61,6 +68,7 @@ VecEnvFactory = Callable[[list[Callable[[], gym.Env[Any, Any]]]], Any]
 GenericFactory = Callable[..., FactoryResult]
 _STAGING_PREFIX = ".training-"
 _VECTOR_CLOSE_AUDIT_MARKER = "_mad_driving_close_audit_complete"
+_GRACEFUL_PROCESS_JOIN_TIMEOUT_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -248,7 +256,10 @@ def _stop_processes(
     for process in processes:
         join = getattr(process, "join", None)
         if graceful_join and callable(join):
-            if error := _attempt_process_operation(join, 1.0):
+            if error := _attempt_process_operation(
+                join,
+                _GRACEFUL_PROCESS_JOIN_TIMEOUT_SECONDS,
+            ):
                 operation_errors.append(error)
         if _process_is_alive(process):
             escalated = True
@@ -474,6 +485,19 @@ def _scaled_frequency(interval_steps: int, num_envs: int) -> int:
     return max(interval_steps // num_envs, 1)
 
 
+def _initial_curriculum_state(config: AppConfig) -> CurriculumState:
+    curriculum = config.scenarios.curriculum
+    level = curriculum.fixed_level if curriculum.mode == "fixed" else curriculum.initial_level
+    return CurriculumState(level=level, consecutive_passes=0, evaluations=0)
+
+
+def _broadcast_difficulty_level(vector_env: object, level: int) -> None:
+    env_method = getattr(vector_env, "env_method", None)
+    if not callable(env_method):
+        raise RuntimeError("Vector environment cannot restore the curriculum difficulty level")
+    env_method("set_difficulty_level", level)
+
+
 def _write_resolved_config(config: AppConfig, destination: Path) -> None:
     serialized = yaml.safe_dump(
         config.model_dump(mode="json"),
@@ -568,7 +592,7 @@ def run_training(
     dummy_vec_env_factory: VecEnvFactory = DummyVecEnv,
     subproc_vec_env_factory: VecEnvFactory = SubprocVecEnv,
     checkpoint_callback_factory: GenericFactory[Any] = CheckpointCallback,
-    eval_callback_factory: GenericFactory[Any] = SeededEvalCallback,
+    eval_callback_factory: GenericFactory[Any] = CurriculumEvalCallback,
     reward_callback_factory: GenericFactory[Any] = RewardComponentsCallback,
 ) -> TrainingResult:
     """Train or resume one PPO policy and close every environment on exit."""
@@ -579,6 +603,15 @@ def run_training(
     if resume_path is not None and not resume_path.is_file():
         raise FileNotFoundError(f"Resume checkpoint not found: {resume_path}")
     resume_source = None if resume_path is None else resolve_resume_source(resume_path, config)
+    curriculum_state = (
+        _initial_curriculum_state(config)
+        if resume_source is None
+        else resume_source.curriculum_state
+    )
+    curriculum_controller = CurriculumController(
+        config.scenarios.curriculum,
+        curriculum_state,
+    )
     if resume_source is not None:
         canonical_destination = destination.resolve()
         if (
@@ -591,6 +624,7 @@ def run_training(
 
     ownership = RunDirectoryOwnership.acquire(destination)
     workspace = ownership.workspace
+    curriculum_state_path = workspace / CURRICULUM_STATE_FILENAME
     checkpoints_dir = workspace / "checkpoints"
     tensorboard_dir = workspace / "tensorboard"
     requested_timesteps = (
@@ -611,6 +645,7 @@ def run_training(
     model_logger_closed = False
     primary_error: BaseException | None = None
     try:
+        write_curriculum_state(curriculum_state, curriculum_state_path)
         train_env = _build_train_env(
             config,
             train_owner,
@@ -623,6 +658,9 @@ def run_training(
             dummy_vec_env_factory=dummy_vec_env_factory,
             subproc_vec_env_factory=subproc_vec_env_factory,
         )
+        if resume_source is not None:
+            _broadcast_difficulty_level(train_env, curriculum_state.level)
+            _broadcast_difficulty_level(eval_env, curriculum_state.level)
 
         if resume_source is None:
             model = ppo_factory(
@@ -682,6 +720,10 @@ def run_training(
             RunMetadata(
                 resolved_config=config.model_dump(mode="json"),
                 resume=resume_metadata,
+                curriculum_state=curriculum_state_artifact(
+                    curriculum_state_path,
+                    curriculum_controller.state,
+                ),
             ),
             workspace / "run_metadata.json",
         )
@@ -699,6 +741,8 @@ def run_training(
         eval_callback = eval_callback_factory(
             eval_env=eval_env,
             validation_episode_seed=config.seed,
+            controller=curriculum_controller,
+            curriculum_state_path=curriculum_state_path,
             best_model_save_path=str(staging_dir),
             eval_freq=_scaled_frequency(
                 min(config.training.eval_interval_steps, requested_timesteps),
@@ -754,10 +798,15 @@ def run_training(
             workspace,
             expected_descriptors=trusted_seed_descriptors,
         )
+        write_curriculum_state(curriculum_controller.state, curriculum_state_path)
         write_run_metadata(
             RunMetadata(
                 resolved_config=config.model_dump(mode="json"),
                 resume=resume_metadata,
+                curriculum_state=curriculum_state_artifact(
+                    curriculum_state_path,
+                    curriculum_controller.state,
+                ),
                 episode_seed_artifacts=episode_seed_artifacts,
             ),
             workspace / "run_metadata.json",

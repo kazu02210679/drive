@@ -700,17 +700,21 @@ def assert_episode_metadata(
     worker_index: int = 0,
 ) -> None:
     assert info["episode_rng_seed"] == seeds.episode_rng_seed
+    assert info["environment_seed"] == seeds.episode_rng_seed
     assert info["simulator_seed"] == seeds.metadrive_scenario_index
     assert info["scenario_seed"] == seeds.scenario_parameter_seed
     assert info["metadrive_scenario_index"] == seeds.metadrive_scenario_index
+    assert info["scenario_selection_seed"] == seeds.metadrive_scenario_index
     assert info["scenario_parameter_seed"] == seeds.scenario_parameter_seed
     assert info["role"] == role
     assert info["worker_index"] == worker_index
     for key in (
         "episode_rng_seed",
+        "environment_seed",
         "simulator_seed",
         "scenario_seed",
         "metadrive_scenario_index",
+        "scenario_selection_seed",
         "scenario_parameter_seed",
         "role",
         "worker_index",
@@ -1385,6 +1389,29 @@ def test_collision_success_and_failure_are_terminated(
         harness.env.close()
 
 
+@pytest.mark.parametrize(
+    ("raw_info", "expected_collision"),
+    [
+        ({"crash_vehicle": True}, True),
+        ({}, False),
+    ],
+)
+def test_step_info_exposes_typed_boolean_collision_for_curriculum(
+    raw_info: dict[str, bool],
+    expected_collision: bool,
+) -> None:
+    simulator = FakeSimulator(step_results=((False, False, raw_info),))
+    harness = make_env(simulators=(simulator,))
+    try:
+        harness.env.reset(seed=82)
+        _, _, _, _, info = harness.env.step(DrivingAction.KEEP)
+
+        assert info["collision_occurred"] is expected_collision
+        assert type(info["collision_occurred"]) is bool
+    finally:
+        harness.env.close()
+
+
 def test_privileged_off_road_terminates_without_raw_termination() -> None:
     simulator = FakeSimulator(step_results=((False, False, {"out_of_road": True}),))
     harness = make_env(simulators=(simulator,))
@@ -1503,6 +1530,8 @@ def test_step_builds_trace_from_pre_step_analysis_and_post_step_reward() -> None
         assert trace.scenario_parameter_seed == info["scenario_parameter_seed"]
         assert trace.role == "train"
         assert trace.worker_index == 0
+        assert trace.scenario_id == "unit_multi_agent_speed_env"
+        assert trace.difficulty_level == 0
         assert reward == pytest.approx(sum(info["reward_components"].values()))
         assert harness.env.observation_space.contains(observation)
         assert terminated is False
@@ -1747,7 +1776,7 @@ def test_reset_and_step_info_include_scenario_metadata() -> None:
 
     for info in (reset_info, step_info):
         assert info["scenario_id"] == "unit_multi_agent_speed_env"
-        assert info["difficulty_level"] is None
+        assert info["difficulty_level"] == 0
         assert info["scenario_parameters"] == {}
         assert info["scenario_success"] is False
         assert info["scenario_failure"] is False

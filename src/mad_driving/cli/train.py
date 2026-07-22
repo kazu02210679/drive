@@ -15,6 +15,12 @@ from mad_driving.training.train import require_empty_run_directory, run_training
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True, help="Path to the YAML configuration file")
+    parser.add_argument(
+        "--overlay",
+        action="append",
+        default=[],
+        help="Ordered YAML overlay applied after --config; repeat for multiple overlays",
+    )
     parser.add_argument("--smoke", action="store_true", help="Train for smoke_timesteps")
     parser.add_argument("--run-dir", required=True, help="Fresh artifact directory for this run")
     parser.add_argument("--resume-from", help="Existing PPO checkpoint to resume")
@@ -33,11 +39,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         config_path = Path(args.config)
         _require_file(config_path, "Configuration file")
+        overlay_paths = tuple(Path(path) for path in args.overlay)
+        for overlay_path in overlay_paths:
+            _require_file(overlay_path, "Configuration overlay")
         resume_from = None if args.resume_from is None else Path(args.resume_from)
         if resume_from is not None:
             _require_file(resume_from, "Resume checkpoint")
 
-        config = load_config(config_path)
+        config = load_config(config_path, *overlay_paths)
         run_dir = Path(args.run_dir)
         require_empty_run_directory(run_dir)
 

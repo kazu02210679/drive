@@ -70,6 +70,8 @@ class DecisionTrace:
     scenario_parameter_seed: int | None = None
     role: str | None = None
     worker_index: int | None = None
+    scenario_id: str | None = None
+    difficulty_level: int | None = None
 
     def __post_init__(self) -> None:
         if self.step_index < 0:
@@ -134,6 +136,22 @@ class DecisionTrace:
                     raise ValueError(f"{name} must be a non-negative integer")
             if self.role not in {"train", "validation", "test"}:
                 raise ValueError("role must be train, validation, or test")
+        scenario_metadata = (self.scenario_id, self.difficulty_level)
+        if any(value is not None for value in scenario_metadata):
+            if any(value is None for value in scenario_metadata):
+                raise ValueError("scenario trace metadata must be complete")
+            if not isinstance(self.scenario_id, str) or not self.scenario_id:
+                raise ValueError("scenario_id must be a non-empty string")
+            if (
+                isinstance(self.difficulty_level, bool)
+                or not isinstance(self.difficulty_level, int)
+                or not 0 <= self.difficulty_level <= 3
+            ):
+                raise ValueError("difficulty_level must be an integer from 0 through 3")
+        if any(value is not None for value in episode_metadata) and any(
+            value is None for value in scenario_metadata
+        ):
+            raise ValueError("scenario trace metadata must be complete with episode metadata")
         object.__setattr__(self, "shield_reasons", shield_reasons)
         object.__setattr__(self, "claims", claims)
         object.__setattr__(self, "failed_agent_ids", failed_agent_ids)

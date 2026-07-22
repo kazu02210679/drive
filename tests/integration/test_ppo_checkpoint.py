@@ -31,6 +31,11 @@ class TinyDeterministicEnv(gym.Env[NDArray[np.float32], int]):
         self.role = role
         self.worker_index = worker_index
         self.reset_count = 0
+        self.difficulty_level = 1
+        self.pending_difficulty_level = 1
+
+    def set_difficulty_level(self, level: int) -> None:
+        self.pending_difficulty_level = level
 
     def reset(
         self,
@@ -41,13 +46,17 @@ class TinyDeterministicEnv(gym.Env[NDArray[np.float32], int]):
         super().reset(seed=seed)
         del options
         self.steps = 0
+        self.difficulty_level = self.pending_difficulty_level
         role_offset = 100 if self.role == "train" else 10_000
         episode_seed = role_offset + self.worker_index * 100 + self.reset_count
         self.reset_count += 1
         return np.zeros(24, dtype=np.float32), {
-            "episode_rng_seed": episode_seed,
-            "metadrive_scenario_index": episode_seed + 20_000,
+            "environment_seed": episode_seed,
+            "scenario_selection_seed": episode_seed + 20_000,
             "scenario_parameter_seed": episode_seed + 30_000,
+            "scenario_id": "lead_brake",
+            "difficulty_level": self.difficulty_level,
+            "scenario_parameters": {"initial_gap_m": 40.0},
         }
 
     def step(
@@ -58,7 +67,10 @@ class TinyDeterministicEnv(gym.Env[NDArray[np.float32], int]):
         self.steps += 1
         observation = np.full(24, self.steps / 4.0, dtype=np.float32)
         reward = float(action == self.steps % 4)
-        return observation, reward, self.steps == 4, False, {}
+        return observation, reward, self.steps == 4, False, {
+            "scenario_success": self.steps == 4,
+            "collision_occurred": False,
+        }
 
     def close(self) -> None:
         self.closed = True
@@ -70,6 +82,13 @@ class SeedAwareTinyEnv(gym.Env[NDArray[np.float32], int]):
     observation_space = spaces.Box(low=-1.0, high=1.0, shape=(24,), dtype=np.float32)
     action_space = spaces.Discrete(4)
 
+    def __init__(self) -> None:
+        self.difficulty_level = 1
+        self.pending_difficulty_level = 1
+
+    def set_difficulty_level(self, level: int) -> None:
+        self.pending_difficulty_level = level
+
     def reset(
         self,
         *,
@@ -78,13 +97,17 @@ class SeedAwareTinyEnv(gym.Env[NDArray[np.float32], int]):
     ) -> tuple[NDArray[np.float32], dict[str, Any]]:
         super().reset(seed=seed)
         del options
+        self.difficulty_level = self.pending_difficulty_level
         episode_seed = (
             seed if seed is not None else int(self.np_random.integers(0, np.iinfo(np.int32).max))
         )
         return np.zeros(24, dtype=np.float32), {
-            "episode_rng_seed": episode_seed,
-            "metadrive_scenario_index": episode_seed + 20_000,
+            "environment_seed": episode_seed,
+            "scenario_selection_seed": episode_seed + 20_000,
             "scenario_parameter_seed": episode_seed + 30_000,
+            "scenario_id": "lead_brake",
+            "difficulty_level": self.difficulty_level,
+            "scenario_parameters": {"initial_gap_m": 40.0},
         }
 
     def step(
@@ -92,7 +115,10 @@ class SeedAwareTinyEnv(gym.Env[NDArray[np.float32], int]):
         action: int,
     ) -> tuple[NDArray[np.float32], float, bool, bool, dict[str, Any]]:
         assert self.action_space.contains(action)
-        return np.zeros(24, dtype=np.float32), 0.0, True, False, {}
+        return np.zeros(24, dtype=np.float32), 0.0, True, False, {
+            "scenario_success": True,
+            "collision_occurred": False,
+        }
 
 
 class CapturingSubprocVecEnv(SubprocVecEnv):
@@ -165,7 +191,7 @@ def checkpoint_hash(checkpoint: Path) -> str:
 def episode_seed_records(run_dir: Path, role: EnvironmentRole) -> list[int]:
     artifact = run_dir / "episode_seeds" / f"{role}-worker-000.jsonl"
     return [
-        int(record["episode_rng_seed"])
+        int(record["environment_seed"])
         for record in (
             json.loads(line) for line in artifact.read_text(encoding="utf-8").splitlines()[1:]
         )
@@ -318,20 +344,23 @@ def test_real_ppo_writes_artifacts_and_resumes_transactionally(tmp_path: Path) -
         seed_records[summary["role"]] = records
         assert summary["record_count"] == len(records)
         assert summary["sha256"] == checkpoint_hash(artifact)
-        assert summary["schema_version"] == 2
+        assert summary["schema_version"] == 3
         assert summary["file_identity"] == header["file_identity"]
-    train_seeds = [record["episode_rng_seed"] for record in seed_records["train"]]
-    validation_seeds = [record["episode_rng_seed"] for record in seed_records["validation"]]
+    train_seeds = [record["environment_seed"] for record in seed_records["train"]]
+    validation_seeds = [record["environment_seed"] for record in seed_records["validation"]]
     assert len(set(train_seeds)) >= 2
     assert all(seed < 10_000 for seed in train_seeds)
     assert all(seed >= 10_000 for seed in validation_seeds)
     assert all(
         set(record)
         == {
-            "episode_rng_seed",
-            "metadrive_scenario_index",
+            "difficulty_level",
+            "environment_seed",
             "role",
             "scenario_parameter_seed",
+            "scenario_parameters",
+            "scenario_id",
+            "scenario_selection_seed",
             "worker_index",
         }
         for records in seed_records.values()

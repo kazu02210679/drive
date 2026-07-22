@@ -23,7 +23,15 @@ from mad_driving.training import RunMetadata, sha256_file
 from mad_driving.training import metadata as metadata_module
 from mad_driving.training import ownership as ownership_module
 from mad_driving.training import train as train_module
-from mad_driving.training.metadata import RESEARCH_CONTRACT_VERSION
+from mad_driving.training.curriculum import (
+    CurriculumState,
+    read_curriculum_state,
+    write_curriculum_state,
+)
+from mad_driving.training.metadata import (
+    RESEARCH_CONTRACT_VERSION,
+    curriculum_state_artifact,
+)
 from mad_driving.training.train import TrainingResult, run_training
 
 
@@ -46,6 +54,7 @@ class FakeEnv(gym.Env[np.ndarray, int]):
         self.closed = False
         self.close_calls = 0
         self.reset_calls = 0
+        self.difficulty_levels: list[int] = []
 
     def reset(
         self,
@@ -59,9 +68,12 @@ class FakeEnv(gym.Env[np.ndarray, int]):
         episode_seed = role_offset + self.worker_index * 100 + self.reset_calls
         self.reset_calls += 1
         return np.zeros(24, dtype=np.float32), {
-            "episode_rng_seed": episode_seed,
-            "metadrive_scenario_index": episode_seed + 20_000,
+            "environment_seed": episode_seed,
+            "scenario_selection_seed": episode_seed + 20_000,
             "scenario_parameter_seed": episode_seed + 30_000,
+            "scenario_id": "nominal",
+            "difficulty_level": 0,
+            "scenario_parameters": {},
         }
 
     def step(
@@ -74,6 +86,9 @@ class FakeEnv(gym.Env[np.ndarray, int]):
     def close(self) -> None:
         self.closed = True
         self.close_calls += 1
+
+    def set_difficulty_level(self, level: int) -> None:
+        self.difficulty_levels.append(level)
 
 
 @dataclass(frozen=True)
@@ -146,6 +161,12 @@ class FakeVecEnv:
 
     def get_attr(self, attr_name: str) -> list[object]:
         return [env.get_wrapper_attr(attr_name) for env in self.envs]
+
+    def env_method(self, method_name: str, *args: object) -> list[object]:
+        return [
+            getattr(env.unwrapped, method_name)(*args)
+            for env in self.envs
+        ]
 
 
 class VecFactory:
@@ -446,6 +467,19 @@ def make_config(*, num_envs: int = 1, **training_overrides: Any) -> AppConfig:
     )
 
 
+def make_automatic_config() -> AppConfig:
+    payload = make_config().model_dump(mode="python")
+    payload["scenarios"]["selection"] = "auto"
+    payload["scenarios"]["curriculum"] = {
+        "mode": "automatic",
+        "initial_level": 0,
+        "success_rate_threshold": 0.8,
+        "collision_rate_threshold": 0.05,
+        "consecutive_evaluations": 2,
+    }
+    return AppConfig.model_validate(payload)
+
+
 @dataclass(frozen=True)
 class CompatibleSourceRun:
     run_dir: Path
@@ -454,6 +488,9 @@ class CompatibleSourceRun:
 
 def seed_compatible_source_run(
     tmp_path: Path,
+    *,
+    config: AppConfig | None = None,
+    curriculum_state: CurriculumState | None = None,
     **ppo_overrides: Any,
 ) -> CompatibleSourceRun:
     index = 0
@@ -462,13 +499,23 @@ def seed_compatible_source_run(
     run_dir = tmp_path / f"source-run-{index}"
     checkpoints_dir = run_dir / "checkpoints"
     checkpoints_dir.mkdir(parents=True)
-    config = make_config()
-    resolved_config = config.model_dump(mode="json")
+    selected_config = config or make_config()
+    resolved_config = selected_config.model_dump(mode="json")
     (run_dir / "config_resolved.yaml").write_text(
         yaml.safe_dump(resolved_config, allow_unicode=True, sort_keys=False),
         encoding="utf-8",
     )
-    metadata = RunMetadata(resolved_config=resolved_config)
+    selected_state = curriculum_state or CurriculumState(
+        level=0,
+        consecutive_passes=0,
+        evaluations=0,
+    )
+    curriculum_path = run_dir / "curriculum_state.yaml"
+    write_curriculum_state(selected_state, curriculum_path)
+    metadata = RunMetadata(
+        resolved_config=resolved_config,
+        curriculum_state=curriculum_state_artifact(curriculum_path, selected_state),
+    )
     metadata_module.write_run_metadata(metadata, run_dir / "run_metadata.json")
     checkpoint = checkpoints_dir / "final_model.zip"
     FakePPO.write_checkpoint(
@@ -1079,6 +1126,7 @@ def test_fresh_run_writes_complete_research_contract_metadata(tmp_path: Path) ->
 
     metadata = json.loads((run_dir / "run_metadata.json").read_text(encoding="utf-8"))
     summaries = metadata.pop("episode_seed_artifacts")
+    curriculum = metadata.pop("curriculum_state")
     assert metadata == {
         "research_contract_version": RESEARCH_CONTRACT_VERSION,
         "observation_schema_version": 1,
@@ -1090,6 +1138,14 @@ def test_fresh_run_writes_complete_research_contract_metadata(tmp_path: Path) ->
         "resolved_config": config.model_dump(mode="json"),
         "resume": None,
     }
+    curriculum_path = run_dir / "curriculum_state.yaml"
+    assert curriculum == {
+        "path": "curriculum_state.yaml",
+        "sha256": hashlib.sha256(curriculum_path.read_bytes()).hexdigest(),
+        "level": 0,
+        "consecutive_passes": 0,
+        "evaluations": 0,
+    }
     assert [
         (summary["path"], summary["record_count"], summary["role"], summary["worker_index"])
         for summary in summaries
@@ -1100,7 +1156,7 @@ def test_fresh_run_writes_complete_research_contract_metadata(tmp_path: Path) ->
     for summary in summaries:
         artifact = run_dir / summary["path"]
         stat_result = os.stat(artifact, follow_symlinks=False)
-        assert summary["schema_version"] == 2
+        assert summary["schema_version"] == 3
         assert summary["file_identity"] == {
             "device": stat_result.st_dev,
             "inode": stat_result.st_ino,
@@ -1131,15 +1187,30 @@ def test_training_persists_actual_reset_seed_artifacts_by_role_and_worker(
         item["path"]: [
             json.loads(line)
             for line in (run_dir / item["path"]).read_text(encoding="utf-8").splitlines()
-            if "episode_rng_seed" in line
+            if "environment_seed" in line
         ]
         for item in summaries
     }
     train_worker_0 = records["episode_seeds/train-worker-000.jsonl"]
     train_worker_1 = records["episode_seeds/train-worker-001.jsonl"]
-    assert [record["episode_rng_seed"] for record in train_worker_0] == [0, 1]
-    assert [record["episode_rng_seed"] for record in train_worker_1] == [100, 101]
-    assert records["episode_seeds/validation-worker-000.jsonl"][0]["episode_rng_seed"] == 10_000
+    assert [record["environment_seed"] for record in train_worker_0] == [0, 1]
+    assert [record["environment_seed"] for record in train_worker_1] == [100, 101]
+    assert records["episode_seeds/validation-worker-000.jsonl"][0]["environment_seed"] == 10_000
+    assert all(
+        set(record)
+        == {
+            "role",
+            "worker_index",
+            "environment_seed",
+            "scenario_selection_seed",
+            "scenario_parameter_seed",
+            "scenario_id",
+            "difficulty_level",
+            "scenario_parameters",
+        }
+        for worker_records in records.values()
+        for record in worker_records
+    )
     assert all(environment.closed for environment in environments.created)
     assert not list(tmp_path.glob(".actual-reset-seeds.training-*"))
 
@@ -1377,6 +1448,20 @@ def test_callback_frequencies_have_a_minimum_of_one(tmp_path: Path) -> None:
 
     assert checkpoint.calls[0]["save_freq"] == 1
     assert evaluation.calls[0]["eval_freq"] == 1
+
+
+def test_training_wires_initial_curriculum_controller_and_owned_state_path(
+    tmp_path: Path,
+) -> None:
+    evaluation = EvalCallbackFactory()
+    run_dir = tmp_path / "curriculum-callback-wiring"
+
+    run_with_fakes(make_config(), run_dir, eval_factory=evaluation)
+
+    call = evaluation.calls[0]
+    controller = call["controller"]
+    assert controller.state == CurriculumState(0, 0, 0)
+    assert Path(call["curriculum_state_path"]).name == "curriculum_state.yaml"
 
 
 def test_failed_best_validation_does_not_publish_a_best_checkpoint(
@@ -1991,6 +2076,26 @@ class UnconfirmedEscalatedProcess(FakeProcess):
         self.alive = False
 
 
+class DelayedGracefulProcess(FakeProcess):
+    def __init__(self) -> None:
+        super().__init__(exits_on_terminate=True, exits_on_kill=True)
+
+    def join(self, timeout: float | None = None) -> None:
+        self.join_calls.append(timeout)
+        if timeout is not None and timeout >= 2.0:
+            self.alive = False
+            self.exitcode = 0
+
+
+class DelayedCloseRemote(FakeRemote):
+    def __init__(self) -> None:
+        super().__init__()
+        self.sent: list[tuple[str, None]] = []
+
+    def send(self, message: tuple[str, None]) -> None:
+        self.sent.append(message)
+
+
 class RuntimeCloseFailingRemote(GracefulRemote):
     def close(self) -> None:
         super().close()
@@ -2073,7 +2178,7 @@ def test_successful_training_confirms_subprocess_training_worker_exited(
     remote = training.remotes[0]
     assert remote.sent == [("close", None)]
     assert remote.close_calls == 1
-    assert process.join_calls == [1.0]
+    assert process.join_calls == [5.0]
     assert process.terminate_calls == 0
     assert process.kill_calls == 0
     assert process.is_alive() is False
@@ -2124,7 +2229,7 @@ def test_preclosed_subprocess_still_requires_first_exitcode_audit() -> None:
     with pytest.raises(RuntimeError, match="exit code 1"):
         train_module._close_vector_env(vector_env)
 
-    assert process.join_calls == [1.0]
+    assert process.join_calls == [5.0]
 
 
 @pytest.mark.parametrize(
@@ -2259,6 +2364,30 @@ def test_runtime_cleanup_escalation_fails_once_after_stopping_worker() -> None:
         process.kill_calls,
         len(process.join_calls),
     ) == operation_counts
+
+
+def test_runtime_cleanup_allows_slow_graceful_metadrive_worker_exit() -> None:
+    vector_env = RuntimeProcessVecEnv(
+        [
+            lambda: FakeEnv(
+                0,
+                config=make_config(),
+                role="train",
+                worker_index=0,
+            )
+        ]
+    )
+    process = DelayedGracefulProcess()
+    remote = DelayedCloseRemote()
+    vector_env.processes = [process]
+    vector_env.remotes = (remote,)
+
+    train_module._close_vector_env(vector_env)
+
+    assert remote.sent == [("close", None)]
+    assert process.terminate_calls == 0
+    assert process.kill_calls == 0
+    assert process.exitcode == 0
 
 
 def test_runtime_subprocess_remote_close_failure_is_propagated() -> None:
@@ -2415,6 +2544,104 @@ def test_resume_records_provenance_preserves_source_and_keeps_timesteps(
     assert FakePPO.instances[0].num_timesteps == 17_596
     assert result.timesteps == 5_096
     assert source_tree_bytes(source.run_dir) == source_before
+
+
+def test_resume_restores_exact_automatic_curriculum_state_without_regression(
+    tmp_path: Path,
+) -> None:
+    config = make_automatic_config()
+    parent_state = CurriculumState(level=2, consecutive_passes=1, evaluations=7)
+    source = seed_compatible_source_run(
+        tmp_path,
+        config=config,
+        curriculum_state=parent_state,
+    )
+    destination = tmp_path / "curriculum-continued"
+
+    result, environments, *_ = run_with_fakes(
+        config,
+        destination,
+        resume_from=source.checkpoint,
+    )
+
+    restored = read_curriculum_state(result.run_dir / "curriculum_state.yaml")
+    assert restored == parent_state
+    metadata = json.loads((result.run_dir / "run_metadata.json").read_text(encoding="utf-8"))
+    assert metadata["curriculum_state"] == {
+        "path": "curriculum_state.yaml",
+        "sha256": sha256_file(result.run_dir / "curriculum_state.yaml"),
+        "level": 2,
+        "consecutive_passes": 1,
+        "evaluations": 7,
+    }
+    assert all(environment.difficulty_levels == [2] for environment in environments.created)
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    ["missing", "hash-mismatch", "malformed", "level-out-of-range", "metadata-mismatch"],
+)
+def test_resume_rejects_invalid_parent_curriculum_state_before_destination(
+    tmp_path: Path,
+    corruption: str,
+) -> None:
+    source = seed_compatible_source_run(tmp_path)
+    state_path = source.run_dir / "curriculum_state.yaml"
+    metadata_path = source.run_dir / "run_metadata.json"
+    if corruption == "missing":
+        state_path.unlink()
+    elif corruption == "hash-mismatch":
+        state_path.write_text(
+            "level: 0\nconsecutive_passes: 0\nevaluations: 1\n",
+            encoding="utf-8",
+        )
+    elif corruption == "malformed":
+        state_path.write_text("level: [", encoding="utf-8")
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["curriculum_state"]["sha256"] = sha256_file(state_path)
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    elif corruption == "level-out-of-range":
+        state_path.write_text(
+            "level: 4\nconsecutive_passes: 0\nevaluations: 0\n",
+            encoding="utf-8",
+        )
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["curriculum_state"].update({"sha256": sha256_file(state_path), "level": 4})
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    else:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["curriculum_state"]["evaluations"] = 1
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    destination = tmp_path / f"rejected-curriculum-{corruption}"
+    environments = EnvFactory()
+
+    with pytest.raises(ValueError, match="curriculum|Curriculum"):
+        run_with_fakes(
+            make_config(),
+            destination,
+            resume_from=source.checkpoint,
+            env_factory=environments,
+        )
+
+    assert not destination.exists()
+    assert environments.calls == []
+    assert FakePPO.load_calls == []
+
+
+def test_resume_rejects_incompatible_curriculum_configuration(
+    tmp_path: Path,
+) -> None:
+    source = seed_compatible_source_run(tmp_path)
+    payload = make_config().model_dump(mode="python")
+    payload["scenarios"]["curriculum"]["success_rate_threshold"] = 0.9
+    incompatible = AppConfig.model_validate(payload)
+
+    with pytest.raises(ValueError, match="scenarios.curriculum.success_rate_threshold"):
+        run_with_fakes(
+            incompatible,
+            tmp_path / "incompatible-curriculum",
+            resume_from=source.checkpoint,
+        )
 
 
 @pytest.mark.parametrize(
