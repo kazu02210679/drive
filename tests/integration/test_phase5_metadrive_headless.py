@@ -3,6 +3,7 @@ from itertools import pairwise
 
 import numpy as np
 import pytest
+from metadrive.component.traffic_participants.cyclist import Cyclist
 
 from mad_driving.config.loader import load_config
 from mad_driving.envs import MultiAgentSpeedEnv
@@ -144,14 +145,15 @@ def run_occluded_crossing_prefix() -> tuple[tuple[tuple[float, float], ...], boo
         assert manager.actor_ids() == ("crossing-cyclist", "static-occluder", "crossing-lead")
         cyclist = manager.engine.get_objects(["crossing-cyclist"])["crossing-cyclist"]
         assert cyclist.id == "crossing-cyclist"
-        assert type(cyclist).__name__ == "Cyclist"
-        assert isinstance(info["crash_human"], bool)
+        assert isinstance(cyclist, Cyclist)
 
         reset_frame = environment._frame
         assert reset_frame is not None
         assert "crossing-cyclist" not in {
             actor.actor_id for actor in reset_frame.observation.visible_actors
         }
+        reset_visible_ids = {actor.actor_id for actor in reset_frame.observation.visible_actors}
+        assert "crossing-lead" in reset_visible_ids
         privileged = {actor.actor_id: actor for actor in reset_frame.privileged.all_actors}
         assert privileged["crossing-cyclist"].visible is False
         assert privileged["crossing-cyclist"].occluded is True
@@ -169,31 +171,78 @@ def run_occluded_crossing_prefix() -> tuple[tuple[tuple[float, float], ...], boo
         crossing_start_offset_m = parameters["crossing_start_offset_m"]
         crossing_speed_mps = parameters["crossing_speed_mps"]
         reveal_lateral_m = parameters["reveal_lateral_m"]
+        clear_lateral_m = parameters["clear_lateral_m"]
+        survival_s = parameters["survival_s"]
+        lead_speed_mps = parameters["lead_speed_mps"]
         assert isinstance(trigger_step, int)
         assert isinstance(crossing_start_offset_m, float)
         assert isinstance(crossing_speed_mps, float)
         assert isinstance(reveal_lateral_m, float)
-        reveal_steps = math.ceil(
-            (crossing_start_offset_m - reveal_lateral_m) / crossing_speed_mps / 0.1
+        assert isinstance(clear_lateral_m, float)
+        assert isinstance(survival_s, float)
+        assert isinstance(lead_speed_mps, float)
+        clear_steps = math.ceil(
+            (crossing_start_offset_m + clear_lateral_m) / crossing_speed_mps / 0.1
         )
+        survival_steps = math.ceil(survival_s / 0.1)
         positions: list[tuple[float, float]] = []
         revealed = False
-        for _ in range(1, trigger_step + reveal_steps + 2):
-            _observation, reward, terminated, truncated, _info = environment.step(3)
+        cleared = False
+        completed = False
+        for _ in range(1, trigger_step + clear_steps + survival_steps + 6):
+            _observation, reward, terminated, truncated, step_info = environment.step(3)
             assert math.isfinite(reward)
-            assert not (terminated or truncated)
             positions.append(manager.actor_state("crossing-cyclist").position_xy_m)
             frame = environment._frame
             assert frame is not None
             actor_ids = {actor.actor_id for actor in frame.observation.visible_actors}
+            lead_state = manager.actor_state("crossing-lead")
+            assert math.hypot(*lead_state.velocity_xy_mps) == pytest.approx(lead_speed_mps, abs=0.2)
             if "crossing-cyclist" in actor_ids:
                 revealed = True
+            if not revealed:
+                assert "crossing-lead" in actor_ids
+            elif "cleared_step" in step_info["scenario_parameters"]:
+                cleared = True
+                assert "crossing-cyclist" in actor_ids
+            if terminated or truncated:
+                assert truncated is False
+                assert step_info["scenario_success"] is True
+                completed = True
                 break
         assert revealed is True
+        assert cleared is True
+        assert completed is True
         crossing_contact = environment._environment.scenario_ego_collided_with(
             "crossing-cyclist"
         )
         return tuple(positions), crossing_contact
+    finally:
+        environment.close()
+
+
+@pytest.mark.integration
+def test_real_occluded_crossing_reports_cyclist_collision_as_scenario_failure() -> None:
+    environment = MultiAgentSpeedEnv(
+        load_config("configs/base.yaml", "configs/scenarios/occluded_crossing.yaml"),
+        role="train",
+        worker_index=0,
+    )
+    try:
+        environment.reset(seed=42)
+        manager = environment._environment.engine.scenario_actor_manager
+        cyclist = manager.engine.get_objects(["crossing-cyclist"])["crossing-cyclist"]
+        cyclist.set_position(environment._environment.vehicle.position)
+
+        _observation, _reward, terminated, truncated, info = environment.step(3)
+
+        assert terminated is True
+        assert truncated is False
+        assert info["crash_human"] is True
+        assert info["scenario_failure"] is True
+        frame = environment._frame
+        assert frame is not None
+        assert frame.privileged.collision_kind == "crossing_actor"
     finally:
         environment.close()
 

@@ -156,3 +156,65 @@ Modified:
   scenario failures.
 - No Task 4 curriculum, provenance, contract, or documentation changes were
   introduced.
+
+## Independent review remediation (2026-07-22)
+
+### Fixed findings
+
+- `cyclist_revealed` is now initialized and latched in immutable
+  `ScenarioState.parameters` on first reveal-boundary entry. Once true, the
+  logical allowlist always retains `crossing-cyclist`, including after far-side
+  clearance and at the survival-success boundary.
+- `cyclist_collision` is likewise latched in immutable state. Scenario failure
+  now uses `crash_human OR exact cyclist contact OR prior latched collision`.
+  Thus a transient typed signal or a transient Bullet contact cannot be lost.
+  Unrelated vehicle/object collisions still only suppress success.
+- The real smoke imports `Cyclist` and uses `isinstance`, verifies the visible
+  same-lane lead and its sampled speed, continues through clearance/survival,
+  and checks persistent cyclist visibility.
+- A dedicated real collision regression uses MetaDrive 0.4.3's actual
+  `Cyclist.set_position(ego.position)` overlap followed by one simulator step.
+  It asserts `crash_human`, typed `scenario_failure`, and privileged
+  `collision_kind == "crossing_actor"`.
+
+### RED / GREEN evidence
+
+1. Added unit regressions before changing runtime code:
+
+   ```powershell
+   .venv\Scripts\python.exe -m pytest tests/unit/scenarios/test_occluded_crossing.py -q
+   ```
+
+   RED: 3 failed, 9 passed. The failures were the expected missing
+   `cyclist_revealed` state key, flag-only `crash_human` returning
+   `failure=False`, and contact-only collision returning `failure=False`.
+
+   GREEN after state latching and OR attribution:
+
+   ```text
+   12 passed, 14 warnings in 5.28s
+   ```
+
+2. Strengthened real integration coverage before exposing the sampled lead
+   speed in state:
+
+   ```powershell
+   .venv\Scripts\python.exe -m pytest tests/integration/test_phase5_metadrive_headless.py -q -m integration -k occluded
+   ```
+
+   RED: expected `KeyError: 'lead_speed_mps'` from the real smoke. GREEN after
+   preserving the actual sampled lead speed in `ScenarioState.parameters`:
+
+   ```text
+   2 passed, 2 deselected, 14 warnings in 7.66s
+   ```
+
+### Remediation verification
+
+| Command | Result |
+| --- | --- |
+| `.venv\Scripts\python.exe -m pytest tests/unit/scenarios/test_occluded_crossing.py tests/unit/world_model/test_snapshot_builder.py tests/unit/agents/test_hazard.py -q` | 47 passed |
+| `.venv\Scripts\python.exe -m pytest tests/integration/test_phase5_metadrive_headless.py -q -m integration` | 4 passed |
+| `.venv\Scripts\python.exe -m ruff check src tests` | All checks passed |
+| `.venv\Scripts\python.exe -m mypy src` | Success: no issues found in 63 source files |
+| `.venv\Scripts\python.exe -m pytest -q --cov=mad_driving --cov-report=term-missing` | 795 passed, 25 warnings, 90.05% coverage |

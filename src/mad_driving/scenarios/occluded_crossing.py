@@ -93,6 +93,8 @@ class OccludedCrossingRuntime:
                 "cyclist_actor_id": _CYCLIST_ID,
                 "occluder_actor_id": _OCCLUDER_ID,
                 "lead_actor_id": _LEAD_ID,
+                "cyclist_revealed": False,
+                "cyclist_collision": False,
             },
         )
 
@@ -182,6 +184,7 @@ class OccludedCrossingRuntime:
                 "trigger_step": trigger_step,
                 "clear_lateral_m": geometry.lane_width_m / 2.0 + _CYCLIST_HALF_WIDTH_M,
                 "decision_interval_s": geometry.decision_interval_s,
+                "lead_speed_mps": lead_speed_mps,
             },
         )
 
@@ -211,21 +214,38 @@ class OccludedCrossingRuntime:
         self._require_spawned_actor(environment, state, "occluder_actor_id")
         self._require_spawned_actor(environment, state, "lead_actor_id")
         next_state = state
+        lateral_m = self._cyclist_lateral_m(environment, state)
+        is_revealed = self._parameter_bool(state, "cyclist_revealed")
+        reveal_lateral_m = self._parameter_float(state, "reveal_lateral_m")
+        if not is_revealed and abs(lateral_m) <= reveal_lateral_m:
+            next_state = replace(
+                next_state,
+                parameters={**next_state.parameters, "cyclist_revealed": True},
+            )
         if "cleared_step" not in state.parameters and step_index >= self._parameter_int(
             state, "trigger_step"
         ):
-            lateral_m = self._cyclist_lateral_m(environment, state)
             if lateral_m <= -self._parameter_float(state, "clear_lateral_m"):
                 next_state = replace(
-                    state,
-                    parameters={**state.parameters, "cleared_step": step_index},
+                    next_state,
+                    parameters={**next_state.parameters, "cleared_step": step_index},
                 )
         collisions = typed_collision_flags(raw_info)
-        failure = "crash_human" in collisions and environment.scenario_ego_collided_with(cyclist_id)
+        failure = (
+            self._parameter_bool(state, "cyclist_collision")
+            or "crash_human" in collisions
+            or environment.scenario_ego_collided_with(cyclist_id)
+        )
+        if failure and not self._parameter_bool(next_state, "cyclist_collision"):
+            next_state = replace(
+                next_state,
+                parameters={**next_state.parameters, "cyclist_collision": True},
+            )
         off_road = bool(raw_info.get("out_of_road", False)) or bool(raw_info.get("off_road", False))
         success = (
             not collisions
             and not off_road
+            and not failure
             and self._survival_complete(next_state, step_index)
         )
         return ScenarioTransition(next_state, ScenarioStepResult(success=success, failure=failure))
@@ -234,12 +254,12 @@ class OccludedCrossingRuntime:
         environment = self._require_environment()
         cyclist_id = self._parameter_str(state, "cyclist_actor_id")
         visible_ids = set(environment.scenario_visible_actor_ids())
-        if abs(self._cyclist_lateral_m(environment, state)) > self._parameter_float(
-            state, "reveal_lateral_m"
-        ):
-            visible_ids.discard(cyclist_id)
-        else:
+        if self._parameter_bool(state, "cyclist_revealed") or abs(
+            self._cyclist_lateral_m(environment, state)
+        ) <= self._parameter_float(state, "reveal_lateral_m"):
             visible_ids.add(cyclist_id)
+        else:
+            visible_ids.discard(cyclist_id)
         geometry = environment.scenario_road_geometry()
         conflict_distance_m = (
             self._parameter_float(state, "conflict_longitudinal_m") - geometry.ego_longitudinal_m
@@ -332,6 +352,13 @@ class OccludedCrossingRuntime:
         value = state.parameters[name]
         if not isinstance(value, str):
             raise RuntimeError(f"scenario parameter {name} must be a string")
+        return value
+
+    @staticmethod
+    def _parameter_bool(state: ScenarioState, name: str) -> bool:
+        value = state.parameters[name]
+        if not isinstance(value, bool):
+            raise RuntimeError(f"scenario parameter {name} must be a boolean")
         return value
 
     @staticmethod

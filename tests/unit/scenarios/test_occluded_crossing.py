@@ -154,6 +154,21 @@ def test_crossing_actor_becomes_visible_at_boundary() -> None:
     assert "crossing-cyclist" in context.visible_actor_ids
 
 
+def test_crossing_reveal_latches_after_the_cyclist_reaches_the_far_side() -> None:
+    runtime, environment, state = reset_crossing(actor_lateral_m=2.9, reveal_lateral_m=3.0)
+
+    revealed = runtime.after_step(environment, state, step_index=20, raw_info=no_collision_info())
+    environment.actor_states["crossing-cyclist"] = replace(
+        environment.actor_states["crossing-cyclist"], position_xy_m=(40.0, -8.0)
+    )
+    far_side = runtime.after_step(
+        environment, revealed.state, step_index=21, raw_info=no_collision_info()
+    )
+
+    assert far_side.state.parameters["cyclist_revealed"] is True
+    assert "crossing-cyclist" in runtime.observation_context(far_side.state).visible_actor_ids
+
+
 def test_crossing_spawns_cyclist_occluder_and_secondary_lead_from_seeded_parameters() -> None:
     _runtime, environment, state = reset_crossing()
 
@@ -183,12 +198,22 @@ def test_crossing_releases_cyclist_only_at_trigger() -> None:
     assert isinstance(environment.commands[-1][1], VelocityCommand)
 
 
-def test_crossing_collision_is_failure() -> None:
+def test_crossing_crash_human_flag_is_failure_without_current_contact() -> None:
+    runtime, environment, state = reset_crossing()
+
+    transition = runtime.after_step(
+        environment, state, step_index=20, raw_info={**no_collision_info(), "crash_human": True}
+    )
+
+    assert transition.outcome == ScenarioStepResult(success=False, failure=True)
+
+
+def test_crossing_contact_is_failure_without_crash_human_flag() -> None:
     runtime, environment, state = reset_crossing()
     environment.collided_actor_ids.add("crossing-cyclist")
 
     transition = runtime.after_step(
-        environment, state, step_index=20, raw_info={**no_collision_info(), "crash_human": True}
+        environment, state, step_index=20, raw_info=no_collision_info()
     )
 
     assert transition.outcome == ScenarioStepResult(success=False, failure=True)
