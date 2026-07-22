@@ -161,29 +161,68 @@ def test_smoke_and_resume_are_forwarded_and_success_is_json(
     }
 
 
-def test_run_dir_is_required_before_config_or_training_writes(
+def test_omitted_run_dir_allocates_fresh_directory_under_configured_root(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text("seed: 42\n", encoding="utf-8")
-    calls: list[str] = []
-    monkeypatch.setattr(train_module, "load_config", lambda path: calls.append("config"))
+    run_root = tmp_path / "configured-runs"
+    config = make_config(run_root=str(run_root))
+    calls: list[Path] = []
+    monkeypatch.setattr(train_module, "load_config", lambda path: config)
+
+    def capture_training(
+        received_config: AppConfig,
+        *,
+        smoke: bool,
+        run_dir: Path,
+        resume_from: Path | None,
+    ) -> TrainingResult:
+        assert received_config is config
+        assert smoke is True
+        assert resume_from is None
+        calls.append(run_dir)
+        return TrainingResult(
+            run_dir=run_dir,
+            final_checkpoint=run_dir / "checkpoints" / "final_model.zip",
+            best_checkpoint=run_dir / "checkpoints" / "best_model.zip",
+            timesteps=8,
+        )
+
+    monkeypatch.setattr(train_module, "run_training", capture_training)
+
+    assert main(["--config", str(config_path), "--smoke"]) == 0
+
+    assert len(calls) == 1
+    assert calls[0].parent == run_root
+    assert calls[0].is_dir()
+    output = json.loads(capsys.readouterr().out)
+    assert Path(output["run_dir"]) == calls[0]
+
+
+def test_implicit_run_directory_skips_existing_name_collision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_root = tmp_path / "configured-runs"
+    occupied = run_root / "occupied"
+    occupied.mkdir(parents=True)
+    marker = occupied / "preserve.txt"
+    marker.write_text("keep", encoding="utf-8")
+    names = iter(["occupied", "fresh"])
     monkeypatch.setattr(
         train_module,
-        "run_training",
-        lambda *args, **kwargs: calls.append("training"),
+        "_run_directory_name",
+        lambda *, smoke: next(names),
     )
 
-    with pytest.raises(SystemExit) as exc_info:
-        main(["--config", str(config_path)])
+    allocated = train_module._fresh_run_directory(run_root, smoke=True)
 
-    assert exc_info.value.code == 2
-    captured = capsys.readouterr()
-    assert "--run-dir" in captured.err
-    assert "required" in captured.err
-    assert calls == []
+    assert allocated == run_root / "fresh"
+    assert allocated.is_dir()
+    assert marker.read_text(encoding="utf-8") == "keep"
 
 
 @pytest.mark.parametrize("option", ["--config", "--resume-from"])

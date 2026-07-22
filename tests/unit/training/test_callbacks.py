@@ -113,6 +113,63 @@ class CurriculumOutcomeEnv(gym.Env[NDArray[np.float32], int]):
         self.levels.append(level)
 
 
+class SequencedCurriculumOutcomeEnv(CurriculumOutcomeEnv):
+    def __init__(self, outcomes: list[tuple[bool, bool]]) -> None:
+        super().__init__(scenario_success=False, collision_occurred=False)
+        self.outcomes = list(outcomes)
+        self.outcome_index = 0
+
+    def step(
+        self,
+        action: int,
+    ) -> tuple[NDArray[np.float32], float, bool, bool, dict[str, object]]:
+        assert self.action_space.contains(action)
+        scenario_success, collision_occurred = self.outcomes[self.outcome_index]
+        self.outcome_index += 1
+        return np.zeros(4, dtype=np.float32), 0.0, True, False, {
+            "scenario_success": scenario_success,
+            "collision_occurred": collision_occurred,
+        }
+
+
+class RecordingCurriculumController(CurriculumController):
+    def __init__(self, config: CurriculumConfig, state: CurriculumState) -> None:
+        super().__init__(config, state)
+        self.observations: list[tuple[str, int, int, int]] = []
+
+    def observe(
+        self,
+        role: str,
+        successes: int,
+        collisions: int,
+        episodes: int,
+    ) -> CurriculumState:
+        self.observations.append((role, successes, collisions, episodes))
+        return super().observe(role, successes, collisions, episodes)  # type: ignore[arg-type]
+
+
+class MissingTerminalRecordCallback(CurriculumEvalCallback):
+    def _log_success_callback(
+        self,
+        locals_: dict[str, object],
+        globals_: dict[str, object],
+    ) -> None:
+        if not self.terminal_records:
+            return
+        super()._log_success_callback(locals_, globals_)
+
+
+class ExtraTerminalRecordCallback(CurriculumEvalCallback):
+    def _log_success_callback(
+        self,
+        locals_: dict[str, object],
+        globals_: dict[str, object],
+    ) -> None:
+        super()._log_success_callback(locals_, globals_)
+        if len(self.terminal_records) == 1:
+            super()._log_success_callback(locals_, globals_)
+
+
 def initialized_callback() -> tuple[RewardComponentsCallback, FakeModel]:
     callback = RewardComponentsCallback()
     model = FakeModel()
@@ -409,3 +466,117 @@ def test_curriculum_callback_ignores_nonterminal_info() -> None:
         assert callback.terminal_records == ()
     finally:
         eval_env.close()
+
+
+def test_curriculum_callback_aggregates_two_schedules_without_stale_records(
+    tmp_path: Path,
+) -> None:
+    training_environment = CurriculumOutcomeEnv(
+        scenario_success=False,
+        collision_occurred=False,
+    )
+    evaluation_environment = SequencedCurriculumOutcomeEnv(
+        [
+            (True, False),
+            (True, True),
+            (False, False),
+            (True, False),
+            (False, False),
+            (True, False),
+        ]
+    )
+    train_env = DummyVecEnv([lambda: training_environment])
+    eval_env = DummyVecEnv([lambda: evaluation_environment])
+    controller = RecordingCurriculumController(
+        CurriculumConfig(
+            mode="automatic",
+            success_rate_threshold=0.66,
+            collision_rate_threshold=0.0,
+            consecutive_evaluations=1,
+        ),
+        CurriculumState(0, 0, 0),
+    )
+    model = PPO(
+        "MlpPolicy",
+        train_env,
+        n_steps=4,
+        batch_size=4,
+        n_epochs=1,
+        device="cpu",
+    )
+    model.set_logger(configure(str(tmp_path / "multi-eval-logger"), []))
+    callback = CurriculumEvalCallback(
+        eval_env,
+        validation_episode_seed=73,
+        controller=controller,
+        curriculum_state_path=tmp_path / "curriculum_state.yaml",
+        best_model_save_path=str(tmp_path / "best"),
+        eval_freq=4,
+        n_eval_episodes=3,
+        deterministic=True,
+        render=False,
+        verbose=0,
+    )
+    try:
+        model.learn(total_timesteps=8, callback=callback)
+
+        assert controller.observations == [
+            ("validation", 2, 1, 3),
+            ("validation", 2, 0, 3),
+        ]
+        assert controller.state == CurriculumState(1, 0, 2)
+        assert callback.terminal_records == (
+            (True, False),
+            (False, False),
+            (True, False),
+        )
+        assert training_environment.levels == [1]
+        assert evaluation_environment.levels == [1]
+    finally:
+        eval_env.close()
+        train_env.close()
+
+
+@pytest.mark.parametrize(
+    "callback_class",
+    [MissingTerminalRecordCallback, ExtraTerminalRecordCallback],
+)
+def test_curriculum_callback_rejects_missing_or_extra_scheduled_terminal_records(
+    tmp_path: Path,
+    callback_class: type[CurriculumEvalCallback],
+) -> None:
+    train_env = DummyVecEnv(
+        [lambda: CurriculumOutcomeEnv(scenario_success=False, collision_occurred=False)]
+    )
+    eval_env = DummyVecEnv(
+        [lambda: CurriculumOutcomeEnv(scenario_success=True, collision_occurred=False)]
+    )
+    model = PPO(
+        "MlpPolicy",
+        train_env,
+        n_steps=4,
+        batch_size=4,
+        n_epochs=1,
+        device="cpu",
+    )
+    model.set_logger(configure(str(tmp_path / callback_class.__name__), []))
+    callback = callback_class(
+        eval_env,
+        validation_episode_seed=73,
+        controller=CurriculumController(
+            CurriculumConfig(mode="automatic"),
+            CurriculumState(0, 0, 0),
+        ),
+        curriculum_state_path=tmp_path / "curriculum_state.yaml",
+        eval_freq=4,
+        n_eval_episodes=2,
+        deterministic=True,
+        render=False,
+        verbose=0,
+    )
+    try:
+        with pytest.raises(RuntimeError, match="exactly one terminal"):
+            model.learn(total_timesteps=4, callback=callback)
+    finally:
+        eval_env.close()
+        train_env.close()

@@ -10,12 +10,13 @@ from typing import Any, Final
 
 import gymnasium as gym
 import numpy as np
-from stable_baselines3.common.callbacks import BaseCallback, EvalCallback
+from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback, EvalCallback
 from stable_baselines3.common.vec_env import VecEnv
 
 from mad_driving.training.curriculum import (
     CurriculumController,
     CurriculumState,
+    write_checkpoint_curriculum_state,
     write_curriculum_state,
 )
 
@@ -83,6 +84,43 @@ class SeededEvalCallback(EvalCallback):
             if assigned_seeds != (self.validation_episode_seed,):
                 raise RuntimeError("Validation environment did not accept its fixed episode seed")
         return super()._on_step()
+
+
+class CurriculumCheckpointCallback(CheckpointCallback):
+    """Bind the current curriculum state to every periodic model checkpoint."""
+
+    def __init__(
+        self,
+        *,
+        controller: CurriculumController,
+        save_freq: int,
+        save_path: str,
+        name_prefix: str = "rl_model",
+        save_replay_buffer: bool = False,
+        save_vecnormalize: bool = False,
+        verbose: int = 0,
+    ) -> None:
+        if not isinstance(controller, CurriculumController):
+            raise TypeError("controller must be a CurriculumController")
+        super().__init__(
+            save_freq=save_freq,
+            save_path=save_path,
+            name_prefix=name_prefix,
+            save_replay_buffer=save_replay_buffer,
+            save_vecnormalize=save_vecnormalize,
+            verbose=verbose,
+        )
+        self.controller = controller
+
+    def _on_step(self) -> bool:
+        scheduled = self.n_calls % self.save_freq == 0
+        continue_training = super()._on_step()
+        if scheduled:
+            write_checkpoint_curriculum_state(
+                self.controller.state,
+                self._checkpoint_path(extension="zip"),
+            )
+        return continue_training
 
 
 class CurriculumEvalCallback(SeededEvalCallback):
@@ -157,6 +195,7 @@ class CurriculumEvalCallback(SeededEvalCallback):
     def _on_step(self) -> bool:
         scheduled = self.eval_freq > 0 and self.n_calls % self.eval_freq == 0
         previous_state: CurriculumState | None = None
+        previous_best_mean_reward = self.best_mean_reward
         if scheduled:
             self._terminal_records = []
             previous_state = self.controller.state
@@ -175,6 +214,14 @@ class CurriculumEvalCallback(SeededEvalCallback):
             episodes=len(self._terminal_records),
         )
         write_curriculum_state(state, self.curriculum_state_path)
+        if (
+            self.best_mean_reward > previous_best_mean_reward
+            and self.best_model_save_path is not None
+        ):
+            write_checkpoint_curriculum_state(
+                state,
+                Path(self.best_model_save_path) / "best_model.zip",
+            )
         if previous_state is not None and state.level != previous_state.level:
             self.training_env.env_method("set_difficulty_level", state.level)
             self.eval_env.env_method("set_difficulty_level", state.level)

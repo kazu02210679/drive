@@ -10,22 +10,27 @@ from dataclasses import dataclass
 from functools import partial
 from numbers import Integral
 from pathlib import Path
+from time import monotonic as _monotonic
 from typing import Any, Protocol, TypeVar
 
 import gymnasium as gym
 import yaml
 from stable_baselines3 import PPO
-from stable_baselines3.common.callbacks import CheckpointCallback
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 
 from mad_driving.config.models import AppConfig
 from mad_driving.envs.multi_agent_speed_env import MultiAgentSpeedEnv
 from mad_driving.scenarios import EnvironmentRole
-from mad_driving.training.callbacks import CurriculumEvalCallback, RewardComponentsCallback
+from mad_driving.training.callbacks import (
+    CurriculumCheckpointCallback,
+    CurriculumEvalCallback,
+    RewardComponentsCallback,
+)
 from mad_driving.training.curriculum import (
     CURRICULUM_STATE_FILENAME,
     CurriculumController,
     CurriculumState,
+    write_checkpoint_curriculum_state,
     write_curriculum_state,
 )
 from mad_driving.training.episode_seeds import (
@@ -36,6 +41,7 @@ from mad_driving.training.episode_seeds import (
 from mad_driving.training.metadata import (
     ResumeMetadata,
     RunMetadata,
+    checkpoint_curriculum_artifact_inventory,
     curriculum_state_artifact,
     resolve_resume_source,
     sha256_file,
@@ -253,32 +259,50 @@ def _stop_processes(
 
     escalated = False
     operation_errors: list[Exception] = []
+    deadline = _monotonic() + _GRACEFUL_PROCESS_JOIN_TIMEOUT_SECONDS
+
+    def remaining(*, cap: float | None = None) -> float:
+        value = max(0.0, deadline - _monotonic())
+        return value if cap is None else min(value, cap)
+
+    if graceful_join:
+        for process in processes:
+            join = getattr(process, "join", None)
+            if callable(join):
+                if error := _attempt_process_operation(join, remaining()):
+                    operation_errors.append(error)
+
+    terminated_processes: list[object] = []
     for process in processes:
-        join = getattr(process, "join", None)
-        if graceful_join and callable(join):
-            if error := _attempt_process_operation(
-                join,
-                _GRACEFUL_PROCESS_JOIN_TIMEOUT_SECONDS,
-            ):
-                operation_errors.append(error)
         if _process_is_alive(process):
             escalated = True
+            terminated_processes.append(process)
             terminate = getattr(process, "terminate", None)
             if callable(terminate):
                 if error := _attempt_process_operation(terminate):
                     operation_errors.append(error)
-            if callable(join):
-                if error := _attempt_process_operation(join, 1.0):
-                    operation_errors.append(error)
+
+    for process in terminated_processes:
+        join = getattr(process, "join", None)
+        if callable(join):
+            if error := _attempt_process_operation(join, remaining(cap=1.0)):
+                operation_errors.append(error)
+
+    killed_processes: list[object] = []
+    for process in processes:
         if _process_is_alive(process):
             escalated = True
+            killed_processes.append(process)
             kill = getattr(process, "kill", None)
             if callable(kill):
                 if error := _attempt_process_operation(kill):
                     operation_errors.append(error)
-            if callable(join):
-                if error := _attempt_process_operation(join, 1.0):
-                    operation_errors.append(error)
+
+    for process in killed_processes:
+        join = getattr(process, "join", None)
+        if callable(join):
+            if error := _attempt_process_operation(join, remaining(cap=1.0)):
+                operation_errors.append(error)
     return (
         any(_process_is_alive(process) for process in processes),
         escalated,
@@ -591,7 +615,7 @@ def run_training(
     ppo_factory: GenericFactory[Any] = PPO,
     dummy_vec_env_factory: VecEnvFactory = DummyVecEnv,
     subproc_vec_env_factory: VecEnvFactory = SubprocVecEnv,
-    checkpoint_callback_factory: GenericFactory[Any] = CheckpointCallback,
+    checkpoint_callback_factory: GenericFactory[Any] = CurriculumCheckpointCallback,
     eval_callback_factory: GenericFactory[Any] = CurriculumEvalCallback,
     reward_callback_factory: GenericFactory[Any] = RewardComponentsCallback,
 ) -> TrainingResult:
@@ -731,6 +755,7 @@ def run_training(
         staged_final_checkpoint = staging_dir / final_checkpoint.name
         staged_best_checkpoint = staging_dir / best_checkpoint.name
         checkpoint_callback = checkpoint_callback_factory(
+            controller=curriculum_controller,
             save_freq=_scaled_frequency(
                 config.training.checkpoint_interval_steps,
                 config.training.num_envs,
@@ -760,6 +785,14 @@ def run_training(
             reset_num_timesteps=resume_source is None,
         )
         model.save(staged_final_checkpoint)
+        if not staged_final_checkpoint.is_file():
+            raise FileNotFoundError(
+                f"Final checkpoint was not produced: {staged_final_checkpoint}"
+            )
+        write_checkpoint_curriculum_state(
+            curriculum_controller.state,
+            staged_final_checkpoint,
+        )
         trusted_seed_descriptors = (
             *_collect_episode_seed_artifact_descriptors(
                 train_env,
@@ -774,11 +807,12 @@ def run_training(
         )
         if not staged_best_checkpoint.is_file():
             raise FileNotFoundError(f"Best checkpoint was not produced: {staged_best_checkpoint}")
-        if not staged_final_checkpoint.is_file():
-            raise FileNotFoundError(f"Final checkpoint was not produced: {staged_final_checkpoint}")
         model_logger_closed = True
         _close_model_logger(model)
         _promote_checkpoint_artifacts(staging_dir, checkpoints_dir)
+        checkpoint_curriculum_artifacts = checkpoint_curriculum_artifact_inventory(
+            checkpoints_dir
+        )
         try:
             _cleanup_checkpoint_staging(staging_dir, checkpoints_dir)
         except Exception as exc:
@@ -807,6 +841,7 @@ def run_training(
                     curriculum_state_path,
                     curriculum_controller.state,
                 ),
+                checkpoint_curriculum_artifacts=checkpoint_curriculum_artifacts,
                 episode_seed_artifacts=episode_seed_artifacts,
             ),
             workspace / "run_metadata.json",

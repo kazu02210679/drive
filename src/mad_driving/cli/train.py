@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import secrets
 import sys
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 
 from mad_driving.config.loader import load_config
@@ -22,7 +24,10 @@ def _parser() -> argparse.ArgumentParser:
         help="Ordered YAML overlay applied after --config; repeat for multiple overlays",
     )
     parser.add_argument("--smoke", action="store_true", help="Train for smoke_timesteps")
-    parser.add_argument("--run-dir", required=True, help="Fresh artifact directory for this run")
+    parser.add_argument(
+        "--run-dir",
+        help="Fresh artifact directory; defaults to a unique directory under training.run_root",
+    )
     parser.add_argument("--resume-from", help="Existing PPO checkpoint to resume")
     return parser
 
@@ -30,6 +35,26 @@ def _parser() -> argparse.ArgumentParser:
 def _require_file(path: Path, description: str) -> None:
     if not path.is_file():
         raise FileNotFoundError(f"{description} not found: {path}")
+
+
+def _run_directory_name(*, smoke: bool) -> str:
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S.%fZ")
+    purpose = "smoke" if smoke else "train"
+    return f"phase5-{purpose}-{timestamp}-{secrets.token_hex(4)}"
+
+
+def _fresh_run_directory(run_root: Path, *, smoke: bool) -> Path:
+    """Atomically reserve a collision-free directory beneath the configured root."""
+
+    root = Path(run_root)
+    root.mkdir(parents=True, exist_ok=True)
+    while True:
+        candidate = root / _run_directory_name(smoke=smoke)
+        try:
+            candidate.mkdir()
+        except FileExistsError:
+            continue
+        return candidate
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -47,7 +72,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             _require_file(resume_from, "Resume checkpoint")
 
         config = load_config(config_path, *overlay_paths)
-        run_dir = Path(args.run_dir)
+        run_dir = (
+            Path(args.run_dir)
+            if args.run_dir is not None
+            else _fresh_run_directory(Path(config.training.run_root), smoke=args.smoke)
+        )
         require_empty_run_directory(run_dir)
 
         result = run_training(

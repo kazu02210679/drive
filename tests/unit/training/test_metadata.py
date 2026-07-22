@@ -304,6 +304,27 @@ def test_metadata_writes_curriculum_state_values_and_sha256(tmp_path: Path) -> N
     assert payload["curriculum_state"] == summary
 
 
+def test_run_metadata_json_rejects_duplicate_keys(tmp_path: Path) -> None:
+    destination = tmp_path / "run_metadata.json"
+    metadata_module.write_run_metadata(
+        RunMetadata(
+            resolved_config={"seed": 42},
+            curriculum_state=curriculum_summary(),
+        ),
+        destination,
+    )
+    text = destination.read_text(encoding="utf-8")
+    text = text.replace(
+        '  "research_contract_version": 5,',
+        '  "research_contract_version": 5,\n  "research_contract_version": 5,',
+        1,
+    )
+    destination.write_text(text, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="duplicate"):
+        metadata_module._load_run_metadata(destination)
+
+
 @pytest.mark.parametrize(
     "summary",
     [

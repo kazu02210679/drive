@@ -25,11 +25,14 @@ from mad_driving.training import ownership as ownership_module
 from mad_driving.training import train as train_module
 from mad_driving.training.curriculum import (
     CurriculumState,
+    checkpoint_curriculum_sidecar_path,
     read_curriculum_state,
+    write_checkpoint_curriculum_state,
     write_curriculum_state,
 )
 from mad_driving.training.metadata import (
     RESEARCH_CONTRACT_VERSION,
+    checkpoint_curriculum_artifact_inventory,
     curriculum_state_artifact,
 )
 from mad_driving.training.train import TrainingResult, run_training
@@ -193,6 +196,7 @@ class CallbackFactory:
 
 class FakeCheckpointCallback:
     def __init__(self, **kwargs: Any) -> None:
+        self.controller = kwargs["controller"]
         self.save_freq = kwargs["save_freq"]
         self.save_path = Path(kwargs["save_path"])
         self.name_prefix = kwargs["name_prefix"]
@@ -203,10 +207,11 @@ class FakeCheckpointCallback:
         start_timesteps = model.num_timesteps - produced_timesteps
         for call in range(self.save_freq, callback_calls + 1, self.save_freq):
             checkpoint_timesteps = start_timesteps + call * train_env.num_envs
-            model.write_checkpoint(
-                self.save_path / f"{self.name_prefix}_{checkpoint_timesteps}_steps.zip",
-                "periodic",
+            checkpoint = (
+                self.save_path / f"{self.name_prefix}_{checkpoint_timesteps}_steps.zip"
             )
+            model.write_checkpoint(checkpoint, "periodic")
+            write_checkpoint_curriculum_state(self.controller.state, checkpoint)
 
 
 class CheckpointCallbackFactory:
@@ -223,6 +228,7 @@ class CheckpointCallbackFactory:
 
 class FakeEvalCallback:
     def __init__(self, **kwargs: Any) -> None:
+        self.controller = kwargs["controller"]
         self.eval_env = kwargs["eval_env"]
         self.eval_freq = kwargs["eval_freq"]
         self.best_model_save_path = Path(kwargs["best_model_save_path"])
@@ -236,7 +242,9 @@ class FakeEvalCallback:
             environment.reset(seed=self.validation_episode_seed)
         callback_calls = math.ceil(produced_timesteps / train_env.num_envs)
         if callback_calls >= self.eval_freq:
-            model.write_checkpoint(self.best_model_save_path / "best_model.zip", "best")
+            checkpoint = self.best_model_save_path / "best_model.zip"
+            model.write_checkpoint(checkpoint, "best")
+            write_checkpoint_curriculum_state(self.controller.state, checkpoint)
 
 
 class EvalCallbackFactory:
@@ -512,17 +520,21 @@ def seed_compatible_source_run(
     )
     curriculum_path = run_dir / "curriculum_state.yaml"
     write_curriculum_state(selected_state, curriculum_path)
-    metadata = RunMetadata(
-        resolved_config=resolved_config,
-        curriculum_state=curriculum_state_artifact(curriculum_path, selected_state),
-    )
-    metadata_module.write_run_metadata(metadata, run_dir / "run_metadata.json")
     checkpoint = checkpoints_dir / "final_model.zip"
     FakePPO.write_checkpoint(
         checkpoint,
         "resume-source",
         {**FakePPO.default_contract(), **ppo_overrides},
     )
+    write_checkpoint_curriculum_state(selected_state, checkpoint)
+    metadata = RunMetadata(
+        resolved_config=resolved_config,
+        curriculum_state=curriculum_state_artifact(curriculum_path, selected_state),
+        checkpoint_curriculum_artifacts=checkpoint_curriculum_artifact_inventory(
+            checkpoints_dir
+        ),
+    )
+    metadata_module.write_run_metadata(metadata, run_dir / "run_metadata.json")
     return CompatibleSourceRun(run_dir=run_dir, checkpoint=checkpoint)
 
 
@@ -1127,6 +1139,7 @@ def test_fresh_run_writes_complete_research_contract_metadata(tmp_path: Path) ->
     metadata = json.loads((run_dir / "run_metadata.json").read_text(encoding="utf-8"))
     summaries = metadata.pop("episode_seed_artifacts")
     curriculum = metadata.pop("curriculum_state")
+    checkpoint_curriculum = metadata.pop("checkpoint_curriculum_artifacts")
     assert metadata == {
         "research_contract_version": RESEARCH_CONTRACT_VERSION,
         "observation_schema_version": 1,
@@ -1138,6 +1151,15 @@ def test_fresh_run_writes_complete_research_contract_metadata(tmp_path: Path) ->
         "resolved_config": config.model_dump(mode="json"),
         "resume": None,
     }
+    assert {
+        descriptor["checkpoint_path"] for descriptor in checkpoint_curriculum
+    } == {
+        "checkpoints/best_model.zip",
+        "checkpoints/final_model.zip",
+    }
+    assert all(descriptor["level"] == 0 for descriptor in checkpoint_curriculum)
+    assert all(descriptor["consecutive_passes"] == 0 for descriptor in checkpoint_curriculum)
+    assert all(descriptor["evaluations"] == 0 for descriptor in checkpoint_curriculum)
     curriculum_path = run_dir / "curriculum_state.yaml"
     assert curriculum == {
         "path": "curriculum_state.yaml",
@@ -1880,6 +1902,54 @@ class OperationFailingProcess(FakeProcess):
         raise OSError("terminate failed")
 
 
+class DeadlineProcess(FakeProcess):
+    def __init__(
+        self,
+        clock: list[float],
+        *,
+        exits_after_join: bool,
+    ) -> None:
+        super().__init__(exits_on_terminate=True, exits_on_kill=True)
+        self.clock = clock
+        self.exits_after_join = exits_after_join
+
+    def join(self, timeout: float | None = None) -> None:
+        self.join_calls.append(timeout)
+        assert timeout is not None
+        self.clock[0] += timeout
+        if self.exits_after_join:
+            self.alive = False
+            self.exitcode = 0
+
+
+def test_multiworker_shutdown_uses_one_shared_five_second_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [100.0]
+    first = DeadlineProcess(clock, exits_after_join=True)
+    second = DeadlineProcess(clock, exits_after_join=False)
+    monkeypatch.setattr(
+        train_module,
+        "_monotonic",
+        lambda: clock[0],
+        raising=False,
+    )
+
+    workers_alive, escalated, operation_errors = train_module._stop_processes(
+        [first, second],
+        graceful_join=True,
+    )
+
+    assert first.join_calls == [5.0]
+    assert second.join_calls == [0.0, 0.0]
+    assert first.terminate_calls == 0
+    assert second.terminate_calls == 1
+    assert clock[0] == 105.0
+    assert workers_alive is False
+    assert escalated is True
+    assert operation_errors == ()
+
+
 class ProcessFailingSubprocVecEnv:
     latest: ClassVar["ProcessFailingSubprocVecEnv | None"] = None
 
@@ -2581,36 +2651,44 @@ def test_resume_restores_exact_automatic_curriculum_state_without_regression(
     "corruption",
     ["missing", "hash-mismatch", "malformed", "level-out-of-range", "metadata-mismatch"],
 )
-def test_resume_rejects_invalid_parent_curriculum_state_before_destination(
+def test_resume_rejects_invalid_checkpoint_curriculum_state_before_destination(
     tmp_path: Path,
     corruption: str,
 ) -> None:
     source = seed_compatible_source_run(tmp_path)
-    state_path = source.run_dir / "curriculum_state.yaml"
+    state_path = checkpoint_curriculum_sidecar_path(source.checkpoint)
     metadata_path = source.run_dir / "run_metadata.json"
     if corruption == "missing":
         state_path.unlink()
     elif corruption == "hash-mismatch":
         state_path.write_text(
+            "schema_version: 1\n"
+            f"checkpoint_sha256: {sha256_file(source.checkpoint)}\n"
             "level: 0\nconsecutive_passes: 0\nevaluations: 1\n",
             encoding="utf-8",
         )
     elif corruption == "malformed":
         state_path.write_text("level: [", encoding="utf-8")
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        metadata["curriculum_state"]["sha256"] = sha256_file(state_path)
+        metadata["checkpoint_curriculum_artifacts"][0]["state_sha256"] = sha256_file(
+            state_path
+        )
         metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
     elif corruption == "level-out-of-range":
         state_path.write_text(
+            "schema_version: 1\n"
+            f"checkpoint_sha256: {sha256_file(source.checkpoint)}\n"
             "level: 4\nconsecutive_passes: 0\nevaluations: 0\n",
             encoding="utf-8",
         )
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        metadata["curriculum_state"].update({"sha256": sha256_file(state_path), "level": 4})
+        metadata["checkpoint_curriculum_artifacts"][0].update(
+            {"state_sha256": sha256_file(state_path), "level": 4}
+        )
         metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
     else:
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        metadata["curriculum_state"]["evaluations"] = 1
+        metadata["checkpoint_curriculum_artifacts"][0]["evaluations"] = 1
         metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
     destination = tmp_path / f"rejected-curriculum-{corruption}"
     environments = EnvFactory()

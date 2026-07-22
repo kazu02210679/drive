@@ -98,7 +98,9 @@ class ScenarioSplitsConfig(StrictTypedFrozenModel):
     train: SeedRangeConfig = SeedRangeConfig(seed_start=0, seed_count=10_000)
     validation: SeedRangeConfig = SeedRangeConfig(seed_start=10_000, seed_count=1_000)
     test: SeedRangeConfig = SeedRangeConfig(seed_start=20_000, seed_count=1_000)
-    selection: Literal["auto", "nominal", "lead_brake", "cut_in", "occluded_crossing"] = "auto"
+    selection: Literal["auto", "nominal", "lead_brake", "cut_in", "occluded_crossing"] = (
+        "nominal"
+    )
     curriculum: CurriculumConfig = CurriculumConfig()
     lead_brake: LeadBrakeScenarioConfig = LeadBrakeScenarioConfig()
     cut_in: CutInScenarioConfig = CutInScenarioConfig()
@@ -113,6 +115,22 @@ class ScenarioSplitsConfig(StrictTypedFrozenModel):
             for second in ranges[index + 1 :]
         ):
             raise ValueError("scenario seed ranges must not overlap")
+        if self.curriculum.mode == "automatic":
+            if self.selection != "auto":
+                raise ValueError("automatic curriculum requires scenario selection 'auto'")
+            return self
+        allowed_selections = {
+            0: frozenset({"nominal"}),
+            1: frozenset({"lead_brake"}),
+            2: frozenset({"lead_brake", "cut_in", "auto"}),
+            3: frozenset({"occluded_crossing"}),
+        }[self.curriculum.fixed_level]
+        if self.selection not in allowed_selections:
+            raise ValueError(
+                "fixed curriculum scenario selection must match its level: "
+                f"level {self.curriculum.fixed_level} allows "
+                f"{sorted(allowed_selections)!r}"
+            )
         return self
 
 

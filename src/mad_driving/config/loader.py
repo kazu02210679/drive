@@ -8,6 +8,7 @@ from typing import Any
 import yaml
 
 from mad_driving.config.models import AppConfig
+from mad_driving.config.parsing import load_unique_yaml
 
 
 def _load_yaml_mapping(path: Path) -> dict[str, Any]:
@@ -15,7 +16,10 @@ def _load_yaml_mapping(path: Path) -> dict[str, Any]:
 
     if not path.is_file():
         raise FileNotFoundError(f"Configuration file not found: {path}")
-    payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    try:
+        payload = load_unique_yaml(path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as error:
+        raise ValueError(f"Configuration YAML is malformed: {path}: {error}") from error
     if not isinstance(payload, Mapping):
         raise ValueError(f"Configuration root must be a mapping: {path}")
     if not all(isinstance(key, str) for key in payload):

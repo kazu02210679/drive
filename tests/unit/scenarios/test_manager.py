@@ -57,11 +57,31 @@ def fake_runtimes() -> dict[str, object]:
     }
 
 
-def make_manager(level: int, *, selection: str = "auto") -> ScenarioManagerRuntime:
+def make_manager(
+    level: int,
+    *,
+    selection: str | None = None,
+    automatic: bool = False,
+) -> ScenarioManagerRuntime:
+    resolved_selection = selection or (
+        "auto"
+        if automatic
+        else {
+            0: "nominal",
+            1: "lead_brake",
+            2: "auto",
+            3: "occluded_crossing",
+        }[level]
+    )
+    curriculum = (
+        {"mode": "automatic", "initial_level": level}
+        if automatic
+        else {"mode": "fixed", "fixed_level": level}
+    )
     return ScenarioManagerRuntime(
         ScenarioSplitsConfig(
-            selection=selection,
-            curriculum={"mode": "fixed", "fixed_level": level},
+            selection=resolved_selection,
+            curriculum=curriculum,
         ),
         runtimes=fake_runtimes(),
     )
@@ -80,7 +100,7 @@ def test_manager_uses_only_parameter_seed() -> None:
 
 
 def test_pending_level_applies_only_on_next_reset() -> None:
-    runtime = make_manager(level=0)
+    runtime = make_manager(level=0, automatic=True)
     state = runtime.reset(FakeEnvironment(), seeds=EpisodeSeeds(1, 2, 3))
     runtime.set_difficulty_level(2)
 
@@ -111,10 +131,8 @@ def test_default_registry_builds_cut_in_at_level_two() -> None:
 
 
 def test_concrete_selection_rejects_a_scenario_outside_the_active_level() -> None:
-    runtime = make_manager(level=0, selection="lead_brake")
-
-    with pytest.raises(ValueError, match="not allowed"):
-        runtime.reset(FakeEnvironment(), seeds=EpisodeSeeds(1, 2, 3))
+    with pytest.raises(ValueError, match="match its level"):
+        make_manager(level=0, selection="lead_brake")
 
 
 def test_unregistered_selected_scenario_fails_fast() -> None:

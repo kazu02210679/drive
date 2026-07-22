@@ -106,6 +106,72 @@ def test_missing_config_file_has_clear_error(tmp_path: Path) -> None:
         load_config(missing)
 
 
+def test_yaml_duplicate_keys_are_rejected(tmp_path: Path) -> None:
+    config_path = write_config(tmp_path, VALID_CONFIG + "seed: 43\n")
+
+    with pytest.raises(ValueError, match="duplicate"):
+        load_config(config_path)
+
+
+def test_yaml_unhashable_mapping_keys_are_rejected(tmp_path: Path) -> None:
+    config_path = tmp_path / "unhashable-key.yaml"
+    config_path.write_text("? [invalid, key]\n: value\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="unhashable"):
+        load_config(config_path)
+
+
+@pytest.mark.parametrize(
+    ("mode", "level", "selection"),
+    [
+        ("automatic", 0, "lead_brake"),
+        ("fixed", 0, "auto"),
+        ("fixed", 1, "nominal"),
+        ("fixed", 3, "cut_in"),
+    ],
+)
+def test_scenario_selection_must_match_curriculum_mode_and_level(
+    tmp_path: Path,
+    mode: str,
+    level: int,
+    selection: str,
+) -> None:
+    overlay = tmp_path / f"invalid-{mode}-{level}-{selection}.yaml"
+    level_field = "initial_level" if mode == "automatic" else "fixed_level"
+    overlay.write_text(
+        "scenarios:\n"
+        f"  selection: {selection}\n"
+        "  curriculum:\n"
+        f"    mode: {mode}\n"
+        f"    {level_field}: {level}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValidationError, match="selection|curriculum"):
+        load_config("configs/base.yaml", overlay)
+
+
+@pytest.mark.parametrize("selection", ["lead_brake", "cut_in", "auto"])
+def test_fixed_level_two_accepts_each_designed_selection(
+    tmp_path: Path,
+    selection: str,
+) -> None:
+    overlay = tmp_path / f"level-two-{selection}.yaml"
+    overlay.write_text(
+        "scenarios:\n"
+        f"  selection: {selection}\n"
+        "  curriculum:\n"
+        "    mode: fixed\n"
+        "    fixed_level: 2\n",
+        encoding="utf-8",
+    )
+
+    config = load_config("configs/base.yaml", overlay)
+
+    assert config.scenarios.selection == selection
+    assert config.scenarios.curriculum.fixed_level == 2
+
+
 @pytest.mark.parametrize(
     "text",
     [

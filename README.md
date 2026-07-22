@@ -36,7 +36,8 @@ Curriculum levels have a stable mapping:
 
 - Level 0: `nominal`.
 - Level 1: `lead_brake`.
-- Level 2: a uniform seeded choice of `lead_brake` or `cut_in`.
+- Level 2: either a concrete fixed `lead_brake`/`cut_in` selection, or `auto` for a
+  uniform seeded choice between them. The dedicated Cut-in overlay remains concrete.
 - Level 3: `occluded_crossing` plus its secondary lead vehicle.
 
 `fixed` mode holds `fixed_level`. `automatic` mode starts at `initial_level` and
@@ -69,15 +70,25 @@ sampling. Train `[0, 10000)`, validation `[10000, 11000)`, and test
 `[20000, 21000)` scenario identities remain disjoint. Test seeds are never used for
 training, validation, checkpoint selection, or curriculum progression.
 
-`curriculum_state.yaml` is atomically replaced with flush/`fsync` semantics. Its
-state values and SHA-256, together with schema-v3 JSONL counts and hashes, are bound
-into research contract v5 in `run_metadata.json`. Resume requires an exact parent
-state, matching hash, and compatible curriculum configuration.
+`curriculum_state.yaml` is atomically replaced with flush/`fsync` semantics. Every
+periodic, best, and final `*.zip` also has an adjacent `*.zip.curriculum.yaml`
+sidecar containing the exact curriculum state at that checkpoint's lifecycle point
+and the checkpoint SHA-256. Research contract v5 inventories both checkpoint and
+sidecar hashes in `run_metadata.json`. Resume resolves the sidecar bound to the
+selected checkpoint, reads and hashes one immutable byte snapshot, rejects path
+replacement races and malformed/duplicate-key data, and restores that exact state
+after validating curriculum compatibility. It never substitutes the run-final state
+for an earlier periodic or best checkpoint.
+
+`--run-dir` remains available for an explicit fresh destination. When omitted, the
+CLI atomically reserves a collision-free directory below configured
+`training.run_root`, so the exact nominal smoke command is safe to run directly.
 
 Useful commands:
 
 ```powershell
 python -m mad_driving.cli.train --help
+python -m mad_driving.cli.train --config configs/base.yaml --smoke
 python -m mad_driving.cli.train --config configs/base.yaml --smoke --run-dir runs/phase5_nominal_smoke
 python -m pytest tests/integration/test_phase5_metadrive_headless.py -m integration -q
 ```

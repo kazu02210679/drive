@@ -11,12 +11,13 @@ import yaml
 from gymnasium import spaces
 from numpy.typing import NDArray
 from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import SubprocVecEnv
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 
 from mad_driving.config.models import AppConfig
 from mad_driving.scenarios import EnvironmentRole
 from mad_driving.training import run_training
-from mad_driving.training.metadata import RESEARCH_CONTRACT_VERSION
+from mad_driving.training.curriculum import CurriculumState
+from mad_driving.training.metadata import RESEARCH_CONTRACT_VERSION, resolve_resume_source
 
 
 class TinyDeterministicEnv(gym.Env[NDArray[np.float32], int]):
@@ -177,6 +178,9 @@ def make_real_ppo_config() -> AppConfig:
 
 def load_and_predict_policy(checkpoint: Path) -> PPO:
     model = PPO.load(checkpoint, device="cpu")
+    for name, tensor in model.policy.state_dict().items():
+        if tensor.is_floating_point():
+            assert bool(tensor.isfinite().all()), f"non-finite policy tensor: {name}"
     action, _ = model.predict(np.zeros(24, dtype=np.float32), deterministic=True)
     predicted_action = int(np.asarray(action).item())
     assert 0 <= predicted_action <= 3
@@ -186,6 +190,63 @@ def load_and_predict_policy(checkpoint: Path) -> PPO:
 def checkpoint_hash(checkpoint: Path) -> str:
     with checkpoint.open("rb") as checkpoint_file:
         return hashlib.file_digest(checkpoint_file, "sha256").hexdigest()
+
+
+def checkpoint_curriculum_sidecar(checkpoint: Path) -> Path:
+    return checkpoint.with_name(f"{checkpoint.name}.curriculum.yaml")
+
+
+@pytest.mark.integration
+def test_every_published_checkpoint_restores_its_exact_automatic_curriculum_state(
+    tmp_path: Path,
+) -> None:
+    base = make_real_ppo_config()
+    config = base.model_copy(
+        update={
+            "scenarios": base.scenarios.model_copy(
+                update={
+                    "selection": "auto",
+                    "curriculum": base.scenarios.curriculum.model_copy(
+                        update={
+                            "mode": "automatic",
+                            "initial_level": 0,
+                            "consecutive_evaluations": 1,
+                            "success_rate_threshold": 1.0,
+                            "collision_rate_threshold": 0.0,
+                        }
+                    ),
+                }
+            ),
+            "training": base.training.model_copy(
+                update={
+                    "total_timesteps": 24,
+                    "checkpoint_interval_steps": 8,
+                    "eval_interval_steps": 8,
+                }
+            ),
+        }
+    )
+    run_dir = tmp_path / "checkpoint-curriculum-bindings"
+
+    result = run_training(
+        config,
+        smoke=False,
+        run_dir=run_dir,
+        env_factory=tiny_env_factory,
+        subproc_vec_env_factory=DummyVecEnv,
+    )
+
+    expected = {
+        run_dir / "checkpoints" / "ppo_checkpoint_8_steps.zip": CurriculumState(0, 0, 0),
+        run_dir / "checkpoints" / "ppo_checkpoint_16_steps.zip": CurriculumState(1, 0, 1),
+        run_dir / "checkpoints" / "ppo_checkpoint_24_steps.zip": CurriculumState(2, 0, 2),
+        result.best_checkpoint: CurriculumState(1, 0, 1),
+        result.final_checkpoint: CurriculumState(3, 0, 3),
+    }
+    for checkpoint, state in expected.items():
+        assert checkpoint.is_file()
+        assert checkpoint_curriculum_sidecar(checkpoint).is_file()
+        assert resolve_resume_source(checkpoint, config).curriculum_state == state
 
 
 def episode_seed_records(run_dir: Path, role: EnvironmentRole) -> list[int]:

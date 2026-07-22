@@ -1,3 +1,4 @@
+import hashlib
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 from typing import Any
@@ -8,7 +9,9 @@ from mad_driving.config.models import CurriculumConfig
 from mad_driving.training.curriculum import (
     CurriculumController,
     CurriculumState,
+    read_checkpoint_curriculum_state,
     read_curriculum_state,
+    write_checkpoint_curriculum_state,
     write_curriculum_state,
 )
 
@@ -175,6 +178,72 @@ def test_curriculum_state_round_trips_through_atomic_artifact(tmp_path: Path) ->
     assert not list(tmp_path.glob(".curriculum_state.yaml.*.tmp"))
 
 
+def test_curriculum_atomic_write_preserves_old_state_when_fsync_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination = tmp_path / "curriculum_state.yaml"
+    destination.write_bytes(b"old-state\n")
+
+    def fail_fsync(_descriptor: int) -> None:
+        raise OSError("fsync failed")
+
+    monkeypatch.setattr("mad_driving.training.curriculum.os.fsync", fail_fsync)
+
+    with pytest.raises(OSError, match="fsync failed"):
+        write_curriculum_state(CurriculumState(1, 0, 1), destination)
+
+    assert destination.read_bytes() == b"old-state\n"
+    assert not list(tmp_path.glob(".curriculum_state.yaml.*.tmp"))
+
+
+def test_curriculum_atomic_write_preserves_old_state_when_replace_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination = tmp_path / "curriculum_state.yaml"
+    destination.write_bytes(b"old-state\n")
+
+    def fail_replace(_source: Path, _destination: Path) -> None:
+        raise OSError("replace failed")
+
+    monkeypatch.setattr("mad_driving.training.curriculum.os.replace", fail_replace)
+
+    with pytest.raises(OSError, match="replace failed"):
+        write_curriculum_state(CurriculumState(1, 0, 1), destination)
+
+    assert destination.read_bytes() == b"old-state\n"
+    assert not list(tmp_path.glob(".curriculum_state.yaml.*.tmp"))
+
+
+def test_curriculum_atomic_write_preserves_primary_and_cleanup_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination = tmp_path / "curriculum_state.yaml"
+    destination.write_bytes(b"old-state\n")
+    cleanup_attempts: list[Path] = []
+
+    def fail_replace(_source: Path, _destination: Path) -> None:
+        raise OSError("primary replace failure")
+
+    def fail_unlink(path: Path, *args: object, **kwargs: object) -> None:
+        del args, kwargs
+        cleanup_attempts.append(path)
+        raise OSError("secondary unlink failure")
+
+    monkeypatch.setattr("mad_driving.training.curriculum.os.replace", fail_replace)
+    monkeypatch.setattr(Path, "unlink", fail_unlink)
+
+    with pytest.raises(OSError, match="primary replace failure") as caught:
+        write_curriculum_state(CurriculumState(1, 0, 1), destination)
+
+    assert destination.read_bytes() == b"old-state\n"
+    assert len(cleanup_attempts) == 1
+    assert "secondary unlink failure" in "\n".join(caught.value.__notes__)
+    assert cleanup_attempts[0].is_file()
+
+
 def test_curriculum_state_artifact_rejects_non_state_and_malformed_yaml(
     tmp_path: Path,
 ) -> None:
@@ -195,3 +264,86 @@ def test_curriculum_state_artifact_rejects_non_state_and_malformed_yaml(
     )
     with pytest.raises(ValueError, match="values"):
         read_curriculum_state(destination)
+
+
+def test_curriculum_yaml_rejects_duplicate_keys(tmp_path: Path) -> None:
+    state_path = tmp_path / "curriculum_state.yaml"
+    state_path.write_text(
+        "level: 0\nlevel: 1\nconsecutive_passes: 0\nevaluations: 0\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="duplicate"):
+        read_curriculum_state(state_path)
+
+
+def test_checkpoint_curriculum_read_rejects_path_replacement_during_one_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checkpoint = tmp_path / "model.zip"
+    checkpoint.write_bytes(b"checkpoint-v1")
+    sidecar = write_checkpoint_curriculum_state(CurriculumState(1, 0, 1), checkpoint)
+    expected_bytes = sidecar.read_bytes()
+    expected_digest = hashlib.sha256(expected_bytes).hexdigest()
+    replacement = tmp_path / "replacement.yaml"
+    replacement.write_text(
+        "schema_version: 1\n"
+        f"checkpoint_sha256: {'0' * 64}\n"
+        "level: 3\nconsecutive_passes: 0\nevaluations: 9\n",
+        encoding="utf-8",
+    )
+    real_stat = Path.stat
+
+    def replacement_identity(path: Path, *args: object, **kwargs: object):
+        if path == sidecar:
+            return real_stat(replacement, *args, **kwargs)
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", replacement_identity)
+
+    with pytest.raises(ValueError, match="replaced|changed|identity"):
+        read_checkpoint_curriculum_state(
+            sidecar,
+            expected_checkpoint_sha256=hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
+            expected_sha256=expected_digest,
+        )
+
+
+@pytest.mark.parametrize(
+    ("config", "state", "message"),
+    [
+        (fixed_config(1), CurriculumState(1, 1, 1), "streak"),
+        (
+            automatic_config(consecutive_evaluations=2),
+            CurriculumState(1, 2, 4),
+            "streak",
+        ),
+        (
+            automatic_config(consecutive_evaluations=2),
+            CurriculumState(2, 0, 3),
+            "evaluations",
+        ),
+        (
+            automatic_config(consecutive_evaluations=2),
+            CurriculumState(1, 1, 2),
+            "evaluations",
+        ),
+    ],
+)
+def test_curriculum_controller_rejects_unreachable_config_dependent_state(
+    config: CurriculumConfig,
+    state: CurriculumState,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        CurriculumController(config, state)
+
+
+def test_automatic_level_three_retains_valid_capped_streak() -> None:
+    controller = CurriculumController(
+        automatic_config(consecutive_evaluations=2),
+        CurriculumState(level=3, consecutive_passes=5, evaluations=11),
+    )
+
+    assert controller.state == CurriculumState(3, 5, 11)

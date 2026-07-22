@@ -20,10 +20,12 @@ from stable_baselines3.common.utils import ConstantSchedule, FloatSchedule
 
 from mad_driving.config.models import AppConfig
 from mad_driving.training.curriculum import (
+    CHECKPOINT_CURRICULUM_SIDECAR_SCHEMA_VERSION,
     CURRICULUM_STATE_FILENAME,
     CurriculumController,
     CurriculumState,
-    read_curriculum_state,
+    checkpoint_curriculum_sidecar_path,
+    read_checkpoint_curriculum_artifact,
 )
 
 RESEARCH_CONTRACT_VERSION: Final = 5
@@ -217,6 +219,7 @@ class RunMetadata:
     action_count: int = len(ACTION_ORDER)
     action_order: tuple[str, ...] = ACTION_ORDER
     curriculum_state: Mapping[str, Any] | None = None
+    checkpoint_curriculum_artifacts: tuple[Mapping[str, Any], ...] = ()
     episode_seed_artifacts: tuple[Mapping[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
@@ -286,6 +289,13 @@ class RunMetadata:
             self,
             "curriculum_state",
             _validated_curriculum_state_artifact(self.curriculum_state),
+        )
+        object.__setattr__(
+            self,
+            "checkpoint_curriculum_artifacts",
+            _validated_checkpoint_curriculum_artifacts(
+                self.checkpoint_curriculum_artifacts
+            ),
         )
         object.__setattr__(
             self,
@@ -427,6 +437,90 @@ def _validated_episode_seed_artifacts(
     return tuple(validated)
 
 
+def _validated_checkpoint_curriculum_artifacts(
+    value: object,
+) -> tuple[Mapping[str, Any], ...]:
+    if not isinstance(value, list | tuple):
+        raise ValueError("checkpoint_curriculum_artifacts must be a list or tuple")
+    required = {
+        "schema_version",
+        "checkpoint_path",
+        "checkpoint_sha256",
+        "state_path",
+        "state_sha256",
+        "level",
+        "consecutive_passes",
+        "evaluations",
+    }
+    validated: list[Mapping[str, Any]] = []
+    checkpoint_paths: set[str] = set()
+    state_paths: set[str] = set()
+    for index, raw_artifact in enumerate(value):
+        name = f"checkpoint_curriculum_artifacts[{index}]"
+        if not isinstance(raw_artifact, Mapping) or set(raw_artifact) != required:
+            raise ValueError(f"{name} fields are malformed")
+        schema_version = _validated_integral(
+            raw_artifact["schema_version"],
+            f"{name}.schema_version",
+            expected=CHECKPOINT_CURRICULUM_SIDECAR_SCHEMA_VERSION,
+        )
+        checkpoint_path = raw_artifact["checkpoint_path"]
+        if (
+            not isinstance(checkpoint_path, str)
+            or not checkpoint_path.startswith("checkpoints/")
+            or not checkpoint_path.endswith(".zip")
+            or Path(checkpoint_path).as_posix() != checkpoint_path
+            or ".." in Path(checkpoint_path).parts
+        ):
+            raise ValueError(f"{name}.checkpoint_path is malformed")
+        state_path = raw_artifact["state_path"]
+        expected_state_path = f"{checkpoint_path}.curriculum.yaml"
+        if state_path != expected_state_path:
+            raise ValueError(f"{name}.state_path must equal {expected_state_path!r}")
+        if checkpoint_path in checkpoint_paths or state_path in state_paths:
+            raise ValueError("checkpoint_curriculum_artifacts must not contain duplicates")
+        checkpoint_paths.add(checkpoint_path)
+        state_paths.add(state_path)
+        digests: dict[str, str] = {}
+        for field in ("checkpoint_sha256", "state_sha256"):
+            digest = raw_artifact[field]
+            if (
+                not isinstance(digest, str)
+                or len(digest) != 64
+                or digest != digest.lower()
+                or any(character not in "0123456789abcdef" for character in digest)
+            ):
+                raise ValueError(f"{name}.{field} must be a lowercase SHA-256 digest")
+            digests[field] = digest
+        try:
+            state = CurriculumState(
+                level=raw_artifact["level"],
+                consecutive_passes=raw_artifact["consecutive_passes"],
+                evaluations=raw_artifact["evaluations"],
+            )
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"{name} state values are malformed") from error
+        validated.append(
+            cast(
+                Mapping[str, Any],
+                _freeze_json(
+                    {
+                        "schema_version": schema_version,
+                        "checkpoint_path": checkpoint_path,
+                        "checkpoint_sha256": digests["checkpoint_sha256"],
+                        "state_path": state_path,
+                        "state_sha256": digests["state_sha256"],
+                        "level": state.level,
+                        "consecutive_passes": state.consecutive_passes,
+                        "evaluations": state.evaluations,
+                    },
+                    name,
+                ),
+            )
+        )
+    return tuple(validated)
+
+
 @dataclass(frozen=True)
 class ResumeSource:
     """Validated read-only source data resolved before destination writes."""
@@ -470,6 +564,45 @@ def curriculum_state_artifact(
             }
         ),
     )
+
+
+def checkpoint_curriculum_artifact_inventory(
+    checkpoints_dir: str | Path,
+) -> tuple[Mapping[str, Any], ...]:
+    """Inventory every checkpoint and its exact adjacent curriculum sidecar."""
+
+    directory = Path(checkpoints_dir)
+    if directory.name != "checkpoints" or not directory.is_dir():
+        raise ValueError(f"Checkpoint directory is malformed: {directory}")
+    checkpoints = sorted(directory.glob("*.zip"), key=lambda path: path.name)
+    if not checkpoints:
+        raise ValueError(f"No checkpoints were published in: {directory}")
+    expected_sidecars = {checkpoint_curriculum_sidecar_path(path) for path in checkpoints}
+    actual_sidecars = set(directory.glob("*.zip.curriculum.yaml"))
+    if actual_sidecars != expected_sidecars:
+        raise ValueError("Checkpoint curriculum sidecars do not exactly match checkpoints")
+    artifacts: list[Mapping[str, Any]] = []
+    for checkpoint in checkpoints:
+        checkpoint_digest = sha256_file(checkpoint)
+        sidecar = checkpoint_curriculum_sidecar_path(checkpoint)
+        state, state_digest = read_checkpoint_curriculum_artifact(
+            sidecar,
+            expected_checkpoint_sha256=checkpoint_digest,
+        )
+        relative_checkpoint = f"checkpoints/{checkpoint.name}"
+        artifacts.append(
+            {
+                "schema_version": CHECKPOINT_CURRICULUM_SIDECAR_SCHEMA_VERSION,
+                "checkpoint_path": relative_checkpoint,
+                "checkpoint_sha256": checkpoint_digest,
+                "state_path": f"{relative_checkpoint}.curriculum.yaml",
+                "state_sha256": state_digest,
+                "level": state.level,
+                "consecutive_passes": state.consecutive_passes,
+                "evaluations": state.evaluations,
+            }
+        )
+    return _validated_checkpoint_curriculum_artifacts(artifacts)
 
 
 def _require_int(value: object, name: str) -> int:
@@ -540,6 +673,7 @@ def _parse_run_metadata(payload: object) -> RunMetadata:
         "resolved_config",
         "resume",
         "curriculum_state",
+        "checkpoint_curriculum_artifacts",
     }
     optional = {"episode_seed_artifacts"}
     if not required <= set(values) or set(values) - required - optional:
@@ -571,6 +705,7 @@ def _parse_run_metadata(payload: object) -> RunMetadata:
         action_count=_require_int(values["action_count"], "action_count"),
         action_order=tuple(action_order_value),
         curriculum_state=values["curriculum_state"],
+        checkpoint_curriculum_artifacts=values["checkpoint_curriculum_artifacts"],
         episode_seed_artifacts=values.get("episode_seed_artifacts", ()),
     )
 
@@ -595,6 +730,15 @@ def _validate_metadata_contract(metadata: RunMetadata) -> None:
         raise ValueError("Resume action schema mismatch")
 
 
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    values: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in values:
+            raise ValueError(f"Resume metadata JSON contains duplicate key {key!r}")
+        values[key] = value
+    return values
+
+
 def _load_run_metadata(path: Path) -> RunMetadata:
     try:
         payload = json.loads(
@@ -602,6 +746,7 @@ def _load_run_metadata(path: Path) -> RunMetadata:
             parse_constant=lambda value: (_ for _ in ()).throw(
                 ValueError(f"Resume metadata JSON number must be finite: {value}")
             ),
+            object_pairs_hook=_unique_json_object,
         )
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"Resume metadata is malformed: {path}") from exc
@@ -672,18 +817,29 @@ def resolve_resume_source(checkpoint: str | Path, current_config: AppConfig) -> 
         raise ValueError(f"Resume source resolved config is malformed: {config_path}") from exc
     current_payload = current_config.model_dump(mode="json")
     config_diff = _allowed_config_diff(parent_config, current_payload)
-    curriculum_summary = metadata.curriculum_state
-    if curriculum_summary is None:
-        raise ValueError("Resume source curriculum state metadata is missing")
-    curriculum_path = run_dir / CURRICULUM_STATE_FILENAME
+    checkpoint_relative_path = checkpoint_path.relative_to(run_dir).as_posix()
+    matching_artifacts = [
+        artifact
+        for artifact in metadata.checkpoint_curriculum_artifacts
+        if artifact["checkpoint_path"] == checkpoint_relative_path
+    ]
+    if len(matching_artifacts) != 1:
+        raise ValueError(
+            "Resume checkpoint does not have exactly one curriculum state binding"
+        )
+    curriculum_summary = matching_artifacts[0]
+    expected_checkpoint_digest = cast(str, curriculum_summary["checkpoint_sha256"])
+    if sha256_file(checkpoint_path) != expected_checkpoint_digest:
+        raise ValueError("Resume checkpoint hash does not match its curriculum binding")
+    curriculum_path = run_dir / cast(str, curriculum_summary["state_path"])
     if not curriculum_path.is_file():
-        raise ValueError(f"Resume source curriculum state not found: {curriculum_path}")
-    expected_digest = cast(str, curriculum_summary["sha256"])
-    if sha256_file(curriculum_path) != expected_digest:
-        raise ValueError("Resume source curriculum state hash mismatch")
-    curriculum_state = read_curriculum_state(curriculum_path)
-    if sha256_file(curriculum_path) != expected_digest:
-        raise ValueError("Resume source curriculum state changed while being validated")
+        raise ValueError(f"Resume checkpoint curriculum state not found: {curriculum_path}")
+    expected_state_digest = cast(str, curriculum_summary["state_sha256"])
+    curriculum_state, _state_digest = read_checkpoint_curriculum_artifact(
+        curriculum_path,
+        expected_checkpoint_sha256=expected_checkpoint_digest,
+        expected_sha256=expected_state_digest,
+    )
     expected_state = CurriculumState(
         level=curriculum_summary["level"],
         consecutive_passes=curriculum_summary["consecutive_passes"],
@@ -697,7 +853,7 @@ def resolve_resume_source(checkpoint: str | Path, current_config: AppConfig) -> 
         run_dir=run_dir.resolve(strict=True),
         metadata=metadata,
         resolved_config=parent_config,
-        checkpoint_sha256=sha256_file(checkpoint_path),
+        checkpoint_sha256=expected_checkpoint_digest,
         config_diff=config_diff,
         curriculum_state=curriculum_state,
     )
@@ -764,6 +920,7 @@ def write_run_metadata(metadata: RunMetadata, destination: Path) -> None:
         action_count=metadata.action_count,
         action_order=metadata.action_order,
         curriculum_state=metadata.curriculum_state,
+        checkpoint_curriculum_artifacts=metadata.checkpoint_curriculum_artifacts,
         episode_seed_artifacts=metadata.episode_seed_artifacts,
     )
     payload = {
@@ -780,6 +937,10 @@ def write_run_metadata(metadata: RunMetadata, destination: Path) -> None:
             None
             if validated.curriculum_state is None
             else _thaw_json(validated.curriculum_state, "curriculum_state")
+        ),
+        "checkpoint_curriculum_artifacts": _thaw_json(
+            validated.checkpoint_curriculum_artifacts,
+            "checkpoint_curriculum_artifacts",
         ),
         "episode_seed_artifacts": _thaw_json(
             validated.episode_seed_artifacts,

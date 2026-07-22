@@ -18,9 +18,10 @@ work was added.
   requires both success and collision thresholds for the configured consecutive count,
   advances exactly one level, clears the streak on advancement, caps at level 3, and never
   regresses. Fixed mode retains its configured level.
-- Stable level mapping is level 0 nominal, level 1 Lead Brake, level 2 uniform seeded
-  Lead Brake/Cut-in selection, and level 3 Occluded Crossing with its existing secondary
-  lead vehicle.
+- Stable level mapping is level 0 nominal, level 1 Lead Brake, level 2 Lead Brake/Cut-in,
+  and level 3 Occluded Crossing with its existing secondary lead vehicle. Fixed level 2
+  accepts either concrete scenario or `auto` uniform seeded selection; automatic mode
+  requires `auto`. The dedicated Cut-in overlay remains concrete.
 - `CurriculumEvalCallback` extends the fixed-seed SB3 evaluation callback. It captures one
   strict Boolean `scenario_success`/`collision_occurred` terminal record per validation
   episode, observes only after a scheduled evaluation, atomically persists state, and calls
@@ -151,6 +152,119 @@ Exit 0
 The exact final integration, deterministic replay, static-analysis, diff, and clean-tree
 checks are rerun immediately before commit; the final commit hash is reported to the parent.
 
+## Independent-review remediation
+
+The remediation started from Task 4 commit `b9ac8e11a282dbc59853377703515693a46befe0`.
+No prior Phase 5 commit was squashed and no push was performed.
+
+### Checkpoint-bound exact curriculum resume
+
+RED added a real 24-step automatic PPO run with evaluations/checkpoints at steps 8, 16,
+and 24. The first run failed because
+`ppo_checkpoint_8_steps.zip.curriculum.yaml` did not exist.
+
+GREEN introduces an adjacent atomic sidecar for every periodic, best, and final checkpoint.
+Periodic callbacks bind the pre-evaluation state at their own save point, best checkpoints
+bind the post-evaluation state that selected them, and final checkpoints bind the final
+post-learning state. `run_metadata.json` inventories each checkpoint/sidecar path, both
+SHA-256 values, and exact state values. Resume selects the one descriptor matching the
+requested checkpoint and never reads the run-final state as a substitute. The real test
+restores `(0,0,0)`, `(1,0,1)`, `(2,0,2)`, best `(1,0,1)`, and final `(3,0,3)` from their
+five exposed checkpoints.
+
+```text
+.venv\Scripts\python.exe -m pytest tests/integration/test_ppo_checkpoint.py::test_every_published_checkpoint_restores_its_exact_automatic_curriculum_state -q -m integration
+1 passed, 15 warnings
+```
+
+### Immutable reads, duplicate keys, and state/config invariants
+
+RED produced 14 focused failures for duplicate YAML/JSON keys, replacement-race handling,
+state/config invariants, and selection compatibility. A separate correction RED produced
+three failures proving fixed level 2 must retain concrete Lead Brake/Cut-in support.
+
+GREEN uses one open descriptor and one byte snapshot for sidecar digest and parse. It checks
+`fstat` stability, path/file identity, size/timestamps, and expected digest before close;
+the race regression substitutes a different path identity between read and final identity
+validation. YAML parsing rejects duplicate keys recursively and run metadata uses a strict
+JSON object-pairs hook. Resume validates fixed streak zero; automatic below-cap streak,
+minimum evaluations for advancement/current streak, and valid capped level-3 states.
+Configuration rejects incompatible selection/curriculum combinations before environment
+construction. Fixed level 2 accepts `lead_brake`, `cut_in`, or `auto`; automatic accepts
+only `auto`.
+
+```text
+.venv\Scripts\python.exe -m pytest tests/unit/training/test_curriculum.py tests/unit/config/test_loader.py tests/unit/training/test_metadata.py -q
+109 passed, 14 warnings
+```
+
+### Callback schedules, atomic failures, CLI, and shutdown
+
+- Two real scheduled evaluations aggregate mixed episode outcomes independently. The test
+  proves exactly one `observe` per schedule, stale-record clearing, exact record counts,
+  one level-change broadcast, and missing/extra terminal-record rejection.
+- Atomic-write failure tests inject `fsync`, `os.replace`, and cleanup `unlink` failures.
+  The old destination is preserved, no partial destination is published, cleanup is
+  attempted, and a secondary cleanup error is retained without masking the primary error.
+- CLI RED failed on required `--run-dir` and missing allocation helpers. GREEN atomically
+  reserves a collision-free directory under `training.run_root` when the option is omitted;
+  explicit `--run-dir` behavior is unchanged.
+- Multiworker shutdown RED showed the second worker still receiving a separate five-second
+  join. GREEN uses one monotonic deadline across all graceful/terminate/kill joins; the
+  escalation test proves the second worker receives zero remaining grace after the first
+  consumes the shared budget.
+
+```text
+.venv\Scripts\python.exe -m pytest tests/unit/training/test_callbacks.py -q
+16 passed, 20 warnings
+
+.venv\Scripts\python.exe -m pytest tests/unit/training/test_curriculum.py -q
+32 passed, 14 warnings
+
+.venv\Scripts\python.exe -m pytest tests/unit/cli/test_train.py -q
+11 passed, 14 warnings
+
+.venv\Scripts\python.exe -m pytest tests/unit/training/test_train.py -q
+127 passed, 14 warnings
+```
+
+### Strengthened real replay and final remediation gates
+
+Real fixed-level replay now runs bounded complete episodes to environment/scenario terminal
+outcomes and serializes every observation, reward, actor state, visibility set, dynamic
+scenario state, outcome, and DecisionTrace metadata. Five repeated pairs cover level 0,
+level 1, both seeded level-2 branches (`43` Lead Brake and `42` Cut-in), and level 3.
+Assertions prove lead deceleration, Cut-in merge, cyclist movement/reveal, the secondary
+lead, and successful scenario outcomes. Every loaded floating PPO policy tensor is checked
+with `isfinite` before prediction.
+
+```text
+.venv\Scripts\python.exe -m pytest tests/integration/test_phase5_metadrive_headless.py tests/integration/test_rl_metadrive_headless.py tests/integration/test_ppo_checkpoint.py -q -m integration
+22 passed, 27 warnings in 63.70s
+
+.venv\Scripts\python.exe -m pytest tests/unit -q
+858 passed, 20 warnings in 20.94s
+
+.venv\Scripts\python.exe -m mad_driving.cli.train --help
+Exit 0; --run-dir is optional and documents training.run_root allocation
+
+.venv\Scripts\python.exe -m mad_driving.cli.train --config configs/base.yaml --smoke
+Exit 0; fresh run allocated automatically; 6,144 timesteps; best/final published
+
+.venv\Scripts\python.exe -m pytest --cov=mad_driving --cov-report=term-missing -q
+888 passed, 33 warnings in 104.40s; branch coverage 90.02%
+
+.venv\Scripts\python.exe -m ruff check .
+All checks passed
+
+.venv\Scripts\python.exe -m mypy --strict src
+Success: no issues found in 65 source files
+```
+
+The generated exact-command smoke run was inspected and removed after verification. Its
+warning categories were unchanged: Matplotlib/PyParsing deprecations plus SB3 notices for
+unmonitored evaluation environments and intentionally different train/eval VecEnv types.
+
 ## Files changed
 
 Production and documentation:
@@ -158,6 +272,9 @@ Production and documentation:
 - `README.md`
 - `src/mad_driving/cli/control_smoke.py`
 - `src/mad_driving/cli/train.py`
+- `src/mad_driving/config/loader.py`
+- `src/mad_driving/config/models.py`
+- `src/mad_driving/config/parsing.py` (new in remediation)
 - `src/mad_driving/envs/multi_agent_speed_env.py`
 - `src/mad_driving/interfaces/decision_trace.py`
 - `src/mad_driving/training/__init__.py`
@@ -174,8 +291,10 @@ Tests:
 - `tests/integration/test_ppo_checkpoint.py`
 - `tests/integration/test_rl_metadrive_headless.py`
 - `tests/unit/cli/test_train.py`
+- `tests/unit/config/test_loader.py`
 - `tests/unit/envs/test_multi_agent_speed_env.py`
 - `tests/unit/interfaces/test_models.py`
+- `tests/unit/scenarios/test_manager.py`
 - `tests/unit/training/test_callbacks.py`
 - `tests/unit/training/test_curriculum.py` (new)
 - `tests/unit/training/test_episode_seeds.py`
