@@ -5,6 +5,7 @@ import pytest
 from mad_driving.agents.claim_factory import neutral_claim
 from mad_driving.agents.suite import AgentAnalysisResult, AgentSuite, analyze_safely
 from mad_driving.config.models import AgentsConfig
+from mad_driving.methods import build_method_suite
 from mad_driving.interfaces import CriticReview, RiskClaim, SceneSnapshot
 from tests.unit.agents.factories import make_actor, make_analysis, make_claim, make_snapshot
 
@@ -33,6 +34,13 @@ def test_suite_is_stateless_and_deterministic() -> None:
     )
 
     assert suite.analyze(snapshot) == suite.analyze(snapshot)
+
+
+def test_profile_built_ablation_omits_specialists_without_recording_a_failure() -> None:
+    result = build_method_suite(AgentsConfig(), "proposed_no_hazard").analyze(make_snapshot())
+
+    assert result.expected_agent_ids == ("nominal", "rule")
+    assert result.failed_agent_ids == ()
 
 
 class RecordingAgent:

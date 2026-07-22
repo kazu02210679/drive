@@ -14,6 +14,16 @@ from pydantic import (
 
 OCCLUDED_CROSSING_ACTOR_HALF_WIDTH_M = 0.2
 
+MethodId = Literal[
+    "b0_rule",
+    "b1_nominal",
+    "b2_multi_no_review",
+    "proposed",
+    "proposed_no_critic",
+    "proposed_no_shield",
+    "proposed_no_hazard",
+]
+
 
 class StrictFrozenModel(BaseModel):
     """Base class that rejects unknown settings and runtime mutation."""
@@ -25,6 +35,12 @@ class StrictTypedFrozenModel(StrictFrozenModel):
     """Frozen model that also rejects Pydantic scalar type coercion."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+
+class MethodConfig(StrictFrozenModel):
+    """Select one centrally defined method composition."""
+
+    id: MethodId = "proposed"
 
 
 class SeedRangeConfig(StrictTypedFrozenModel):
@@ -384,6 +400,7 @@ class AppConfig(StrictFrozenModel):
     fixed_action: tuple[FiniteFloat, FiniteFloat]
     metadrive: MetaDriveConfig
     scenarios: ScenarioSplitsConfig = Field(default_factory=ScenarioSplitsConfig)
+    method: MethodConfig = Field(default_factory=MethodConfig)
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     coordinator: CoordinatorConfig = Field(default_factory=CoordinatorConfig)
     shield: ShieldConfig = Field(default_factory=ShieldConfig)

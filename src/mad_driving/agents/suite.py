@@ -108,15 +108,21 @@ class AgentSuite:
             critic=CriticAgent(config.critic),
         )
 
+    @property
+    def expected_agent_ids(self) -> tuple[str, ...]:
+        """Return the configured specialist IDs in deterministic execution order."""
+
+        return tuple(
+            agent.agent_id for agent in (self.nominal, self.hazard, self.rule) if agent is not None
+        )
+
     def analyze(self, observation: SceneObservation) -> AgentAnalysisResult:
         claims: list[RiskClaim] = []
         failed_agent_ids: list[str] = []
         errors: list[str] = []
         seen_claim_ids: set[str] = set()
-        agents = tuple(
-            agent for agent in (self.nominal, self.hazard, self.rule) if agent is not None
-        )
-        expected_agent_ids = tuple(agent.agent_id for agent in agents)
+        agents = tuple(agent for agent in (self.nominal, self.hazard, self.rule) if agent is not None)
+        expected_agent_ids = self.expected_agent_ids
         for agent in agents:
             try:
                 agent_claims = tuple(agent.analyze(observation))

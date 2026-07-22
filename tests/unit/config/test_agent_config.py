@@ -9,6 +9,7 @@ from mad_driving.config.models import (
     AppConfig,
     CriticAgentConfig,
     HazardAgentConfig,
+    MethodConfig,
     NominalAgentConfig,
     RuleAgentConfig,
 )
@@ -35,6 +36,7 @@ def test_agent_defaults_are_available_to_old_minimal_configs() -> None:
     assert config.agents.hazard.ego_max_safe_deceleration_mps2 == -6.0
     assert config.agents.critic.recommendation_spread_mps == 5.0
     assert config.agents.critic.low_confidence_threshold == 0.5
+    assert config.method == MethodConfig(id="proposed")
 
 
 def test_agent_models_are_frozen_and_strict() -> None:

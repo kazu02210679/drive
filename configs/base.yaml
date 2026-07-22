@@ -36,6 +36,8 @@ scenarios:
     mild_deceleration_mps2: {minimum: 2.0, maximum: 4.0}
     severe_deceleration_mps2: {minimum: 4.0, maximum: 8.0}
     survival_s: 4.0
+method:
+  id: proposed
 agents:
   nominal:
     horizon_s: 5.0
