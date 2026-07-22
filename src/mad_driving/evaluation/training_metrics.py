@@ -136,10 +136,21 @@ def _verified_run_provenance(run_dir: Path) -> tuple[str, int]:
     from mad_driving.evaluation.selection import discover_checkpoint_candidates
 
     candidates = discover_checkpoint_candidates(run_dir)
+    final_candidates = tuple(
+        candidate
+        for candidate in candidates
+        if candidate.checkpoint_kind == "final" and candidate.path.name == "final_model.zip"
+    )
+    if len(final_candidates) != 1:
+        raise ValueError(
+            "completed training run must have exactly one authenticated "
+            f"final_model.zip candidate: {run_dir}"
+        )
     provenances = {(candidate.method_id, candidate.policy_seed) for candidate in candidates}
     if len(provenances) != 1:
         raise ValueError(f"completed training run has inconsistent provenance: {run_dir}")
-    return next(iter(provenances))
+    final_candidate = final_candidates[0]
+    return final_candidate.method_id, final_candidate.policy_seed
 
 
 def _read_run_points(

@@ -58,6 +58,7 @@ def make_step(**overrides: Any) -> EvaluationStepRecord:
         "checkpoint_sha256": "a" * 64,
         "episode_index": 3,
         "is_formal": True,
+        "shield_mode": "monitor",
         "step_index": 0,
         "simulation_time_s": 0.0,
         "decision_interval_s": 0.1,
@@ -128,6 +129,7 @@ def make_episode(**overrides: Any) -> EvaluationEpisodeRecord:
         "checkpoint_sha256": "b" * 64,
         "episode_index": 3,
         "is_formal": True,
+        "shield_mode": "monitor",
         "episode_rng_seed": 20_001,
         "metadrive_scenario_index": 17,
         "scenario_selection_seed": 31,
@@ -160,6 +162,7 @@ def test_step_record_is_frozen_and_round_trips_all_required_fields() -> None:
     assert EvaluationStepRecord.from_dict(record.to_dict()) == record
     assert record.to_dict()["episode_index"] == 3
     assert record.to_dict()["is_formal"] is True
+    assert record.to_dict()["shield_mode"] == "monitor"
     assert tuple(record.reward_components) == REWARD_COMPONENT_KEYS
     with pytest.raises(FrozenInstanceError):
         record.step_index = 3  # type: ignore[misc]
@@ -174,6 +177,7 @@ def test_step_record_is_frozen_and_round_trips_all_required_fields() -> None:
         ("research_contract_version", 6),
         ("episode_index", -1),
         ("is_formal", 1),
+        ("shield_mode", "enforce"),
         ("step_index", -1),
         ("simulation_time_s", -0.1),
         ("decision_interval_s", 0.0),
@@ -395,6 +399,8 @@ def test_episode_record_rejects_terminal_and_index_contradictions() -> None:
         make_episode(complete=False)
     with pytest.raises(ValueError, match="collision_kind"):
         make_episode(collision_occurred=True, collision_kind=None)
+    with pytest.raises(ValueError, match="shield"):
+        make_episode(shield_mode="enforce")
 
 
 def test_episode_record_accepts_gymnasium_double_terminal_flags() -> None:

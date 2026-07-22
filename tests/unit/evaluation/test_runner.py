@@ -337,7 +337,7 @@ def test_runner_installs_the_fixed_track_shield_mode_before_reset(
         ).specialist_ids
     )
 
-    run_evaluation_episode(
+    result = run_evaluation_episode(
         selected_spec,
         environment=environment,
         policy=policy,
@@ -348,6 +348,8 @@ def test_runner_installs_the_fixed_track_shield_mode_before_reset(
 
     assert environment.shield_modes == [shield_mode]
     assert environment.reset_calls
+    assert {record.shield_mode for record in result.step_records} == {shield_mode}
+    assert result.episode_record.shield_mode == shield_mode
 
 
 def test_runner_preserves_24d_ppo_observation_and_explicit_provenance(tmp_path: Path) -> None:

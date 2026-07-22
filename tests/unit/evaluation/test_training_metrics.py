@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -26,6 +27,18 @@ def _candidate(run_dir: Path) -> CheckpointCandidate:
         checkpoint_kind="final",
         curriculum_level=3,
         training_timestep=200,
+    )
+
+
+def _periodic_candidate(run_dir: Path) -> CheckpointCandidate:
+    return CheckpointCandidate(
+        path=run_dir / "checkpoints" / "ppo_checkpoint_100_steps.zip",
+        sha256="b" * 64,
+        method_id="proposed",
+        policy_seed=42,
+        checkpoint_kind="periodic",
+        curriculum_level=2,
+        training_timestep=100,
     )
 
 
@@ -95,6 +108,33 @@ def test_formal_missing_tag_fails_and_unverified_run_is_rejected_before_events(
     monkeypatch.undo()
     with pytest.raises(ValueError, match="metadata|complete|training"):
         extract_training_metrics((unverified,), smoke=False)
+
+
+@pytest.mark.parametrize(
+    "candidates",
+    [
+        pytest.param((_periodic_candidate,), id="no-final"),
+        pytest.param((_candidate, _candidate), id="duplicate-final"),
+    ],
+)
+def test_requires_exactly_one_authenticated_final_model_before_event_discovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    candidates: tuple[Callable[[Path], CheckpointCandidate], ...],
+) -> None:
+    run_dir = tmp_path / "checkpoint-inventory"
+
+    def discover(candidate_run_dir: Path) -> tuple[CheckpointCandidate, ...]:
+        assert candidate_run_dir == run_dir
+        return tuple(factory(run_dir) for factory in candidates)
+
+    monkeypatch.setattr(
+        "mad_driving.evaluation.selection.discover_checkpoint_candidates",
+        discover,
+    )
+
+    with pytest.raises(ValueError, match=r"exactly one authenticated final_model\.zip"):
+        extract_training_metrics((run_dir,), smoke=False)
 
 
 def test_smoke_records_missing_tags_as_none_and_csv_uses_fixed_columns(

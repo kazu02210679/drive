@@ -23,6 +23,7 @@ from mad_driving.evaluation.models import (
     EvaluationRunSpec,
     EvaluationStepRecord,
     ShieldMode,
+    expected_runtime_shield_mode,
 )
 from mad_driving.evaluation.policies import (
     EvaluationPolicy,
@@ -208,27 +209,7 @@ def _validate_run_binding(
 
 
 def _validate_spec_shield_mode(spec: EvaluationRunSpec) -> None:
-    methods_by_track = {
-        "decision": frozenset({"b1_nominal", "b2_multi_no_review", "proposed"}),
-        "system": frozenset({"b0_rule", "b1_nominal", "b2_multi_no_review", "proposed"}),
-        "ablation": frozenset(
-            {
-                "proposed",
-                "proposed_no_critic",
-                "proposed_no_shield",
-                "proposed_no_hazard",
-            }
-        ),
-    }
-    if spec.method_id not in methods_by_track[spec.track]:
-        raise ValueError("evaluation track and method are outside the fixed plan matrix")
-    expected: ShieldMode = (
-        "monitor"
-        if spec.track == "decision"
-        else "off"
-        if spec.track == "ablation" and spec.method_id == "proposed_no_shield"
-        else "enforce"
-    )
+    expected: ShieldMode = expected_runtime_shield_mode(spec.track, spec.method_id)
     if spec.shield_mode != expected:
         raise ValueError("evaluation shield mode does not match the fixed plan matrix")
 
@@ -288,6 +269,7 @@ def _build_step_record(
         checkpoint_sha256=checkpoint_sha256,
         episode_index=spec.episode_index,
         is_formal=spec.is_formal,
+        shield_mode=spec.shield_mode,
         step_index=step_index,
         simulation_time_s=cast(float, info["simulation_time_s"]),
         decision_interval_s=cast(float, info["decision_interval_s"]),
@@ -376,6 +358,8 @@ def _build_episode_record(
         raise ValueError("evaluation steps and summary episode_index disagree")
     if any(step.is_formal is not spec.is_formal for step in steps):
         raise ValueError("evaluation steps and summary is_formal disagree")
+    if any(step.shield_mode != spec.shield_mode for step in steps):
+        raise ValueError("evaluation steps and summary shield_mode disagree")
     parameters = reset_info.get("scenario_parameters")
     if not isinstance(parameters, Mapping):
         raise ValueError("evaluation reset scenario_parameters must be a mapping")
@@ -390,6 +374,7 @@ def _build_episode_record(
         checkpoint_sha256=checkpoint_sha256,
         episode_index=spec.episode_index,
         is_formal=spec.is_formal,
+        shield_mode=spec.shield_mode,
         episode_rng_seed=final.episode_rng_seed,
         metadrive_scenario_index=final.metadrive_scenario_index,
         scenario_selection_seed=final.scenario_selection_seed,

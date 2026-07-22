@@ -14,7 +14,12 @@ from typing import Final
 
 from mad_driving.config.models import MethodId
 from mad_driving.evaluation.metrics import EpisodeMetricRecord, EpisodeMetrics
-from mad_driving.evaluation.models import EVALUATION_CASES, EvaluationTrack, ScenarioCellId
+from mad_driving.evaluation.models import (
+    EVALUATION_CASES,
+    EvaluationTrack,
+    ScenarioCellId,
+    expected_runtime_shield_mode,
+)
 from mad_driving.methods import MethodProfileSnapshot
 
 SMOKE_RESULT_LABEL: Final = "SMOKE - NOT A RESEARCH RESULT"
@@ -164,11 +169,19 @@ def validate_matched_episodes(records: Sequence[EpisodeMetricRecord]) -> None:
             raise ValueError("comparison accepts only test episode records")
         expected_profile = MethodProfileSnapshot.from_method_id(key.method_id)
         if episode.method_profile != expected_profile:
-            raise ValueError("episode method profile or Shield contract is invalid")
+            raise ValueError("episode method profile is invalid")
         if key.method_id not in _METHODS_BY_TRACK[key.track]:
             raise ValueError("episode method is outside the required track matrix")
+        if episode.shield_mode != expected_runtime_shield_mode(key.track, key.method_id):
+            raise ValueError("episode shield_mode is outside the required track matrix")
 
     tracks = {record.episode.episode_key.track for record in values}
+    required_tracks = set(_METHODS_BY_TRACK)
+    if tracks != required_tracks:
+        raise ValueError(
+            "comparison required tracks mismatch: "
+            f"expected {sorted(required_tracks)}, got {sorted(tracks)}"
+        )
     for track in tracks:
         track_records = tuple(
             record for record in values if record.episode.episode_key.track == track
@@ -360,7 +373,7 @@ def write_eval_metrics_csv(path: Path, records: Sequence[EpisodeMetricRecord]) -
             "policy_kind": profile.policy_kind,
             "specialist_ids": ";".join(profile.specialist_ids),
             "critic_enabled": profile.critic_enabled,
-            "shield_mode": profile.shield_mode,
+            "shield_mode": episode.shield_mode,
             "metadrive_scenario_index": episode.metadrive_scenario_index,
             "scenario_selection_seed": episode.scenario_selection_seed,
             "scenario_parameter_seed": episode.scenario_parameter_seed,

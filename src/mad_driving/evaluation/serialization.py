@@ -136,6 +136,9 @@ def _validate_step_stream(records: tuple[EvaluationStepRecord, ...]) -> None:
     is_formal = records[0].is_formal
     if any(record.is_formal is not is_formal for record in records[1:]):
         raise ValueError("step JSONL file contains more than one is_formal value")
+    shield_mode = records[0].shield_mode
+    if any(record.shield_mode != shield_mode for record in records[1:]):
+        raise ValueError("step JSONL file contains more than one shield_mode")
     if any(record.step_index != expected for expected, record in enumerate(records)):
         raise ValueError("step indices must be contiguous and zero-based")
 

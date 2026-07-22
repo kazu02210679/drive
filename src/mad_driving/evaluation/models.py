@@ -53,11 +53,37 @@ _TRACKS = frozenset(get_args(EvaluationTrack))
 _ROLES = frozenset(get_args(EvaluationRole))
 _CASE_IDS = frozenset(get_args(ScenarioCellId))
 _SHIELD_MODES = frozenset(get_args(ShieldMode))
+_METHODS_BY_TRACK: Mapping[EvaluationTrack, frozenset[MethodId]] = MappingProxyType(
+    {
+        "decision": frozenset({"b1_nominal", "b2_multi_no_review", "proposed"}),
+        "system": frozenset({"b0_rule", "b1_nominal", "b2_multi_no_review", "proposed"}),
+        "ablation": frozenset(
+            {
+                "proposed",
+                "proposed_no_critic",
+                "proposed_no_shield",
+                "proposed_no_hazard",
+            }
+        ),
+    }
+)
 _COLLISION_KINDS = frozenset(get_args(CollisionKind))
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 _MAX_ERROR_MESSAGE_LENGTH = 256
 _PYTHON_EXCEPTION_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}\Z")
 _REPLACED_ERROR_CATEGORIES = frozenset({"Cc", "Zl", "Zp"})
+
+
+def expected_runtime_shield_mode(track: EvaluationTrack, method_id: MethodId) -> ShieldMode:
+    """Return the exact evaluation runtime Shield mode for one track/method pair."""
+
+    if track not in _METHODS_BY_TRACK or method_id not in _METHODS_BY_TRACK[track]:
+        raise ValueError("evaluation track and method are outside the fixed plan matrix")
+    if track == "decision":
+        return "monitor"
+    if track == "ablation" and method_id == "proposed_no_shield":
+        return "off"
+    return "enforce"
 
 
 @dataclass(frozen=True)
@@ -244,10 +270,9 @@ class EvaluationPlanConfig(StrictTypedFrozenModel):
         )
         if len(binding_keys) != len(set(binding_keys)):
             raise ValueError("ppo_run_bindings contain a duplicate method/policy seed key")
-        if (
-            not all(isinstance(key, str) and key for key in self.capture_episode_keys)
-            or len(self.capture_episode_keys) != len(set(self.capture_episode_keys))
-        ):
+        if not all(isinstance(key, str) and key for key in self.capture_episode_keys) or len(
+            self.capture_episode_keys
+        ) != len(set(self.capture_episode_keys)):
             raise ValueError("capture_episode_keys must contain unique non-empty strings")
         if not str(self.app_config_path):
             raise ValueError("app_config_path must not be empty")
@@ -266,6 +291,7 @@ class EvaluationStepRecord:
     checkpoint_sha256: str | None
     episode_index: int
     is_formal: bool
+    shield_mode: ShieldMode
     step_index: int
     simulation_time_s: float
     decision_interval_s: float
@@ -324,6 +350,10 @@ class EvaluationStepRecord:
         )
         _require_int("episode_index", self.episode_index, minimum=0)
         _validate_boolean_fields(self, ("is_formal",))
+        if self.shield_mode != expected_runtime_shield_mode(
+            episode_key.track, episode_key.method_id
+        ):
+            raise ValueError("shield_mode does not match the evaluation track/method matrix")
         _require_int("step_index", self.step_index, minimum=0)
         _require_non_negative("simulation_time_s", self.simulation_time_s)
         _require_positive("decision_interval_s", self.decision_interval_s)
@@ -414,6 +444,7 @@ class EvaluationStepRecord:
             "scenario_selection_seed": self.scenario_selection_seed,
             "scenario_success": self.scenario_success,
             "shield_intervened": self.shield_intervened,
+            "shield_mode": self.shield_mode,
             "shield_latency_ms": self.shield_latency_ms,
             "shield_reasons": list(self.shield_reasons),
             "simulation_time_s": self.simulation_time_s,
@@ -439,9 +470,7 @@ class EvaluationStepRecord:
             _claim_from_dict(_require_mapping(item, "claim"))
             for item in _require_sequence(values["claims"], "claims")
         )
-        values["review"] = _review_from_dict(
-            _require_mapping(values["review"], "review")
-        )
+        values["review"] = _review_from_dict(_require_mapping(values["review"], "review"))
         values["reward_components"] = _require_mapping(
             values["reward_components"], "reward_components"
         )
@@ -465,6 +494,7 @@ class EvaluationEpisodeRecord:
     checkpoint_sha256: str | None
     episode_index: int
     is_formal: bool
+    shield_mode: ShieldMode
     episode_rng_seed: int
     metadrive_scenario_index: int
     scenario_selection_seed: int
@@ -496,6 +526,10 @@ class EvaluationEpisodeRecord:
         )
         _require_int("episode_index", self.episode_index, minimum=0)
         _validate_boolean_fields(self, ("is_formal",))
+        if self.shield_mode != expected_runtime_shield_mode(
+            episode_key.track, episode_key.method_id
+        ):
+            raise ValueError("shield_mode does not match the evaluation track/method matrix")
         _validate_episode_seed_and_case_identity(self, episode_key)
         parameters = _freeze_json_object(
             self.sampled_scenario_parameters, "sampled_scenario_parameters"
@@ -556,6 +590,7 @@ class EvaluationEpisodeRecord:
             "scenario_parameter_seed": self.scenario_parameter_seed,
             "scenario_selection_seed": self.scenario_selection_seed,
             "scenario_success": self.scenario_success,
+            "shield_mode": self.shield_mode,
             "simulated_duration_s": self.simulated_duration_s,
             "step_count": self.step_count,
             "terminated": self.terminated,
@@ -645,9 +680,7 @@ def _require_sequence(value: object, name: str) -> Sequence[object]:
     return cast(Sequence[object], value)
 
 
-def _require_int(
-    name: str, value: object, *, minimum: int, maximum: int | None = None
-) -> int:
+def _require_int(name: str, value: object, *, minimum: int, maximum: int | None = None) -> int:
     if type(value) is not int or value < minimum or (maximum is not None and value > maximum):
         suffix = f" through {maximum}" if maximum is not None else f" >= {minimum}"
         raise ValueError(f"{name} must be an integer{suffix}")
@@ -791,9 +824,7 @@ def _validate_checkpoint_identity(
         raise ValueError("checkpoint_sha256 must be a lowercase SHA-256 digest")
 
 
-def _validate_case_identity(
-    case_id: object, scenario_id: object, difficulty_level: object
-) -> None:
+def _validate_case_identity(case_id: object, scenario_id: object, difficulty_level: object) -> None:
     if case_id not in _CASES_BY_ID:
         raise ValueError("case_id is unknown")
     _require_int("difficulty_level", difficulty_level, minimum=0, maximum=3)
@@ -858,9 +889,7 @@ def _validate_oracle_and_outcomes(record: EvaluationStepRecord) -> None:
     if record.minimum_actual_ttc_s is not None:
         _require_non_negative("minimum_actual_ttc_s", record.minimum_actual_ttc_s)
     if record.minimum_actual_stopping_margin_m is not None:
-        _require_finite(
-            "minimum_actual_stopping_margin_m", record.minimum_actual_stopping_margin_m
-        )
+        _require_finite("minimum_actual_stopping_margin_m", record.minimum_actual_stopping_margin_m)
     _validate_boolean_fields(
         record,
         (
@@ -884,9 +913,7 @@ def _validate_boolean_fields(value: object, names: tuple[str, ...]) -> None:
             raise ValueError(f"{name} must be boolean")
 
 
-def _canonical_reward_components(
-    values: object, reward_total: object
-) -> Mapping[str, float]:
+def _canonical_reward_components(values: object, reward_total: object) -> Mapping[str, float]:
     if not isinstance(values, Mapping) or set(values) != set(REWARD_COMPONENT_KEYS):
         raise ValueError("reward_components must contain exactly the ten required keys")
     normalized = {
@@ -959,16 +986,12 @@ def _claim_from_dict(payload: Mapping[str, object]) -> RiskClaim:
         stopping_margin = values["stopping_margin_m"]
         if stopping_margin is not None:
             _require_finite("stopping_margin_m", stopping_margin)
-        _require_non_negative(
-            "recommended_max_speed_mps", values["recommended_max_speed_mps"]
-        )
+        _require_non_negative("recommended_max_speed_mps", values["recommended_max_speed_mps"])
         if not isinstance(values["hard_stop_required"], bool):
             raise ValueError("hard_stop_required must be boolean")
         _require_int("valid_until_step", values["valid_until_step"], minimum=0)
         values["evidence"] = tuple(_require_sequence(values["evidence"], "evidence"))
-        values["assumptions"] = tuple(
-            _require_sequence(values["assumptions"], "assumptions")
-        )
+        values["assumptions"] = tuple(_require_sequence(values["assumptions"], "assumptions"))
         return RiskClaim(**values)  # type: ignore[arg-type]
     except (TypeError, ValueError) as error:
         raise ValueError("RiskClaim is malformed") from error
@@ -1127,4 +1150,5 @@ __all__ = [
     "PpoRunBinding",
     "ScenarioCellId",
     "ShieldMode",
+    "expected_runtime_shield_mode",
 ]

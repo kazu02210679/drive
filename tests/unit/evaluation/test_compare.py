@@ -19,7 +19,24 @@ from mad_driving.evaluation.metrics import EpisodeMetricRecord, EpisodeMetrics
 from mad_driving.evaluation.models import EvaluationEpisodeKey, EvaluationEpisodeRecord
 from mad_driving.methods import MethodProfileSnapshot
 
-SYSTEM_METHODS = ("b0_rule", "b1_nominal", "b2_multi_no_review", "proposed")
+METHODS_BY_TRACK = {
+    "system": ("b0_rule", "b1_nominal", "b2_multi_no_review", "proposed"),
+    "decision": ("b1_nominal", "b2_multi_no_review", "proposed"),
+    "ablation": (
+        "proposed",
+        "proposed_no_critic",
+        "proposed_no_shield",
+        "proposed_no_hazard",
+    ),
+}
+
+
+def _shield_mode(track: str, method_id: str) -> str:
+    if track == "decision":
+        return "monitor"
+    if track == "ablation" and method_id == "proposed_no_shield":
+        return "off"
+    return "enforce"
 
 
 def _metrics(reward: float, *, disagreement_rate: float | None = None) -> EpisodeMetrics:
@@ -64,6 +81,7 @@ def _metrics(reward: float, *, disagreement_rate: float | None = None) -> Episod
 
 
 def _record(
+    track: str,
     method_id: str,
     policy_seed: int | None,
     episode_index: int,
@@ -80,7 +98,7 @@ def _record(
         research_contract_version=7,
         episode_key=EvaluationEpisodeKey(
             method_id=method_id,  # type: ignore[arg-type]
-            track="system",
+            track=track,  # type: ignore[arg-type]
             role="test",
             policy_seed=policy_seed,
             case_id="level1_lead_brake",
@@ -91,6 +109,7 @@ def _record(
         checkpoint_sha256=checkpoint_sha256,
         episode_index=episode_index,
         is_formal=is_formal,
+        shield_mode=_shield_mode(track, method_id),  # type: ignore[arg-type]
         episode_rng_seed=test_seed,
         metadrive_scenario_index=episode_index,
         scenario_selection_seed=100 + episode_index,
@@ -123,21 +142,36 @@ def _matched_records(*, is_formal: bool = True) -> tuple[EpisodeMetricRecord, ..
     rows: list[EpisodeMetricRecord] = []
     rewards = {42: (1.0, 3.0), 43: (5.0, 7.0)}
     for episode_index in range(2):
-        rows.append(
-            _record("b0_rule", None, episode_index, (2.0, 4.0)[episode_index], is_formal=is_formal)
-        )
-        for method_id in SYSTEM_METHODS[1:]:
-            for policy_seed in (42, 43):
-                rows.append(
-                    _record(
-                        method_id,
-                        policy_seed,
-                        episode_index,
-                        rewards[policy_seed][episode_index],
-                        is_formal=is_formal,
+        for track, method_ids in METHODS_BY_TRACK.items():
+            for method_id in method_ids:
+                policy_seeds = (None,) if method_id == "b0_rule" else (42, 43)
+                for policy_seed in policy_seeds:
+                    reward = (
+                        (2.0, 4.0)[episode_index]
+                        if policy_seed is None
+                        else rewards[policy_seed][episode_index]
                     )
-                )
+                    rows.append(
+                        _record(
+                            track,
+                            method_id,
+                            policy_seed,
+                            episode_index,
+                            reward,
+                            is_formal=is_formal,
+                        )
+                    )
     return tuple(rows)
+
+
+@pytest.mark.parametrize("missing_track", tuple(METHODS_BY_TRACK))
+def test_validation_rejects_a_wholly_missing_required_track(missing_track: str) -> None:
+    incomplete = tuple(
+        record for record in _matched_records() if record.episode.episode_key.track != missing_track
+    )
+
+    with pytest.raises(ValueError, match="required tracks"):
+        validate_matched_episodes(incomplete)
 
 
 def test_comparison_uses_matched_physical_episodes_then_policy_replicates() -> None:
@@ -231,8 +265,9 @@ def test_validation_rejects_policy_and_physical_contract_mismatches() -> None:
             (*records[:-1], EpisodeMetricRecord(mixed_formality, records[-1].metrics))
         )
 
-    object.__setattr__(records[-1].episode.method_profile, "shield_mode", "off")
-    with pytest.raises(ValueError, match="profile|Shield"):
+    decision = next(record for record in records if record.episode.episode_key.track == "decision")
+    object.__setattr__(decision.episode, "shield_mode", "enforce")
+    with pytest.raises(ValueError, match="shield|Shield"):
         validate_matched_episodes(tuple(records))
 
 
@@ -257,6 +292,10 @@ def test_csv_writers_use_fixed_columns_empty_none_cells_and_smoke_label(tmp_path
     b0 = next(row for row in evaluation_rows if row["method_id"] == "b0_rule")
     assert b0["policy_seed"] == ""
     assert b0["critic_challenge_rate"] == ""
+    decision = next(row for row in evaluation_rows if row["track"] == "decision")
+    no_shield = next(row for row in evaluation_rows if row["method_id"] == "proposed_no_shield")
+    assert decision["shield_mode"] == "monitor"
+    assert no_shield["shield_mode"] == "off"
     assert b0["result_label"] == "SMOKE - NOT A RESEARCH RESULT"
     assert all(row["result_label"] == "SMOKE - NOT A RESEARCH RESULT" for row in comparison_rows)
     assert comparison_path.read_bytes().endswith(b"\n")

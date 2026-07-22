@@ -260,6 +260,7 @@ def score(
             checkpoint_sha256=checkpoint.sha256,
             episode_index=index,
             is_formal=True,
+            shield_mode="enforce",
             episode_rng_seed=episode_seed,
             metadrive_scenario_index=100 + index,
             scenario_selection_seed=200 + index,

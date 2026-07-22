@@ -34,6 +34,7 @@ def make_step(step_index: int = 0, **overrides: Any) -> EvaluationStepRecord:
         "checkpoint_sha256": None,
         "episode_index": 2,
         "is_formal": False,
+        "shield_mode": "enforce",
         "step_index": step_index,
         "simulation_time_s": step_index * 0.1,
         "decision_interval_s": 0.1,
@@ -154,15 +155,17 @@ def test_step_reader_rejects_empty_and_mixed_episode_files(tmp_path: Path) -> No
 
 @pytest.mark.parametrize(
     ("field", "value"),
-    [("episode_index", 3), ("is_formal", True)],
+    [("episode_index", 3), ("is_formal", True), ("shield_mode", "off")],
 )
 def test_step_reader_rejects_mixed_explicit_evaluation_provenance(
     tmp_path: Path, field: str, value: object
 ) -> None:
     destination = tmp_path / f"mixed-{field}.jsonl"
+    second = make_step(1).to_dict()
+    second[field] = value
     write_jsonl_strict(
         destination,
-        (make_step(0).to_dict(), make_step(1, **{field: value}).to_dict()),
+        (make_step(0).to_dict(), second),
     )
 
     with pytest.raises(ValueError, match=field):
