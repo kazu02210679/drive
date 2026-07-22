@@ -278,7 +278,7 @@ class RunMetadata:
 
     resolved_config: Mapping[str, Any]
     curriculum_state: Mapping[str, Any]
-    method_profile: MethodProfileSnapshot = MethodProfileSnapshot.from_method_id("proposed")
+    method_profile: MethodProfileSnapshot
     resume: ResumeMetadata | None = None
     research_contract_version: int = RESEARCH_CONTRACT_VERSION
     observation_schema_version: int = OBSERVATION_SCHEMA_VERSION
@@ -354,7 +354,7 @@ class RunMetadata:
         if not isinstance(self.method_profile, MethodProfileSnapshot):
             raise ValueError("method_profile must be a MethodProfileSnapshot")
         expected_profile = _method_profile_from_resolved_config(self.resolved_config)
-        if expected_profile is not None and self.method_profile != expected_profile:
+        if self.method_profile != expected_profile:
             raise ValueError("method_profile must match resolved_config.method.id")
         if self.resume is not None and not isinstance(self.resume, ResumeMetadata):
             raise ValueError("resume must be ResumeMetadata or null")
@@ -377,9 +377,9 @@ class RunMetadata:
 
 def _method_profile_from_resolved_config(
     resolved_config: Mapping[str, Any],
-) -> MethodProfileSnapshot | None:
+) -> MethodProfileSnapshot:
     if "method" not in resolved_config:
-        return None
+        raise ValueError("resolved_config.method.id is required")
     method = resolved_config["method"]
     if not isinstance(method, Mapping) or set(method) != {"id"}:
         raise ValueError("resolved_config.method is malformed")

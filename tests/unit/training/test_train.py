@@ -540,6 +540,9 @@ def seed_compatible_source_run(
     write_checkpoint_curriculum_state(selected_state, checkpoint)
     metadata = RunMetadata(
         resolved_config=resolved_config,
+        method_profile=metadata_module.MethodProfileSnapshot.from_method_id(
+            selected_config.method.id
+        ),
         curriculum_state=curriculum_state_artifact(curriculum_path, selected_state),
         checkpoint_curriculum_artifacts=checkpoint_curriculum_artifact_inventory(checkpoints_dir),
     )
