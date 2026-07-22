@@ -42,6 +42,16 @@ class _ArtifactIdentity:
 
 
 @dataclass(frozen=True)
+class _FileIdentity:
+    device: int
+    inode: int
+    mode: int
+    size_bytes: int
+    modified_ns: int
+    file_attributes: int
+
+
+@dataclass(frozen=True)
 class _VerifiedBundle:
     root: Path
     artifacts: dict[str, _ArtifactIdentity]
@@ -61,17 +71,7 @@ class _VerifiedBundle:
         relative = self.relative_artifact(path)
         source = self.root / PurePosixPath(relative)
         expected = self.artifacts[relative]
-        _require_regular_file(source)
-        try:
-            payload = source.read_bytes()
-        except OSError as error:
-            raise ValueError(f"verified artifact is unreadable: {relative}") from error
-        if (
-            len(payload) != expected.size_bytes
-            or hashlib.sha256(payload).hexdigest() != expected.sha256
-        ):
-            raise ValueError(f"artifact changed after manifest verification: {relative}")
-        return payload
+        return _read_stable_regular_file(source, expected=expected, label=relative)
 
     def read_text(self, path: Path) -> str:
         try:
@@ -98,8 +98,8 @@ def _verify_bundle(bundle_dir: Path) -> _VerifiedBundle:
     manifest = root / _MANIFEST_NAME
     if manifest not in files:
         raise ValueError("evaluation manifest is missing")
+    encoded = _read_stable_regular_file(manifest, label=_MANIFEST_NAME)
     try:
-        encoded = manifest.read_bytes()
         payload = json.loads(encoded.decode("utf-8"), object_pairs_hook=_unique_json_object)
     except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as error:
         raise ValueError("evaluation manifest is not strict JSON") from error
@@ -135,10 +135,7 @@ def _verify_bundle(bundle_dir: Path) -> _VerifiedBundle:
         raise ValueError("evaluation manifest inventory does not match bundle files")
     for relative, identity in inventory.items():
         path = actual[relative]
-        if path.stat(follow_symlinks=False).st_size != identity.size_bytes:
-            raise ValueError(f"evaluation manifest size verification failed: {relative}")
-        if _sha256_file(path) != identity.sha256:
-            raise ValueError(f"evaluation manifest SHA-256 verification failed: {relative}")
+        _read_stable_regular_file(path, expected=identity, label=relative)
     return _VerifiedBundle(root=root, artifacts=inventory)
 
 
@@ -203,6 +200,95 @@ def _require_regular_file(path: Path) -> None:
         raise ValueError(f"artifact must be a regular file: {path}")
 
 
+def _checked_file_identity(metadata: os.stat_result | Any, label: str) -> _FileIdentity:
+    if stat.S_ISLNK(metadata.st_mode):
+        raise ValueError(f"verified file cannot be a symbolic link: {label}")
+    attributes = getattr(metadata, "st_file_attributes", 0)
+    if attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
+        raise ValueError(f"verified file cannot be a reparse point: {label}")
+    if not stat.S_ISREG(metadata.st_mode):
+        raise ValueError(f"verified file must be regular: {label}")
+    return _FileIdentity(
+        device=metadata.st_dev,
+        inode=metadata.st_ino,
+        mode=metadata.st_mode,
+        size_bytes=metadata.st_size,
+        modified_ns=metadata.st_mtime_ns,
+        file_attributes=attributes,
+    )
+
+
+def _read_stable_regular_file(
+    path: Path,
+    *,
+    expected: _ArtifactIdentity | None = None,
+    label: str,
+) -> bytes:
+    try:
+        path_before = _checked_file_identity(path.lstat(), label)
+        with path.open("rb") as source:
+            handle_before = _checked_file_identity(os.fstat(source.fileno()), label)
+            if handle_before != path_before:
+                raise ValueError(f"verified file identity changed before reading: {label}")
+            payload = source.read()
+            handle_after = _checked_file_identity(os.fstat(source.fileno()), label)
+        path_after = _checked_file_identity(path.lstat(), label)
+    except ValueError:
+        raise
+    except OSError as error:
+        raise ValueError(f"verified file is unreadable: {label}") from error
+    if handle_after != handle_before or path_after != handle_after:
+        raise ValueError(f"verified file identity changed while reading: {label}")
+    if len(payload) != handle_after.size_bytes:
+        raise ValueError(f"verified file size changed while reading: {label}")
+    if expected is not None:
+        if len(payload) != expected.size_bytes:
+            raise ValueError(f"evaluation manifest size verification failed: {label}")
+        if hashlib.sha256(payload).hexdigest() != expected.sha256:
+            raise ValueError(f"evaluation manifest SHA-256 verification failed: {label}")
+    return payload
+
+
+def _reject_output_in_source_bundle(bundle_root: Path, output_path: Path) -> None:
+    candidate = Path(os.path.abspath(output_path))
+    current = candidate
+    missing_parts: list[str] = []
+    while True:
+        try:
+            current.lstat()
+            existing_ancestor = current
+            break
+        except FileNotFoundError as error:
+            if current.parent == current:
+                raise ValueError(f"output parent is unavailable: {output_path}") from error
+            missing_parts.append(current.name)
+            current = current.parent
+        except OSError as error:
+            raise ValueError(f"output path is unreadable: {output_path}") from error
+
+    for ancestor in (existing_ancestor, *existing_ancestor.parents):
+        try:
+            metadata = ancestor.lstat()
+        except OSError as error:
+            raise ValueError(f"output parent is unreadable: {ancestor}") from error
+        if stat.S_ISLNK(metadata.st_mode):
+            raise ValueError(f"output parent cannot be a symbolic link: {ancestor}")
+        if getattr(metadata, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT:
+            raise ValueError(f"output parent cannot be a reparse point: {ancestor}")
+
+    try:
+        resolved_ancestor = existing_ancestor.resolve(strict=True)
+        resolved_root = bundle_root.resolve(strict=True)
+    except OSError as error:
+        raise ValueError("output containment could not be established") from error
+    resolved_output = resolved_ancestor.joinpath(*reversed(missing_parts))
+    try:
+        resolved_output.relative_to(resolved_root)
+    except ValueError:
+        return
+    raise ValueError(f"output cannot resolve inside the verified source bundle: {output_path}")
+
+
 def _safe_manifest_path(value: object) -> bool:
     if not isinstance(value, str) or not value or "\\" in value:
         return False
@@ -217,11 +303,6 @@ def _safe_manifest_path(value: object) -> bool:
         and "." not in posix.parts
         and ".." not in posix.parts
     )
-
-
-def _sha256_file(path: Path) -> str:
-    with path.open("rb") as source:
-        return hashlib.file_digest(source, "sha256").hexdigest()
 
 
 def _canonical_json(payload: object) -> bytes:

@@ -9,18 +9,34 @@ import math
 import os
 import re
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Final, cast
 
+from mad_driving.config.models import MethodId
 from mad_driving.evaluation.compare import (
     COMPARISON_CSV_COLUMNS,
     EVAL_METRICS_CSV_COLUMNS,
 )
-from mad_driving.evaluation.training_metrics import TRAIN_METRICS_CSV_COLUMNS
+from mad_driving.evaluation.metrics import EpisodeMetrics
+from mad_driving.evaluation.models import (
+    EVALUATION_CASES,
+    TEST_SEED_START,
+    TEST_SEED_STOP,
+    EvaluationCase,
+    EvaluationTrack,
+    expected_runtime_shield_mode,
+)
+from mad_driving.evaluation.training_metrics import (
+    REQUIRED_TENSORBOARD_TAGS,
+    TRAIN_METRICS_CSV_COLUMNS,
+)
+from mad_driving.methods import MethodProfileSnapshot
 from mad_driving.visualization import (
     METHOD_ORDER,
     PLOT_INVENTORY,
     SMOKE_RESULT_LABEL,
+    _reject_output_in_source_bundle,
     _unique_json_object,
     _VerifiedBundle,
     _verify_bundle,
@@ -32,6 +48,22 @@ _TRACK_TITLES: Final = {
     "decision": "Decision track",
     "system": "System track",
     "ablation": "Ablation track",
+}
+_METHODS_BY_TRACK: Final[Mapping[str, tuple[str, ...]]] = {
+    "decision": ("b1_nominal", "b2_multi_no_review", "proposed"),
+    "system": ("b0_rule", "b1_nominal", "b2_multi_no_review", "proposed"),
+    "ablation": (
+        "proposed",
+        "proposed_no_critic",
+        "proposed_no_shield",
+        "proposed_no_hazard",
+    ),
+}
+_CASES_BY_ID: Final[Mapping[str, EvaluationCase]] = {
+    case.case_id: case for case in EVALUATION_CASES
+}
+_CASE_ORDER: Final[Mapping[str, int]] = {
+    case.case_id: index for index, case in enumerate(EVALUATION_CASES)
 }
 _METRIC_GROUPS: Final[Mapping[str, tuple[str, ...]]] = {
     "Safety": (
@@ -79,42 +111,131 @@ _METRIC_GROUPS: Final[Mapping[str, tuple[str, ...]]] = {
         "decision_latency_p99_ms",
     ),
 }
-_EVAL_NUMERIC_COLUMNS: Final = frozenset(
+_METRIC_NAMES: Final = tuple(field.name for field in fields(EpisodeMetrics))
+_BOOL_METRICS: Final = frozenset(
     {
-        "record_schema_version",
-        "research_contract_version",
-        "policy_seed",
-        "episode_index",
-        "test_seed",
-        "metadrive_scenario_index",
-        "scenario_selection_seed",
-        "scenario_parameter_seed",
-        "difficulty_level",
-        *(metric for metrics in _METRIC_GROUPS.values() for metric in metrics),
+        "collision",
+        "crossing_actor_collision",
+        "near_miss",
+        "negative_stopping_margin",
+        "hard_rule_violation",
+        "off_road",
+        "scenario_success",
     }
 )
+_COUNT_METRICS: Final = frozenset(
+    {
+        "unnecessary_braking_event_count",
+        "agent_disagreement_eligible_steps",
+        "agent_disagreement_count",
+        "critic_challenge_eligible_steps",
+        "critic_challenge_count",
+        "critic_found_missed_danger_count",
+        "critic_false_challenge_count",
+        "agent_failure_fallback_count",
+    }
+)
+_OPTIONAL_METRICS: Final = frozenset(
+    {
+        "minimum_actual_ttc_s",
+        "minimum_stopping_margin_m",
+        "longitudinal_jerk_rms_mps3",
+        "agent_disagreement_rate",
+        "critic_challenge_rate",
+        "critic_found_missed_danger_rate",
+        "critic_false_challenge_rate",
+    }
+)
+_TRAIN_METRICS: Final = (*REQUIRED_TENSORBOARD_TAGS, "policy_entropy")
+_EXPECTED_COMPARISON_IDENTITIES: Final = tuple(
+    (track, case.case_id, method_id, metric)
+    for track in _TRACK_ORDER
+    for case in EVALUATION_CASES
+    for method_id in _METHODS_BY_TRACK[track]
+    for metric in _METRIC_NAMES
+)
+
+
+@dataclass(frozen=True)
+class _TrainCsvRow:
+    result_label: str
+    is_formal: bool
+    run_id: str
+    method_id: str
+    policy_seed: int
+    timestep: int
+    metric: str
+    value: float | None
+
+
+@dataclass(frozen=True)
+class _EvalCsvRow:
+    cells: Mapping[str, str]
+    result_label: str
+    is_formal: bool
+    track: str
+    method_id: str
+    policy_seed: int | None
+    case_id: str
+    episode_index: int
+    test_seed: int
+    checkpoint_path: str | None
+    checkpoint_sha256: str | None
+    metrics: EpisodeMetrics
+
+
+@dataclass(frozen=True)
+class _ComparisonCsvRow:
+    result_label: str
+    is_formal: bool
+    track: str
+    case_id: str
+    method_id: str
+    metric: str
+    physical_episode_count: int
+    policy_replicate_count: int
+    mean: float | None
+    policy_seed_stdev: float | None
 
 
 def _reject_constant(value: str) -> object:
     raise ValueError(f"non-finite JSON value: {value}")
 
 
-def _read_csv(
-    bundle: _VerifiedBundle,
-    relative: str,
+def _raw_csv_rows(
+    payload: bytes,
+    label: str,
     columns: tuple[str, ...],
 ) -> list[dict[str, str]]:
-    text = bundle.read_text(bundle.root / relative)
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ValueError(f"{label} must be UTF-8") from error
     reader = csv.DictReader(io.StringIO(text, newline=""))
     if reader.fieldnames is None or tuple(reader.fieldnames) != columns:
-        raise ValueError(f"{relative} must use the canonical fixed CSV columns")
+        raise ValueError(f"{label} must use the canonical fixed CSV columns")
     try:
         rows = list(reader)
     except csv.Error as error:
-        raise ValueError(f"{relative} is malformed CSV") from error
+        raise ValueError(f"{label} is malformed CSV") from error
     if not rows or any(None in row or any(value is None for value in row.values()) for row in rows):
-        raise ValueError(f"{relative} must contain complete canonical rows")
+        raise ValueError(f"{label} must contain complete canonical rows")
     return rows
+
+
+def _integer(value: str, label: str, *, minimum: int = 0) -> int:
+    if re.fullmatch(r"0|[1-9][0-9]*", value) is None:
+        raise ValueError(f"{label} must be a canonical integer")
+    result = int(value)
+    if result < minimum:
+        raise ValueError(f"{label} must be at least {minimum}")
+    return result
+
+
+def _boolean(value: str, label: str) -> bool:
+    if value not in {"True", "False"}:
+        raise ValueError(f"{label} must be a canonical boolean")
+    return value == "True"
 
 
 def _number(value: str, label: str, *, allow_empty: bool = True) -> float | None:
@@ -129,58 +250,247 @@ def _number(value: str, label: str, *, allow_empty: bool = True) -> float | None
     return number
 
 
-def _validate_training_rows(rows: Sequence[Mapping[str, str]]) -> None:
-    for row in rows:
-        _number(row["policy_seed"], "training policy_seed", allow_empty=False)
-        _number(row["timestep"], "training timestep", allow_empty=False)
-        _number(row["value"], "training metric value")
+def _row_formality(result_label: str, raw_formal: str | None, label: str) -> bool:
+    if result_label not in {"", SMOKE_RESULT_LABEL}:
+        raise ValueError(f"{label} result_label is invalid")
+    is_formal = result_label == ""
+    if raw_formal is not None and _boolean(raw_formal, f"{label} is_formal") is not is_formal:
+        raise ValueError(f"{label} smoke/formal result_label is inconsistent")
+    return is_formal
 
 
-def _validate_eval_rows(rows: Sequence[Mapping[str, str]]) -> None:
-    for row in rows:
-        if row["track"] not in _TRACK_ORDER or row["method_id"] not in METHOD_ORDER:
-            raise ValueError("eval_metrics.csv contains an unknown track or method")
-        if row["is_formal"] not in {"True", "False"}:
-            raise ValueError("eval_metrics.csv is_formal must be a canonical boolean")
-        for column in _EVAL_NUMERIC_COLUMNS:
-            _number(row[column], f"eval_metrics.csv {column}")
+def _require_one_formality(values: Sequence[bool], label: str) -> None:
+    if len(set(values)) != 1:
+        raise ValueError(f"{label} mixes smoke and formal rows")
 
 
-def _validate_comparison_rows(rows: Sequence[Mapping[str, str]]) -> None:
-    valid_metrics = {metric for metrics in _METRIC_GROUPS.values() for metric in metrics}
-    seen: set[tuple[str, str, str, str]] = set()
-    for row in rows:
-        if row["track"] not in _TRACK_ORDER or row["method_id"] not in METHOD_ORDER:
-            raise ValueError("comparison.csv contains an unknown track or method")
-        if row["metric"] not in valid_metrics:
-            raise ValueError("comparison.csv contains an unknown metric")
-        key = (row["track"], row["case_id"], row["method_id"], row["metric"])
-        if key in seen:
-            raise ValueError("comparison.csv contains duplicate grouped metrics")
-        seen.add(key)
-        _number(
-            row["physical_episode_count"],
-            "comparison physical episode count",
-            allow_empty=False,
+def _parse_train_metrics_csv(payload: bytes) -> tuple[_TrainCsvRow, ...]:
+    raw_rows = _raw_csv_rows(payload, "train_metrics.csv", TRAIN_METRICS_CSV_COLUMNS)
+    rows: list[_TrainCsvRow] = []
+    identities: set[tuple[str, str, int, int, str]] = set()
+    for raw in raw_rows:
+        is_formal = _row_formality(raw["result_label"], None, "train_metrics.csv")
+        run_id = raw["run_id"]
+        if not run_id or run_id.strip() != run_id:
+            raise ValueError("train_metrics.csv run_id must be a canonical non-empty string")
+        method_id = raw["method_id"]
+        if method_id not in METHOD_ORDER:
+            raise ValueError("train_metrics.csv method_id is unknown")
+        profile = MethodProfileSnapshot.from_method_id(method_id)
+        if profile.policy_kind != "ppo":
+            raise ValueError("train_metrics.csv accepts only PPO method rows")
+        policy_seed = _integer(raw["policy_seed"], "training policy_seed")
+        timestep = _integer(raw["timestep"], "training timestep")
+        metric = raw["metric"]
+        if metric not in _TRAIN_METRICS:
+            raise ValueError("train_metrics.csv metric is unknown")
+        value = _number(raw["value"], "training metric value")
+        if is_formal and value is None:
+            raise ValueError("formal training metric value is required")
+        identity = (run_id, method_id, policy_seed, timestep, metric)
+        if identity in identities:
+            raise ValueError("train_metrics.csv contains a duplicate row identity")
+        identities.add(identity)
+        rows.append(
+            _TrainCsvRow(
+                raw["result_label"],
+                is_formal,
+                run_id,
+                method_id,
+                policy_seed,
+                timestep,
+                metric,
+                value,
+            )
         )
-        _number(
-            row["policy_replicate_count"],
-            "comparison policy replicate count",
-            allow_empty=False,
+    _require_one_formality([row.is_formal for row in rows], "train_metrics.csv")
+    return tuple(rows)
+
+
+def _episode_metrics(raw: Mapping[str, str]) -> EpisodeMetrics:
+    values: dict[str, object] = {}
+    for name in _METRIC_NAMES:
+        if name in _BOOL_METRICS:
+            values[name] = _boolean(raw[name], f"eval_metrics.csv {name}")
+        elif name in _COUNT_METRICS:
+            values[name] = _integer(raw[name], f"eval_metrics.csv {name}")
+        else:
+            value = _number(
+                raw[name],
+                f"eval_metrics.csv {name}",
+                allow_empty=name in _OPTIONAL_METRICS,
+            )
+            values[name] = value
+    try:
+        return EpisodeMetrics(**values)  # type: ignore[arg-type]
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"eval_metrics.csv metric domains are invalid: {error}") from error
+
+
+def _parse_eval_metrics_csv(payload: bytes) -> tuple[_EvalCsvRow, ...]:
+    raw_rows = _raw_csv_rows(payload, "eval_metrics.csv", EVAL_METRICS_CSV_COLUMNS)
+    rows: list[_EvalCsvRow] = []
+    identities: set[tuple[str, str, int | None, str, int, int]] = set()
+    for raw in raw_rows:
+        is_formal = _row_formality(raw["result_label"], raw["is_formal"], "eval_metrics.csv")
+        track = raw["track"]
+        method_id = raw["method_id"]
+        if track not in _METHODS_BY_TRACK or method_id not in _METHODS_BY_TRACK[track]:
+            raise ValueError("eval_metrics.csv track/method is outside the fixed matrix")
+        profile = MethodProfileSnapshot.from_method_id(method_id)
+        policy_seed = (
+            None
+            if raw["policy_seed"] == ""
+            else _integer(raw["policy_seed"], "evaluation policy_seed")
         )
-        _number(row["mean"], "comparison mean")
-        _number(row["policy_seed_stdev"], "comparison policy seed stdev")
+        if (method_id == "b0_rule") is not (policy_seed is None):
+            raise ValueError("eval_metrics.csv policy_seed does not match the method")
+        case_id = raw["case_id"]
+        if case_id not in _CASES_BY_ID:
+            raise ValueError("eval_metrics.csv case_id is unknown")
+        episode_index = _integer(raw["episode_index"], "evaluation episode_index")
+        test_seed = _integer(raw["test_seed"], "evaluation test_seed")
+        if not TEST_SEED_START <= test_seed < TEST_SEED_STOP:
+            raise ValueError("eval_metrics.csv test_seed is outside the test split")
+        if _integer(raw["record_schema_version"], "record_schema_version") != 1:
+            raise ValueError("eval_metrics.csv record_schema_version must be 1")
+        if _integer(raw["research_contract_version"], "research_contract_version") != 7:
+            raise ValueError("eval_metrics.csv research_contract_version must be 7")
+        checkpoint_path = raw["checkpoint_path"] or None
+        checkpoint_sha256 = raw["checkpoint_sha256"] or None
+        if method_id == "b0_rule":
+            if checkpoint_path is not None or checkpoint_sha256 is not None:
+                raise ValueError("B0 eval_metrics.csv rows cannot bind a checkpoint")
+        elif (
+            checkpoint_path is None
+            or checkpoint_sha256 is None
+            or _SHA256_PATTERN.fullmatch(checkpoint_sha256) is None
+        ):
+            raise ValueError("PPO eval_metrics.csv rows require checkpoint path and SHA-256")
+        if raw["policy_kind"] != profile.policy_kind:
+            raise ValueError("eval_metrics.csv policy_kind does not match the method")
+        if raw["specialist_ids"] != ";".join(profile.specialist_ids):
+            raise ValueError("eval_metrics.csv specialist_ids do not match the method")
+        critic_enabled = _boolean(raw["critic_enabled"], "eval_metrics.csv critic_enabled")
+        if critic_enabled is not profile.critic_enabled:
+            raise ValueError("eval_metrics.csv critic_enabled does not match the method")
+        expected_shield = expected_runtime_shield_mode(
+            cast(EvaluationTrack, track), cast(MethodId, method_id)
+        )
+        if raw["shield_mode"] != expected_shield:
+            raise ValueError("eval_metrics.csv shield_mode does not match the fixed matrix")
+        case = _CASES_BY_ID[case_id]
+        if raw["scenario_id"] != case.scenario_id:
+            raise ValueError("eval_metrics.csv scenario_id does not match case_id")
+        if _integer(raw["difficulty_level"], "difficulty_level") != case.difficulty_level:
+            raise ValueError("eval_metrics.csv difficulty_level does not match case_id")
+        for name in (
+            "metadrive_scenario_index",
+            "scenario_selection_seed",
+            "scenario_parameter_seed",
+        ):
+            _integer(raw[name], f"eval_metrics.csv {name}")
+        identity = (track, method_id, policy_seed, case_id, episode_index, test_seed)
+        if identity in identities:
+            raise ValueError("eval_metrics.csv contains a duplicate episode identity")
+        identities.add(identity)
+        rows.append(
+            _EvalCsvRow(
+                raw,
+                raw["result_label"],
+                is_formal,
+                track,
+                method_id,
+                policy_seed,
+                case_id,
+                episode_index,
+                test_seed,
+                checkpoint_path,
+                checkpoint_sha256,
+                _episode_metrics(raw),
+            )
+        )
+    _require_one_formality([row.is_formal for row in rows], "eval_metrics.csv")
+    return tuple(rows)
+
+
+def _parse_comparison_csv(payload: bytes) -> tuple[_ComparisonCsvRow, ...]:
+    raw_rows = _raw_csv_rows(payload, "comparison.csv", COMPARISON_CSV_COLUMNS)
+    rows: list[_ComparisonCsvRow] = []
+    identities: set[tuple[str, str, str, str]] = set()
+    for raw in raw_rows:
+        is_formal = _row_formality(raw["result_label"], raw["is_formal"], "comparison.csv")
+        track = raw["track"]
+        method_id = raw["method_id"]
+        case_id = raw["case_id"]
+        metric = raw["metric"]
+        if track not in _METHODS_BY_TRACK or method_id not in _METHODS_BY_TRACK[track]:
+            raise ValueError("comparison.csv track/method is outside the fixed matrix")
+        if case_id not in _CASES_BY_ID:
+            raise ValueError("comparison.csv case_id is unknown")
+        if metric not in _METRIC_NAMES:
+            raise ValueError("comparison.csv metric is unknown")
+        physical_count = _integer(
+            raw["physical_episode_count"], "comparison physical episode count", minimum=1
+        )
+        replicate_count = _integer(
+            raw["policy_replicate_count"], "comparison policy replicate count", minimum=1
+        )
+        mean = _number(raw["mean"], "comparison mean")
+        stdev = _number(raw["policy_seed_stdev"], "comparison policy seed stdev")
+        if stdev is not None and stdev < 0.0:
+            raise ValueError("comparison policy seed stdev must be non-negative")
+        if replicate_count == 1 and stdev is not None:
+            raise ValueError("one policy replicate has unavailable sample standard deviation")
+        if mean is None and stdev is not None:
+            raise ValueError("unavailable comparison mean cannot have a standard deviation")
+        bounded_metric = (
+            metric in _BOOL_METRICS
+            or metric.endswith("_rate")
+            or metric == "final_route_completion"
+        )
+        if bounded_metric:
+            if mean is not None and not 0.0 <= mean <= 1.0:
+                raise ValueError(f"comparison mean for {metric} must be in [0, 1]")
+        if metric in _COUNT_METRICS and mean is not None and mean < 0.0:
+            raise ValueError(f"comparison mean for {metric} must be non-negative")
+        identity = (track, case_id, method_id, metric)
+        if identity in identities:
+            raise ValueError("comparison.csv contains a duplicate row identity")
+        identities.add(identity)
+        rows.append(
+            _ComparisonCsvRow(
+                raw["result_label"],
+                is_formal,
+                track,
+                case_id,
+                method_id,
+                metric,
+                physical_count,
+                replicate_count,
+                mean,
+                stdev,
+            )
+        )
+    _require_one_formality([row.is_formal for row in rows], "comparison.csv")
+    actual_identities = tuple((row.track, row.case_id, row.method_id, row.metric) for row in rows)
+    if actual_identities != _EXPECTED_COMPARISON_IDENTITIES:
+        raise ValueError(
+            "comparison.csv required matrix is missing, extra, or outside canonical order"
+        )
+    return tuple(rows)
 
 
 def _read_checkpoints(bundle: _VerifiedBundle) -> tuple[dict[str, object], ...]:
     path = bundle.root / "selected_checkpoints.json"
     try:
+        text = bundle.read_bytes(path).decode("utf-8")
         payload = json.loads(
-            bundle.read_text(path),
+            text,
             object_pairs_hook=_unique_json_object,
             parse_constant=_reject_constant,
         )
-    except (json.JSONDecodeError, ValueError) as error:
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
         raise ValueError("selected checkpoint JSON is malformed") from error
     if not isinstance(payload, dict) or set(payload) != {"schema_version", "selected_checkpoints"}:
         raise ValueError("selected checkpoint JSON fields are invalid")
@@ -224,7 +534,7 @@ def _read_checkpoints(bundle: _VerifiedBundle) -> tuple[dict[str, object], ...]:
             raise ValueError("selected checkpoint identity is duplicated")
         identities.add(identity)
         checkpoints.append(item)
-    return tuple(
+    ordered = tuple(
         sorted(
             checkpoints,
             key=lambda item: (
@@ -233,6 +543,48 @@ def _read_checkpoints(bundle: _VerifiedBundle) -> tuple[dict[str, object], ...]:
             ),
         )
     )
+    plan_hashes = {str(item["validation_plan_sha256"]) for item in ordered}
+    if len(plan_hashes) > 1:
+        raise ValueError("selected checkpoints have inconsistent validation-plan provenance")
+    return ordered
+
+
+def _validate_checkpoint_provenance(
+    eval_rows: Sequence[_EvalCsvRow],
+    checkpoints: Sequence[Mapping[str, object]],
+    *,
+    smoke: bool,
+) -> None:
+    selected = {
+        (str(item["method_id"]), cast(int, item["policy_seed"])): (
+            str(item["checkpoint_path"]),
+            str(item["checkpoint_sha256"]),
+        )
+        for item in checkpoints
+    }
+    observed: dict[tuple[str, int], tuple[str, str]] = {}
+    used_selected: set[tuple[str, int]] = set()
+    for row in eval_rows:
+        if row.method_id == "b0_rule":
+            continue
+        assert row.policy_seed is not None
+        assert row.checkpoint_path is not None
+        assert row.checkpoint_sha256 is not None
+        key = (row.method_id, row.policy_seed)
+        binding = (row.checkpoint_path, row.checkpoint_sha256)
+        previous = observed.setdefault(key, binding)
+        if previous != binding:
+            raise ValueError("evaluation rows disagree on PPO checkpoint identity")
+        selected_binding = selected.get(key)
+        if selected_binding is None:
+            if not smoke:
+                raise ValueError("formal evaluation PPO checkpoint is absent from selection")
+            continue
+        if selected_binding != binding:
+            raise ValueError("evaluation checkpoint path/hash does not match selected checkpoint")
+        used_selected.add(key)
+    if not smoke and used_selected != set(selected):
+        raise ValueError("formal selected checkpoint inventory does not match evaluation")
 
 
 def _markdown_cell(value: object) -> str:
@@ -255,20 +607,17 @@ def _relative_link(output: Path, target: Path) -> str:
     return relative.replace("\\", "/")
 
 
-def _format_metric(value: str) -> str:
-    number = _number(value, "comparison mean")
-    return "N/A" if number is None else format(number, ".6g")
+def _format_metric(value: float | None) -> str:
+    return "N/A" if value is None else format(value, ".6g")
 
 
-def _metric_tables(comparison_rows: Sequence[Mapping[str, str]], track: str) -> list[str]:
-    track_rows = [row for row in comparison_rows if row["track"] == track]
+def _metric_tables(comparison_rows: Sequence[_ComparisonCsvRow], track: str) -> list[str]:
+    track_rows = [row for row in comparison_rows if row.track == track]
     identities = sorted(
-        {(row["case_id"], row["method_id"]) for row in track_rows},
-        key=lambda item: (item[0], METHOD_ORDER.index(item[1])),
+        {(row.case_id, row.method_id) for row in track_rows},
+        key=lambda item: (_CASE_ORDER[item[0]], METHOD_ORDER.index(item[1])),
     )
-    by_metric = {
-        (row["case_id"], row["method_id"], row["metric"]): row["mean"] for row in track_rows
-    }
+    by_metric = {(row.case_id, row.method_id, row.metric): row.mean for row in track_rows}
     lines: list[str] = []
     for group, metrics in _METRIC_GROUPS.items():
         lines.extend((f"### {group}", ""))
@@ -276,10 +625,7 @@ def _metric_tables(comparison_rows: Sequence[Mapping[str, str]], track: str) -> 
             (
                 case_id,
                 method_id,
-                *(
-                    _format_metric(by_metric.get((case_id, method_id, metric), ""))
-                    for metric in metrics
-                ),
+                *(_format_metric(by_metric[(case_id, method_id, metric)]) for metric in metrics),
             )
             for case_id, method_id in identities
         ]
@@ -308,27 +654,34 @@ def write_markdown_report(bundle_dir: Path, output_md: Path) -> None:
     """Write a deterministic report using only a fully verified artifact bundle."""
 
     output = Path(output_md)
+    bundle = _verify_bundle(Path(bundle_dir))
+    _reject_output_in_source_bundle(bundle.root, output)
     if output.exists():
         raise FileExistsError(output)
-    bundle = _verify_bundle(Path(bundle_dir))
     _required_artifacts(bundle)
-    training_rows = _read_csv(bundle, "metrics/train_metrics.csv", TRAIN_METRICS_CSV_COLUMNS)
-    eval_rows = _read_csv(bundle, "metrics/eval_metrics.csv", EVAL_METRICS_CSV_COLUMNS)
-    comparison_rows = _read_csv(bundle, "metrics/comparison.csv", COMPARISON_CSV_COLUMNS)
-    _validate_training_rows(training_rows)
-    _validate_eval_rows(eval_rows)
-    _validate_comparison_rows(comparison_rows)
+    training_rows = _parse_train_metrics_csv(
+        bundle.read_bytes(bundle.root / "metrics/train_metrics.csv")
+    )
+    eval_rows = _parse_eval_metrics_csv(bundle.read_bytes(bundle.root / "metrics/eval_metrics.csv"))
+    comparison_rows = _parse_comparison_csv(
+        bundle.read_bytes(bundle.root / "metrics/comparison.csv")
+    )
     checkpoints = _read_checkpoints(bundle)
-    labels = {row["result_label"] for row in (*training_rows, *eval_rows, *comparison_rows)}
-    if not labels <= {"", SMOKE_RESULT_LABEL} or len(labels) != 1:
+    formalities = {row.is_formal for row in training_rows}
+    formalities.update(row.is_formal for row in eval_rows)
+    formalities.update(row.is_formal for row in comparison_rows)
+    if len(formalities) != 1:
         raise ValueError("canonical metrics disagree on smoke/formal provenance")
-    smoke = labels == {SMOKE_RESULT_LABEL}
+    smoke = formalities == {False}
+    _validate_checkpoint_provenance(eval_rows, checkpoints, smoke=smoke)
 
     def link(relative: str) -> str:
         return _relative_link(output, bundle.root / relative)
 
-    schema_versions = ", ".join(sorted({row["record_schema_version"] for row in eval_rows}))
-    contract_versions = ", ".join(sorted({row["research_contract_version"] for row in eval_rows}))
+    schema_versions = ", ".join(sorted({row.cells["record_schema_version"] for row in eval_rows}))
+    contract_versions = ", ".join(
+        sorted({row.cells["research_contract_version"] for row in eval_rows})
+    )
     lines = ["# Phase 6 Evaluation Report", ""]
     if smoke:
         lines.extend(
@@ -383,23 +736,23 @@ def write_markdown_report(bundle_dir: Path, output_md: Path) -> None:
     )
     lines.extend(("", "## Exact evaluation matrix", ""))
     matrix = sorted(
-        {
+        [
             (
-                row["track"],
-                row["method_id"],
-                row["policy_seed"] or "rule",
-                row["case_id"],
-                row["scenario_id"],
-                row["test_seed"],
-                row["shield_mode"],
+                row.track,
+                row.method_id,
+                row.policy_seed if row.policy_seed is not None else "rule",
+                row.case_id,
+                row.cells["scenario_id"],
+                row.test_seed,
+                row.cells["shield_mode"],
             )
             for row in eval_rows
-        },
+        ],
         key=lambda row: (
             _TRACK_ORDER.index(row[0]),
             METHOD_ORDER.index(row[1]),
-            row[3],
-            int(row[5]),
+            _CASE_ORDER[row[3]],
+            row[5],
         ),
     )
     lines.extend(

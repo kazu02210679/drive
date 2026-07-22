@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 from collections.abc import Callable
+from dataclasses import fields
 from pathlib import Path
 
 import imageio.v3 as iio
@@ -13,7 +14,9 @@ from mad_driving.evaluation.compare import (
     COMPARISON_CSV_COLUMNS,
     EVAL_METRICS_CSV_COLUMNS,
 )
+from mad_driving.evaluation.metrics import EpisodeMetrics
 from mad_driving.evaluation.models import (
+    EVALUATION_CASES,
     REWARD_COMPONENT_KEYS,
     EvaluationEpisodeKey,
     EvaluationStepRecord,
@@ -143,6 +146,9 @@ def finalize_manifest(bundle: Path) -> None:
 
 
 def _eval_row(method_id: str, track: str, seed: str, *, disagreement: str) -> dict[str, object]:
+    profile = MethodProfileSnapshot.from_method_id(method_id)
+    multi_agent = len(profile.specialist_ids) > 1
+    critic = profile.critic_enabled
     row: dict[str, object] = {column: "" for column in EVAL_METRICS_CSV_COLUMNS}
     row.update(
         {
@@ -158,26 +164,26 @@ def _eval_row(method_id: str, track: str, seed: str, *, disagreement: str) -> di
             "test_seed": 20_001,
             "checkpoint_path": "" if method_id == "b0_rule" else f"runs/{method_id}/42.zip",
             "checkpoint_sha256": "" if method_id == "b0_rule" else "a" * 64,
-            "policy_kind": "rule" if method_id == "b0_rule" else "ppo",
-            "specialist_ids": "nominal;hazard;rule",
-            "critic_enabled": method_id == "proposed",
+            "policy_kind": profile.policy_kind,
+            "specialist_ids": ";".join(profile.specialist_ids),
+            "critic_enabled": profile.critic_enabled,
             "shield_mode": "monitor" if track == "decision" else "enforce",
             "metadrive_scenario_index": 1,
             "scenario_selection_seed": 31,
             "scenario_parameter_seed": 37,
             "scenario_id": "lead_brake",
             "difficulty_level": 1,
-            "collision": 0,
-            "crossing_actor_collision": 0,
-            "near_miss": 1,
+            "collision": False,
+            "crossing_actor_collision": False,
+            "near_miss": True,
             "minimum_actual_ttc_s": 2.4,
-            "negative_stopping_margin": 0,
+            "negative_stopping_margin": False,
             "minimum_stopping_margin_m": 3.5,
-            "hard_rule_violation": 0,
+            "hard_rule_violation": False,
             "raw_unsafe_request_rate": 0.25,
             "shield_intervention_rate": 0.25,
-            "off_road": 0,
-            "scenario_success": 1,
+            "off_road": False,
+            "scenario_success": True,
             "final_route_completion": 0.8,
             "average_speed_mps": 8.5,
             "simulated_travel_time_s": 12.0,
@@ -186,16 +192,16 @@ def _eval_row(method_id: str, track: str, seed: str, *, disagreement: str) -> di
             "longitudinal_acceleration_rms_mps2": 0.8,
             "maximum_deceleration_mps2": 1.2,
             "longitudinal_jerk_rms_mps3": 0.4,
-            "agent_disagreement_eligible_steps": 2,
-            "agent_disagreement_count": 1,
-            "agent_disagreement_rate": disagreement,
-            "critic_challenge_eligible_steps": 2,
-            "critic_challenge_count": 1,
-            "critic_challenge_rate": 0.5,
-            "critic_found_missed_danger_count": 1,
-            "critic_found_missed_danger_rate": 0.5,
+            "agent_disagreement_eligible_steps": 2 if multi_agent else 0,
+            "agent_disagreement_count": 1 if multi_agent else 0,
+            "agent_disagreement_rate": disagreement if multi_agent else "",
+            "critic_challenge_eligible_steps": 2 if critic else 0,
+            "critic_challenge_count": 1 if critic else 0,
+            "critic_challenge_rate": 0.5 if critic else "",
+            "critic_found_missed_danger_count": 1 if critic else 0,
+            "critic_found_missed_danger_rate": 1.0 if critic else "",
             "critic_false_challenge_count": 0,
-            "critic_false_challenge_rate": 0.0,
+            "critic_false_challenge_rate": 0.0 if critic else "",
             "agent_failure_fallback_count": 0,
             "decision_latency_p50_ms": 4.0,
             "decision_latency_p95_ms": 5.0,
@@ -207,38 +213,40 @@ def _eval_row(method_id: str, track: str, seed: str, *, disagreement: str) -> di
 
 
 def _comparison_rows() -> list[dict[str, object]]:
-    metrics = (
-        "collision",
-        "scenario_success",
-        "final_route_completion",
-        "unnecessary_braking_event_count",
-        "longitudinal_acceleration_rms_mps2",
-        "agent_disagreement_rate",
-        "decision_latency_p95_ms",
-    )
+    metrics = tuple(field.name for field in fields(EpisodeMetrics))
     rows: list[dict[str, object]] = []
-    for track, method in (
-        ("decision", "b1_nominal"),
-        ("system", "b0_rule"),
-        ("ablation", "proposed"),
-    ):
-        for metric in metrics:
-            rows.append(
-                {
-                    "result_label": SMOKE,
-                    "is_formal": "False",
-                    "track": track,
-                    "case_id": "level1_lead_brake",
-                    "method_id": method,
-                    "metric": metric,
-                    "physical_episode_count": 1,
-                    "policy_replicate_count": 1,
-                    "mean": (
-                        "" if metric == "agent_disagreement_rate" and method == "b0_rule" else 0.5
-                    ),
-                    "policy_seed_stdev": "",
-                }
-            )
+    methods_by_track = {
+        "decision": ("b1_nominal", "b2_multi_no_review", "proposed"),
+        "system": ("b0_rule", "b1_nominal", "b2_multi_no_review", "proposed"),
+        "ablation": (
+            "proposed",
+            "proposed_no_critic",
+            "proposed_no_shield",
+            "proposed_no_hazard",
+        ),
+    }
+    for track, methods in methods_by_track.items():
+        for case in EVALUATION_CASES:
+            for method in methods:
+                profile = MethodProfileSnapshot.from_method_id(method)
+                for metric in metrics:
+                    unavailable = (
+                        metric == "agent_disagreement_rate" and len(profile.specialist_ids) < 2
+                    ) or (metric.startswith("critic_") and not profile.critic_enabled)
+                    rows.append(
+                        {
+                            "result_label": SMOKE,
+                            "is_formal": "False",
+                            "track": track,
+                            "case_id": case.case_id,
+                            "method_id": method,
+                            "metric": metric,
+                            "physical_episode_count": 1,
+                            "policy_replicate_count": 1,
+                            "mean": "" if unavailable else 0.5,
+                            "policy_seed_stdev": "",
+                        }
+                    )
     return rows
 
 

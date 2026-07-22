@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
 
 import imageio.v3 as iio
 import pytest
@@ -48,6 +50,85 @@ def test_writes_fixed_deterministic_png_inventory_from_canonical_csvs(
         image = iio.imread(output)
         assert image.shape[:2] == expected_shape
         assert image.size > 0
+
+
+def test_png_outputs_repeat_byte_for_byte_across_independent_bundles(
+    bundle_factory: Callable[[], Path], tmp_path: Path
+) -> None:
+    bundles = (bundle_factory(), bundle_factory())
+    destinations = (tmp_path / "repeat-a", tmp_path / "repeat-b")
+
+    for bundle, destination in zip(bundles, destinations, strict=True):
+        write_learning_curve(
+            bundle / "metrics" / "train_metrics.csv",
+            destination / "learning_curve.png",
+        )
+        write_safety_efficiency_plots(
+            bundle / "metrics" / "eval_metrics.csv",
+            destination,
+        )
+
+    for filename in PLOT_INVENTORY:
+        assert (destinations[0] / filename).read_bytes() == (
+            destinations[1] / filename
+        ).read_bytes()
+
+
+def test_plots_emit_actual_fixed_legend_and_tick_label_order(
+    bundle_factory: Callable[[], Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from matplotlib.axes import Axes
+
+    legends: list[tuple[str, ...]] = []
+    tick_labels: list[tuple[str, ...]] = []
+    original_legend = Axes.legend
+    original_set_xticks = Axes.set_xticks
+
+    def capture_legend(self: Axes, *args: object, **kwargs: object):
+        legends.append(tuple(self.get_legend_handles_labels()[1]))
+        return original_legend(self, *args, **kwargs)
+
+    def capture_ticks(
+        self: Axes,
+        ticks: object,
+        labels: object = None,
+        *args: object,
+        **kwargs: object,
+    ):
+        if labels is not None:
+            tick_labels.append(tuple(str(label) for label in labels))
+        return original_set_xticks(self, ticks, labels, *args, **kwargs)
+
+    monkeypatch.setattr(Axes, "legend", capture_legend)
+    monkeypatch.setattr(Axes, "set_xticks", capture_ticks)
+    bundle = bundle_factory()
+    write_learning_curve(
+        bundle / "metrics" / "train_metrics.csv",
+        tmp_path / "ordered" / "learning_curve.png",
+    )
+    write_safety_efficiency_plots(
+        bundle / "metrics" / "eval_metrics.csv",
+        tmp_path / "ordered",
+    )
+
+    assert legends == [
+        ("proposed",),
+        ("scenario_success", "final_route_completion"),
+        ("unnecessary_braking_event_count", "unnecessary_stop_duration_s"),
+        (
+            "longitudinal_acceleration_rms_mps2",
+            "maximum_deceleration_mps2",
+            "longitudinal_jerk_rms_mps3",
+        ),
+    ]
+    expected = (
+        "decision\nb1_nominal",
+        "system\nb0_rule",
+        "ablation\nproposed",
+    )
+    assert tick_labels == [expected] * 5
 
 
 def test_unavailable_values_render_as_na_and_smoke_watermark_is_visible(
@@ -179,3 +260,55 @@ def test_bundle_manifest_used_by_tests_has_exact_inventory(
 ) -> None:
     bundle = bundle_factory()
     EvaluationWorkspace(destination=bundle, path=bundle)._validate_manifest()
+
+
+def test_verified_consumers_use_handle_bytes_not_path_reopens(
+    bundle_factory: Callable[[], Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle = bundle_factory()
+    trace = next(bundle.glob("episodes/**/*_trace.jsonl"))
+    frames = trace.parent / "episode_20001_frames"
+
+    def forbidden_read(*args: object, **kwargs: object) -> bytes:
+        raise AssertionError("verified consumers must not reopen artifacts through Path")
+
+    monkeypatch.setattr(Path, "read_bytes", forbidden_read)
+    monkeypatch.setattr(Path, "read_text", forbidden_read)
+
+    write_learning_curve(
+        bundle / "metrics" / "train_metrics.csv",
+        tmp_path / "handle-only.png",
+    )
+    from mad_driving.visualization.overlay import write_episode_gif
+    from mad_driving.visualization.report import write_markdown_report
+
+    write_episode_gif(trace, frames, tmp_path / "handle-only.gif")
+    write_markdown_report(bundle, tmp_path / "handle-only.md")
+
+
+def test_verified_handle_read_rejects_identity_change_during_read(
+    bundle_factory: Callable[[], Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle = bundle_factory()
+    import mad_driving.visualization as visualization
+
+    original_fstat = os.fstat
+    calls_by_fd: dict[int, int] = {}
+
+    def drifting_fstat(fd: int) -> SimpleNamespace:
+        metadata = original_fstat(fd)
+        calls_by_fd[fd] = calls_by_fd.get(fd, 0) + 1
+        return SimpleNamespace(
+            st_mode=metadata.st_mode,
+            st_dev=metadata.st_dev,
+            st_ino=metadata.st_ino,
+            st_size=metadata.st_size,
+            st_mtime_ns=metadata.st_mtime_ns + (calls_by_fd[fd] - 1),
+            st_file_attributes=getattr(metadata, "st_file_attributes", 0),
+        )
+
+    monkeypatch.setattr(visualization.os, "fstat", drifting_fstat)
+    output = tmp_path / "drift.png"
+    with pytest.raises(ValueError, match="changed|identity|verification"):
+        write_learning_curve(bundle / "metrics" / "train_metrics.csv", output)
+    assert not output.exists()

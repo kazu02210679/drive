@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import csv
-import io
-import math
 import tempfile
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
@@ -21,13 +18,17 @@ from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 
 from mad_driving.atomic import rename_no_replace
-from mad_driving.evaluation.compare import EVAL_METRICS_CSV_COLUMNS
-from mad_driving.evaluation.training_metrics import TRAIN_METRICS_CSV_COLUMNS
 from mad_driving.visualization import (
     METHOD_ORDER,
     PLOT_INVENTORY,
     SMOKE_RESULT_LABEL,
     _find_and_verify_bundle,
+    _reject_output_in_source_bundle,
+)
+from mad_driving.visualization.report import (
+    _EvalCsvRow,
+    _parse_eval_metrics_csv,
+    _parse_train_metrics_csv,
 )
 
 FIGURE_SIZE_INCHES: Final = (10.0, 6.0)
@@ -65,53 +66,6 @@ _PLOT_SPECS: Final = (
     ),
     ("agent_disagreement.png", "Multi-Agent disagreement", ("agent_disagreement_rate",)),
 )
-
-
-def _read_csv(text: str, expected_columns: tuple[str, ...], label: str) -> list[dict[str, str]]:
-    reader = csv.DictReader(io.StringIO(text, newline=""))
-    if reader.fieldnames is None or tuple(reader.fieldnames) != expected_columns:
-        raise ValueError(f"{label} must use the canonical fixed CSV columns")
-    try:
-        rows = list(reader)
-    except csv.Error as error:
-        raise ValueError(f"{label} is malformed CSV") from error
-    if not rows:
-        raise ValueError(f"{label} must contain at least one data row")
-    if any(None in row or any(value is None for value in row.values()) for row in rows):
-        raise ValueError(f"{label} contains malformed CSV cells")
-    return rows
-
-
-def _finite_cell(value: str, label: str) -> float | None:
-    if value == "":
-        return None
-    try:
-        numeric = float(value)
-    except ValueError as error:
-        raise ValueError(f"{label} must be numeric or empty") from error
-    if not math.isfinite(numeric):
-        raise ValueError(f"{label} must be finite when available")
-    return numeric
-
-
-def _int_cell(value: str, label: str) -> int:
-    try:
-        numeric = int(value)
-    except ValueError as error:
-        raise ValueError(f"{label} must be an integer") from error
-    if numeric < 0:
-        raise ValueError(f"{label} must be non-negative")
-    return numeric
-
-
-def _validate_common_rows(rows: Sequence[Mapping[str, str]], label: str) -> bool:
-    labels = {row["result_label"] for row in rows}
-    if not labels <= {"", SMOKE_RESULT_LABEL} or len(labels) != 1:
-        raise ValueError(f"{label} has inconsistent result labels")
-    for row in rows:
-        if row["method_id"] not in METHOD_ORDER:
-            raise ValueError(f"{label} contains an unknown method_id")
-    return labels == {SMOKE_RESULT_LABEL}
 
 
 def _new_figure(title: str) -> tuple[Figure, Axes]:
@@ -175,27 +129,28 @@ def write_learning_curve(train_metrics_csv: Path, output_png: Path) -> None:
     """Render episode-reward learning curves from verified canonical training metrics."""
 
     output = Path(output_png)
-    if output.exists():
-        raise FileExistsError(output)
     source = Path(train_metrics_csv)
     bundle = _find_and_verify_bundle(source)
-    rows = _read_csv(bundle.read_text(source), TRAIN_METRICS_CSV_COLUMNS, "train_metrics.csv")
-    smoke = _validate_common_rows(rows, "train_metrics.csv")
+    _reject_output_in_source_bundle(bundle.root, output)
+    if output.exists():
+        raise FileExistsError(output)
+    rows = _parse_train_metrics_csv(bundle.read_bytes(source))
+    smoke = not rows[0].is_formal
     series: dict[str, list[tuple[int, float]]] = defaultdict(list)
     unavailable = False
     seen: set[tuple[str, int]] = set()
     for row in rows:
-        timestep = _int_cell(row["timestep"], "training timestep")
-        value = _finite_cell(row["value"], "training metric value")
+        timestep = row.timestep
+        value = row.value
         if value is None:
             unavailable = True
-        if row["metric"] != "rollout/ep_rew_mean" or value is None:
+        if row.metric != "rollout/ep_rew_mean" or value is None:
             continue
-        key = (row["method_id"], timestep)
+        key = (row.method_id, timestep)
         if key in seen:
             raise ValueError("train_metrics.csv contains duplicate learning-curve points")
         seen.add(key)
-        series[row["method_id"]].append((timestep, value))
+        series[row.method_id].append((timestep, value))
     figure, axes = _new_figure("Training episode reward")
     plotted = False
     for method_id in METHOD_ORDER:
@@ -222,36 +177,31 @@ def write_learning_curve(train_metrics_csv: Path, output_png: Path) -> None:
     _save_figure(figure, output)
 
 
-def _ordered_groups(rows: Sequence[Mapping[str, str]]) -> tuple[tuple[str, str], ...]:
-    groups = {(row["track"], row["method_id"]) for row in rows}
-    for track, method_id in groups:
-        if track not in _TRACK_ORDER:
-            raise ValueError("eval_metrics.csv contains an unknown track")
-        if method_id not in METHOD_ORDER:
-            raise ValueError("eval_metrics.csv contains an unknown method_id")
+def _ordered_groups(rows: Sequence[_EvalCsvRow]) -> tuple[tuple[str, str], ...]:
+    groups = {(row.track, row.method_id) for row in rows}
     return tuple(
         sorted(groups, key=lambda item: (_TRACK_ORDER[item[0]], METHOD_ORDER.index(item[1])))
     )
 
 
 def _metric_means(
-    rows: Sequence[Mapping[str, str]], groups: Sequence[tuple[str, str]], metric: str
+    rows: Sequence[_EvalCsvRow], groups: Sequence[tuple[str, str]], metric: str
 ) -> list[float | None]:
     values: list[float | None] = []
     for track, method_id in groups:
         available = [
-            value
+            float(value)
             for row in rows
-            if row["track"] == track
-            and row["method_id"] == method_id
-            and (value := _finite_cell(row[metric], f"eval metric {metric}")) is not None
+            if row.track == track
+            and row.method_id == method_id
+            and (value := getattr(row.metrics, metric)) is not None
         ]
         values.append(fmean(available) if available else None)
     return values
 
 
 def _render_metric_plot(
-    rows: Sequence[Mapping[str, str]],
+    rows: Sequence[_EvalCsvRow],
     groups: Sequence[tuple[str, str]],
     *,
     filename: str,
@@ -306,14 +256,15 @@ def write_safety_efficiency_plots(eval_metrics_csv: Path, output_dir: Path) -> t
     """Render the fixed five evaluation figures from verified canonical episode metrics."""
 
     destination = Path(output_dir)
+    source = Path(eval_metrics_csv)
+    bundle = _find_and_verify_bundle(source)
+    _reject_output_in_source_bundle(bundle.root, destination)
     outputs = tuple(destination / spec[0] for spec in _PLOT_SPECS)
     existing = next((path for path in outputs if path.exists()), None)
     if existing is not None:
         raise FileExistsError(existing)
-    source = Path(eval_metrics_csv)
-    bundle = _find_and_verify_bundle(source)
-    rows = _read_csv(bundle.read_text(source), EVAL_METRICS_CSV_COLUMNS, "eval_metrics.csv")
-    smoke = _validate_common_rows(rows, "eval_metrics.csv")
+    rows = _parse_eval_metrics_csv(bundle.read_bytes(source))
+    smoke = not rows[0].is_formal
     groups = _ordered_groups(rows)
     destination.mkdir(parents=True, exist_ok=True)
     for filename, title, metrics in _PLOT_SPECS:
