@@ -1,5 +1,3 @@
-import pytest
-
 from mad_driving.config.models import AppConfig
 from mad_driving.scenarios import (
     EpisodeSeeds,
@@ -29,7 +27,7 @@ def test_factory_uses_phase5_manager_only_for_phase5() -> None:
     assert isinstance(phase4_factory("phase4"), NoOpScenarioRuntime)
 
 
-def test_phase5_factory_rejects_an_unimplemented_selected_runtime() -> None:
+def test_phase5_factory_builds_the_occluded_crossing_runtime() -> None:
     payload = make_config("phase5").model_dump(mode="python")
     payload["scenarios"] = {
         "selection": "occluded_crossing",
@@ -39,5 +37,6 @@ def test_phase5_factory_rejects_an_unimplemented_selected_runtime() -> None:
 
     runtime = build_scenario_runtime_factory(config)("phase5")
 
-    with pytest.raises(RuntimeError, match="no registered runtime"):
-        runtime.reset(object(), seeds=EpisodeSeeds(1, 2, 3))
+    state = runtime.reset(object(), seeds=EpisodeSeeds(1, 2, 3))
+
+    assert state.scenario_id == "occluded_crossing"

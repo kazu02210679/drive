@@ -5,6 +5,7 @@ from __future__ import annotations
 from math import cos, sin
 from typing import Any
 
+from metadrive.component.traffic_participants.cyclist import Cyclist  # type: ignore[import-untyped]
 from metadrive.component.vehicle.vehicle_type import (  # type: ignore[import-untyped]
     DefaultVehicle,
     StaticDefaultVehicle,
@@ -20,6 +21,7 @@ from mad_driving.scenarios.actors import (
     ScenarioActorCommand,
     ScenarioActorState,
     StaticOccluderSpawn,
+    VelocityCommand,
 )
 
 
@@ -61,11 +63,13 @@ class ScenarioActorManager(BaseManager):  # type: ignore[misc]
     def spawn_crossing_actor(self, spawn: KinematicActorSpawn) -> str:
         """Spawn and own one kinematic actor at a world-relative pose."""
 
+        if spawn.actor_kind != "crossing_actor":
+            raise ValueError("crossing actor spawn must have actor_kind='crossing_actor'")
         actor_id = self._spawn(
             spawn.actor_id,
-            DefaultVehicle,
+            Cyclist,
             position=spawn.position_xy_m,
-            heading=spawn.heading_rad,
+            heading_theta=spawn.heading_rad,
         )
         actor = self._require_actor(actor_id)
         setter = getattr(actor, "set_velocity", None)
@@ -79,6 +83,7 @@ class ScenarioActorManager(BaseManager):  # type: ignore[misc]
         actor_id = self._spawn(
             spawn.actor_id,
             StaticDefaultVehicle,
+            vehicle_config={},
             position=spawn.position_xy_m,
             heading=spawn.heading_rad,
         )
@@ -91,7 +96,7 @@ class ScenarioActorManager(BaseManager):  # type: ignore[misc]
         """Queue a command for the next MetaDrive manager before-step hook."""
 
         self._require_actor(actor_id)
-        if not isinstance(command, ActorCommand | LanePoseCommand):
+        if not isinstance(command, ActorCommand | LanePoseCommand | VelocityCommand):
             raise TypeError("scenario actor command must be a supported command type")
         self._pending_commands[actor_id] = command
 
@@ -145,9 +150,11 @@ class ScenarioActorManager(BaseManager):  # type: ignore[misc]
                     )
                     heading = float(getattr(actor, "heading_theta", 0.0))
                     actor.set_velocity((cos(heading), sin(heading)), next_speed)
-            else:
+            elif isinstance(command, LanePoseCommand):
                 lane = self.engine.current_map.road_network.get_lane(command.lane_index)
                 actor.set_position(lane.position(command.longitudinal_m, command.lateral_m))
+            else:
+                actor.set_velocity(command.direction_xy, command.speed_mps)
         self._pending_commands.clear()
         return {}
 

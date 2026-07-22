@@ -1,132 +1,158 @@
-# Task 3 Report: ScenarioRuntime lifecycle boundary
+# Task 3 Report: Occluded Crossing Actor
 
-## Summary
+## Delivered
 
-Implemented the standalone ScenarioRuntime lifecycle boundary without connecting it to
-`MultiAgentSpeedEnv` (reserved for Task 8). The new surface provides immutable scene-frame
-primitives, runtime state/result/context types, a lifecycle protocol, and a deterministic
-no-op runtime.
+Implemented the seeded Level-3 `occluded_crossing` scenario while preserving the
+fixed 24-dimensional observation and four-action interfaces.
 
-## RED evidence
+- Added strict configuration and the fixed Level-3 overlay.
+- Added a real named MetaDrive 0.4.3 `Cyclist` (`crossing-cyclist`), a static
+  off-lane `static-occluder`, and a visible same-lane `crossing-lead`.
+- Sampled only from `scenario_parameter_seed`: conflict distance 20--40 m,
+  crossing offset 6--12 m, speed 2--6 m/s, trigger 1--3 s, lead gap 35--55 m,
+  lead speed fraction 0.80--1.00, and a 2 s survival window.
+- Kept the cyclist in simulator truth from reset. The complete visible-ID
+  allowlist includes current simulator actors and hides only the cyclist until
+  its lateral reveal boundary.
+- Computes conflict distance from current ego-lane coordinates on every context
+  request; the observation context contains only static occlusion metadata,
+  IDs, and distance, never hidden cyclist kinematics.
+- Added `VelocityCommand` to release the stationary cyclist at its sampled
+  trigger using the real MetaDrive velocity API.
+- `crash_human` plus exact cyclist contact is a scenario failure. Any typed
+  collision or off-road state suppresses success; unrelated collision signals
+  are not labelled a cyclist failure. Success requires the cyclist to cross
+  clear of the ego corridor and survive a further 2 seconds.
+- Shared stable Actor-ID generation between the control adapter and snapshot
+  builder so a complete logical allowlist agrees with privileged/visible frame
+  construction.
 
-1. Command:
+## RED / GREEN evidence
 
-   ```powershell
-   .venv\Scripts\python.exe -m pytest tests/unit/scenarios/test_runtime.py -q
-   ```
-
-   Result: exit code 1 during collection, as expected. The test failed because
-   `mad_driving.interfaces` did not export `OcclusionRegion`.
-
-2. After adding validation tests before implementation, command:
-
-   ```powershell
-   .venv\Scripts\python.exe -m pytest tests/unit/interfaces/test_models.py tests/unit/scenarios/test_runtime.py -q
-   ```
-
-   Result: exit code 1 during collection, as expected. `scene_frame` did not exist and
-   `OcclusionRegion` was not exported. No production implementation existed at either RED.
-
-## GREEN evidence
-
-1. After the minimal implementation:
-
-   ```powershell
-   .venv\Scripts\python.exe -m pytest tests/unit/scenarios/test_runtime.py tests/unit/interfaces/test_models.py -q
-   ```
-
-   Result: 45 passed.
-
-2. Required focused gates after the import-order refactor:
+1. Initial desired-runtime tests were written first.
 
    ```powershell
-   .venv\Scripts\python.exe -m pytest tests/unit/scenarios tests/unit/interfaces/test_models.py -q
-   .venv\Scripts\ruff.exe check src/mad_driving/scenarios tests/unit/scenarios
-   .venv\Scripts\mypy.exe src/mad_driving/scenarios src/mad_driving/interfaces/scene_frame.py
+   .venv\Scripts\python.exe -m pytest tests/unit/scenarios/test_occluded_crossing.py -q
    ```
 
-   Results: 50 passed; Ruff reported `All checks passed!`; mypy reported
-   `Success: no issues found in 4 source files`.
+   RED: exit 1 during collection. Expected failure:
+   `ImportError: cannot import name 'OccludedCrossingScenarioConfig'`.
 
-## Full-suite evidence
+   GREEN after the minimal configuration, actor command, runtime, registry, and
+   adapter implementation:
 
-Command:
+   ```text
+   7 passed, 14 warnings in 4.44s
+   ```
 
-```powershell
-.venv\Scripts\python.exe -m pytest -q
-```
+2. The Level-3 overlay selection test preceded the YAML file.
 
-Result: 447 passed, 19 warnings, in 25.61 seconds. The warnings are pre-existing third-party
-Matplotlib deprecations and Stable-Baselines integration warnings; no test failures occurred.
+   ```powershell
+   .venv\Scripts\python.exe -m pytest tests/unit/config/test_loader.py -q -k occluded_crossing
+   ```
+
+   RED: exit 1 with expected `FileNotFoundError` for
+   `configs/scenarios/occluded_crossing.yaml`.
+
+   GREEN after adding the overlay:
+
+   ```text
+   1 passed, 20 deselected in 0.11s
+   ```
+
+3. The real headless smoke caught two pinned-MetaDrive integration defects:
+
+   ```powershell
+   .venv\Scripts\python.exe -m pytest tests/integration/test_phase5_metadrive_headless.py -q -m integration -k occluded
+   ```
+
+   RED #1: `scenario_road_geometry()` returned `None` because the return value
+   had been accidentally placed after the new lane-position helper. GREEN after
+   restoring the method boundary.
+
+   RED #2: MetaDrive 0.4.3 `StaticDefaultVehicle` rejected construction without
+   `vehicle_config`. GREEN after passing the required empty config.
+
+   Final GREEN:
+
+   ```text
+   1 passed, 2 deselected, 14 warnings in 5.80s
+   ```
+
+4. Coverage was initially 89.98%, just below the configured gate. Added tests
+   for current-lane conflict-distance recomputation, missing cyclist fail-fast,
+   and unexpected spawn IDs. The focused regression command then reported:
+
+   ```powershell
+   .venv\Scripts\python.exe -m pytest tests/unit/scenarios/test_occluded_crossing.py -q
+   ```
+
+   ```text
+   10 passed, 14 warnings in 4.15s
+   ```
+
+## Verification
+
+| Command | Result |
+| --- | --- |
+| `.venv\Scripts\python.exe -m pytest tests/unit/scenarios/test_occluded_crossing.py tests/unit/world_model/test_snapshot_builder.py tests/unit/agents/test_hazard.py -q` | 42 passed |
+| `.venv\Scripts\python.exe -m pytest tests/unit/scenarios/test_actor_manager.py tests/unit/scenarios/test_manager.py tests/unit/scenarios/test_factory.py tests/unit/config/test_loader.py -q` | 38 passed |
+| `.venv\Scripts\python.exe -m pytest tests/integration/test_phase5_metadrive_headless.py -q -m integration -k occluded` | 1 passed, 2 deselected |
+| `.venv\Scripts\python.exe -m pytest tests/integration/test_phase5_metadrive_headless.py -q -m integration` | 3 passed |
+| `.venv\Scripts\python.exe -m ruff check src tests` | All checks passed |
+| `.venv\Scripts\python.exe -m mypy src` | Success: no issues found in 63 source files |
+| `.venv\Scripts\python.exe -m pytest -q --cov=mad_driving --cov-report=term-missing` | 792 passed, 25 third-party warnings, 90.05% coverage |
+| `git diff --check` | exit 0 |
+
+The full-suite warnings are existing Matplotlib deprecations and Stable-Baselines
+evaluation-wrapper warnings; no test failures occurred.
+
+## Real MetaDrive coverage
+
+The `occluded` headless smoke verifies:
+
+- real `Cyclist` construction, stable ID/name, and `crash_human` info-field
+  support;
+- cyclist hidden from `visible_actors` while present in privileged
+  `all_actors` as `visible=False, occluded=True`;
+- deterministic reveal after the lateral boundary;
+- a finite privileged oracle TTC after ego movement;
+- identical same-seed cyclist trajectories; and
+- force-destroy cleanup across reset.
 
 ## Files changed
 
-- `src/mad_driving/interfaces/scene_frame.py` — frozen `OcclusionRegion` and `RoadContext`.
-- `src/mad_driving/interfaces/__init__.py` — exports the scene-frame primitives.
-- `src/mad_driving/scenarios/runtime.py` — lifecycle protocol, state/result/context types, and
-  `NoOpScenarioRuntime`.
-- `src/mad_driving/scenarios/__init__.py` — exports the runtime surface.
-- `tests/unit/interfaces/test_models.py` — validates invalid occlusion boundaries and non-finite
-  road conflict distances.
-- `tests/unit/scenarios/test_runtime.py` — exercises lifecycle stability, fail-closed occlusion,
-  visibility freezing, unique region IDs, and frozen scenario parameters.
+Created:
 
-## Self-review
+- `configs/scenarios/occluded_crossing.yaml`
+- `src/mad_driving/scenarios/actor_ids.py`
+- `src/mad_driving/scenarios/occluded_crossing.py`
+- `tests/unit/scenarios/test_occluded_crossing.py`
 
-- `OcclusionRegion` and `RoadContext` are frozen and reject empty IDs, malformed or non-finite
-  boundaries, and non-finite optional conflict distances.
-- `ScenarioState` takes a defensive parameter copy and exposes it through `MappingProxyType`.
-- `ScenarioObservationContext` defensively converts actor IDs to `frozenset[str]`, rejects
-  duplicate occlusion region IDs, and rejects active occlusion without visibility metadata.
-- `NoOpScenarioRuntime` holds only its immutable scenario ID, returns fresh immutable state, and
-  does not read or mutate the simulator in any lifecycle hook.
-- No `MultiAgentSpeedEnv` changes or runtime integration were made.
+Modified:
 
-## Concerns
+- `src/mad_driving/config/models.py`
+- `src/mad_driving/envs/control_metadrive_env.py`
+- `src/mad_driving/envs/multi_agent_speed_env.py`
+- `src/mad_driving/scenarios/__init__.py`
+- `src/mad_driving/scenarios/actor_manager.py`
+- `src/mad_driving/scenarios/actors.py`
+- `src/mad_driving/scenarios/manager.py`
+- `src/mad_driving/world_model/snapshot_builder.py`
+- `tests/integration/test_phase5_metadrive_headless.py`
+- `tests/unit/config/test_loader.py`
+- `tests/unit/scenarios/test_factory.py`
 
-No blocking concerns. The full test run emits unrelated dependency and integration warnings as
-noted above. Runtime-to-environment wiring remains intentionally deferred to Task 8.
+## Design decisions and concerns
 
-## Independent review fix (2026-07-21)
-
-### Scope
-
-Hardened `ScenarioObservationContext` validation only. No environment integration or Task 4
-surface was changed.
-
-### RED evidence
-
-After writing three focused regressions, the command below failed as expected:
-
-```powershell
-.venv\Scripts\python.exe -m pytest tests/unit/scenarios/test_runtime.py -q
-```
-
-Result: 3 failed, 4 passed. Each new test failed with `DID NOT RAISE ValueError`:
-
-- a non-`OcclusionRegion` object with a `region_id` attribute was accepted;
-- a numeric visible actor ID was accepted; and
-- a bare string visibility input was split into character IDs and accepted.
-
-### GREEN and verification evidence
-
-Minimal validation now rejects non-`OcclusionRegion` entries, bare string visibility inputs,
-and any non-string visibility ID while retaining tuple/frozenset defensive copies.
-
-```powershell
-.venv\Scripts\python.exe -m pytest tests/unit/scenarios/test_runtime.py -q
-.venv\Scripts\python.exe -m pytest tests/unit/scenarios tests/unit/interfaces/test_models.py -q
-.venv\Scripts\ruff.exe check src/mad_driving/scenarios tests/unit/scenarios
-.venv\Scripts\mypy.exe src/mad_driving/scenarios src/mad_driving/interfaces/scene_frame.py
-.venv\Scripts\python.exe -m pytest -q
-```
-
-Results: 7 runtime tests passed; 53 focused tests passed; Ruff reported `All checks passed!`;
-mypy reported `Success: no issues found in 4 source files`; full suite passed with 450 tests and
-19 pre-existing warnings in 27.66 seconds.
-
-### Review-fix files changed
-
-- `src/mad_driving/scenarios/runtime.py`
-- `tests/unit/scenarios/test_runtime.py`
-- `.superpowers/sdd/task-3-report.md`
+- The Cyclist is the real MetaDrive 0.4.3 class at
+  `metadrive.component.traffic_participants.cyclist.Cyclist`; the manager passes
+  its stable name directly to the engine.
+- The static occluder is positioned beyond the lane edge and displaced along the
+  lane to keep it clear of the cyclist's physical crossing path. Occlusion is a
+  deliberate logical observation boundary, not a camera/rendering model.
+- Exact contact attribution uses the Task 1 manager's MetaDrive Bullet contact
+  query, preventing unrelated vehicle/object collisions from becoming cyclist
+  scenario failures.
+- No Task 4 curriculum, provenance, contract, or documentation changes were
+  introduced.

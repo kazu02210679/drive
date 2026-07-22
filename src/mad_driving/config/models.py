@@ -76,6 +76,22 @@ class CutInScenarioConfig(StrictTypedFrozenModel):
     survival_s: FiniteFloat = Field(default=3.0, gt=0.0)
 
 
+class OccludedCrossingScenarioConfig(StrictTypedFrozenModel):
+    """Validated parameter ranges for the Level-3 cyclist crossing scenario."""
+
+    conflict_distance_m: FloatRangeConfig = FloatRangeConfig(minimum=20.0, maximum=40.0)
+    crossing_start_offset_m: FloatRangeConfig = FloatRangeConfig(minimum=6.0, maximum=12.0)
+    crossing_speed_mps: FloatRangeConfig = FloatRangeConfig(minimum=2.0, maximum=6.0)
+    trigger_s: FloatRangeConfig = FloatRangeConfig(minimum=1.0, maximum=3.0)
+    survival_s: FiniteFloat = Field(default=2.0, gt=0.0)
+    occluder_lane_edge_offset_m: FiniteFloat = Field(default=0.5, ge=0.5)
+    reveal_lateral_m: FiniteFloat = Field(default=3.0, gt=0.0)
+    secondary_lead_gap_m: FloatRangeConfig = FloatRangeConfig(minimum=35.0, maximum=55.0)
+    secondary_lead_speed_fraction: FloatRangeConfig = FloatRangeConfig(
+        minimum=0.80, maximum=1.00
+    )
+
+
 class ScenarioSplitsConfig(StrictTypedFrozenModel):
     """Disjoint scenario seed ranges for training and evaluation roles."""
 
@@ -86,6 +102,7 @@ class ScenarioSplitsConfig(StrictTypedFrozenModel):
     curriculum: CurriculumConfig = CurriculumConfig()
     lead_brake: LeadBrakeScenarioConfig = LeadBrakeScenarioConfig()
     cut_in: CutInScenarioConfig = CutInScenarioConfig()
+    occluded_crossing: OccludedCrossingScenarioConfig = OccludedCrossingScenarioConfig()
 
     @model_validator(mode="after")
     def validate_disjoint_ranges(self) -> Self:

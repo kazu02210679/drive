@@ -4,9 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from math import cos, inf, pi, sin
-from numbers import Integral
 from typing import TYPE_CHECKING, Any
-from uuid import UUID
 
 from mad_driving.interfaces import (
     ActorState,
@@ -18,6 +16,7 @@ from mad_driving.interfaces import (
     SceneObservation,
 )
 from mad_driving.interfaces.actor_state import ActorType
+from mad_driving.scenarios.actor_ids import stable_actor_id
 from mad_driving.scenarios.seeding import EpisodeSeeds
 from mad_driving.world_model.validation import (
     ConfigReader,
@@ -252,7 +251,7 @@ class SceneSnapshotBuilder:
             )
             dx = position[0] - ego_position[0]
             dy = position[1] - ego_position[1]
-            actor_id = self._actor_id(object_key, simulator_object)
+            actor_id = stable_actor_id(object_key, simulator_object)
             actor_lane = self._current_lane(simulator_object)
             visible = visible_actor_ids is None or actor_id in visible_actor_ids
             actors.append(
@@ -284,18 +283,6 @@ class SceneSnapshotBuilder:
         if len(actor_ids) != len(set(actor_ids)):
             raise ValueError("simulator actors produced a duplicate actor_id")
         return tuple(sorted(actors, key=lambda actor: actor.actor_id))
-
-    @staticmethod
-    def _actor_id(object_key: object, simulator_object: Any) -> str:
-        actor_id = str(getattr(simulator_object, "name", object_key))
-        try:
-            UUID(actor_id)
-        except ValueError:
-            return actor_id
-        random_seed = getattr(simulator_object, "random_seed", None)
-        if isinstance(random_seed, bool) or not isinstance(random_seed, Integral):
-            return actor_id
-        return f"metadrive-{type(simulator_object).__name__}-{int(random_seed)}"
 
     @staticmethod
     def _normalized_heading(name: str, value: Any) -> float:

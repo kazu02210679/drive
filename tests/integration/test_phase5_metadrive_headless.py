@@ -129,3 +129,96 @@ def test_real_cut_in_is_deterministic_merges_and_cleans_up() -> None:
         assert previous_actor not in manager.engine.get_objects().values()
     finally:
         environment.close()
+
+
+def run_occluded_crossing_prefix() -> tuple[tuple[tuple[float, float], ...], bool]:
+    environment = MultiAgentSpeedEnv(
+        load_config("configs/base.yaml", "configs/scenarios/occluded_crossing.yaml"),
+        role="train",
+        worker_index=0,
+    )
+    try:
+        _observation, info = environment.reset(seed=42)
+        assert info["scenario_id"] == "occluded_crossing"
+        manager = environment._environment.engine.scenario_actor_manager
+        assert manager.actor_ids() == ("crossing-cyclist", "static-occluder", "crossing-lead")
+        cyclist = manager.engine.get_objects(["crossing-cyclist"])["crossing-cyclist"]
+        assert cyclist.id == "crossing-cyclist"
+        assert type(cyclist).__name__ == "Cyclist"
+        assert isinstance(info["crash_human"], bool)
+
+        reset_frame = environment._frame
+        assert reset_frame is not None
+        assert "crossing-cyclist" not in {
+            actor.actor_id for actor in reset_frame.observation.visible_actors
+        }
+        privileged = {actor.actor_id: actor for actor in reset_frame.privileged.all_actors}
+        assert privileged["crossing-cyclist"].visible is False
+        assert privileged["crossing-cyclist"].occluded is True
+
+        _observation, reward, terminated, truncated, _info = environment.step(0)
+        assert math.isfinite(reward)
+        assert not (terminated or truncated)
+        moving_frame = environment._frame
+        assert moving_frame is not None
+        assert moving_frame.privileged.minimum_actual_ttc_s is not None
+        assert math.isfinite(moving_frame.privileged.minimum_actual_ttc_s)
+
+        parameters = info["scenario_parameters"]
+        trigger_step = parameters["trigger_step"]
+        crossing_start_offset_m = parameters["crossing_start_offset_m"]
+        crossing_speed_mps = parameters["crossing_speed_mps"]
+        reveal_lateral_m = parameters["reveal_lateral_m"]
+        assert isinstance(trigger_step, int)
+        assert isinstance(crossing_start_offset_m, float)
+        assert isinstance(crossing_speed_mps, float)
+        assert isinstance(reveal_lateral_m, float)
+        reveal_steps = math.ceil(
+            (crossing_start_offset_m - reveal_lateral_m) / crossing_speed_mps / 0.1
+        )
+        positions: list[tuple[float, float]] = []
+        revealed = False
+        for _ in range(1, trigger_step + reveal_steps + 2):
+            _observation, reward, terminated, truncated, _info = environment.step(3)
+            assert math.isfinite(reward)
+            assert not (terminated or truncated)
+            positions.append(manager.actor_state("crossing-cyclist").position_xy_m)
+            frame = environment._frame
+            assert frame is not None
+            actor_ids = {actor.actor_id for actor in frame.observation.visible_actors}
+            if "crossing-cyclist" in actor_ids:
+                revealed = True
+                break
+        assert revealed is True
+        crossing_contact = environment._environment.scenario_ego_collided_with(
+            "crossing-cyclist"
+        )
+        return tuple(positions), crossing_contact
+    finally:
+        environment.close()
+
+
+@pytest.mark.integration
+def test_real_occluded_crossing_is_hidden_then_revealed_deterministic_and_cleans_up() -> None:
+    first_positions, first_contact = run_occluded_crossing_prefix()
+    second_positions, second_contact = run_occluded_crossing_prefix()
+
+    assert first_positions == second_positions
+    assert first_contact is False
+    assert second_contact is False
+
+    environment = MultiAgentSpeedEnv(
+        load_config("configs/base.yaml", "configs/scenarios/occluded_crossing.yaml"),
+        role="train",
+        worker_index=0,
+    )
+    try:
+        environment.reset(seed=42)
+        manager = environment._environment.engine.scenario_actor_manager
+        previous_cyclist = manager.engine.get_objects(["crossing-cyclist"])["crossing-cyclist"]
+        environment.reset(seed=43)
+
+        assert previous_cyclist not in manager.engine.get_objects().values()
+        assert manager.actor_ids() == ("crossing-cyclist", "static-occluder", "crossing-lead")
+    finally:
+        environment.close()

@@ -10,11 +10,13 @@ from mad_driving.scenarios.actors import (
     ScenarioActorCommand,
     ScenarioActorState,
     StaticOccluderSpawn,
+    VelocityCommand,
 )
 from mad_driving.scenarios.cut_in import CutInRuntime
 from mad_driving.scenarios.factory import ScenarioRuntimeFactory, build_scenario_runtime_factory
 from mad_driving.scenarios.lead_brake import LeadBrakeRuntime, NominalScenarioRuntime
 from mad_driving.scenarios.manager import ScenarioManagerRuntime
+from mad_driving.scenarios.occluded_crossing import OccludedCrossingRuntime
 from mad_driving.scenarios.parameters import ScenarioParameterSampler
 from mad_driving.scenarios.runtime import (
     NoOpScenarioRuntime,
@@ -42,6 +44,7 @@ __all__ = [
     "LeadBrakeRuntime",
     "NoOpScenarioRuntime",
     "NominalScenarioRuntime",
+    "OccludedCrossingRuntime",
     "RoadGeometry",
     "ScenarioActorCommand",
     "ScenarioActorManager",
@@ -55,5 +58,6 @@ __all__ = [
     "ScenarioStepResult",
     "ScenarioTransition",
     "StaticOccluderSpawn",
+    "VelocityCommand",
     "build_scenario_runtime_factory",
 ]

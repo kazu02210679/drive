@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from mad_driving.config.models import ScenarioSplitsConfig
 from mad_driving.scenarios.cut_in import CutInRuntime
 from mad_driving.scenarios.lead_brake import LeadBrakeRuntime, NominalScenarioRuntime
+from mad_driving.scenarios.occluded_crossing import OccludedCrossingRuntime
 from mad_driving.scenarios.parameters import ScenarioParameterSampler
 from mad_driving.scenarios.runtime import (
     ScenarioObservationContext,
@@ -141,6 +142,11 @@ class ScenarioManagerRuntime:
             ),
             "cut_in": lambda level, sampler: CutInRuntime(
                 self._config.cut_in,
+                sampler,
+                difficulty_level=level,
+            ),
+            "occluded_crossing": lambda level, sampler: OccludedCrossingRuntime(
+                self._config.occluded_crossing,
                 sampler,
                 difficulty_level=level,
             ),

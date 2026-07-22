@@ -69,6 +69,15 @@ def test_overlay_selects_fixed_cut_in() -> None:
     assert config.scenarios.cut_in.initial_gap_m.maximum == 40.0
 
 
+def test_overlay_selects_fixed_occluded_crossing() -> None:
+    config = load_config("configs/base.yaml", "configs/scenarios/occluded_crossing.yaml")
+
+    assert config.scenarios.selection == "occluded_crossing"
+    assert config.scenarios.curriculum.fixed_level == 3
+    assert config.scenarios.occluded_crossing.conflict_distance_m.minimum == 20.0
+    assert config.scenarios.occluded_crossing.conflict_distance_m.maximum == 40.0
+
+
 def test_overlay_rejects_mapping_scalar_conflict(tmp_path: Path) -> None:
     overlay = tmp_path / "bad.yaml"
     overlay.write_text("scenarios:\n  lead_brake: 4\n", encoding="utf-8")

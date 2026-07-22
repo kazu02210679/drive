@@ -150,7 +150,21 @@ class LanePoseCommand:
         require_finite("lateral_m", self.lateral_m)
 
 
-ScenarioActorCommand = ActorCommand | LanePoseCommand
+@dataclass(frozen=True)
+class VelocityCommand:
+    """A world-frame velocity command for one scripted crossing actor."""
+
+    direction_xy: tuple[float, float]
+    speed_mps: float
+
+    def __post_init__(self) -> None:
+        require_finite_values("direction_xy", self.direction_xy, length=2)
+        require_non_negative("speed_mps", self.speed_mps)
+        if self.speed_mps > 0.0 and self.direction_xy == (0.0, 0.0):
+            raise ValueError("direction_xy must be non-zero when speed_mps is positive")
+
+
+ScenarioActorCommand = ActorCommand | LanePoseCommand | VelocityCommand
 
 
 @dataclass(frozen=True)

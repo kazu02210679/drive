@@ -16,6 +16,7 @@ from mad_driving.scenarios import (
     ScenarioActorState,
     StaticOccluderSpawn,
 )
+from mad_driving.scenarios.actor_ids import stable_actor_id
 
 
 def create_control_metadrive_env(
@@ -110,6 +111,14 @@ def create_control_metadrive_env(
                 lane_width_m=float(lane.width_at(longitudinal)),
             )
 
+        def scenario_lane_position(
+            self, lane_index: tuple[str, str, int], longitudinal_m: float, lateral_m: float
+        ) -> tuple[float, float]:
+            position = self.engine.current_map.road_network.get_lane(lane_index).position(
+                longitudinal_m, lateral_m
+            )
+            return float(position[0]), float(position[1])
+
         def scenario_spawn_lane_vehicle(self, spawn: LaneVehicleSpawn) -> str:
             return self._scenario_actor_manager().spawn_lane_vehicle(spawn)
 
@@ -127,6 +136,12 @@ def create_control_metadrive_env(
 
         def scenario_actor_ids(self) -> tuple[str, ...]:
             return self._scenario_actor_manager().actor_ids()
+
+        def scenario_visible_actor_ids(self) -> frozenset[str]:
+            return frozenset(
+                stable_actor_id(object_key, simulator_object)
+                for object_key, simulator_object in self.engine.get_objects().items()
+            )
 
         def scenario_ego_collided_with(self, actor_id: str) -> bool:
             return self._scenario_actor_manager().ego_collided_with(self.vehicle, actor_id)
