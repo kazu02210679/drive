@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -8,12 +9,14 @@ from mad_driving.cli import control_smoke as control_smoke_module
 from mad_driving.cli.control_smoke import main, run_control_smoke
 from mad_driving.config.models import AppConfig, ControlConfig
 from mad_driving.interfaces import CriticReview, SceneObservation
+from mad_driving.world_model import SceneSnapshotBuilder
 from tests.unit.agents.factories import make_analysis, make_claim
 
 
 class FakeLane:
     speed_limit = 36.0
     index = ("A", "B", 0)
+    width = 3.5
 
     @staticmethod
     def local_coordinates(position: tuple[float, float]) -> tuple[float, float]:
@@ -163,6 +166,21 @@ class FailedAgentSuite:
         )
 
 
+class StepIdentifiedSuite:
+    def analyze(self, observation: SceneObservation) -> AgentAnalysisResult:
+        step_index = observation.step_index
+        return make_analysis(
+            claims=(
+                make_claim(
+                    "nominal",
+                    claim_id=f"nominal:{step_index}:none:test",
+                    valid_until_step=step_index,
+                ),
+            ),
+            expected_agent_ids=("nominal",),
+        )
+
+
 def test_control_smoke_runs_decision_pipeline_and_closes() -> None:
     created: list[FakeControlEnv] = []
 
@@ -185,6 +203,119 @@ def test_control_smoke_runs_decision_pipeline_and_closes() -> None:
     assert result.action_counts == (2, 0, 0, 0)
     assert result.final_trace.executed_action == 0
     assert result.final_trace.target_speed_mps == 10.0
+
+
+def test_control_smoke_trace_uses_pre_step_analysis_and_current_shield_timing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock_values = iter(
+        (
+            0,
+            2_000_000,
+            3_000_000,
+            4_000_000,
+            5_000_000,
+            9_000_000,
+            10_000_000,
+            12_500_000,
+            20_000_000,
+            29_000_000,
+        )
+    )
+    monkeypatch.setattr(
+        control_smoke_module,
+        "time",
+        SimpleNamespace(perf_counter_ns=lambda: next(clock_values)),
+        raising=False,
+    )
+
+    result = run_control_smoke(
+        make_config(),
+        env_factory=FakeControlEnv,
+        suite_factory=lambda config: StepIdentifiedSuite(),
+    )
+
+    assert result.final_trace.claims[0].claim_id == "nominal:1:none:test"
+    assert result.final_claims[0].claim_id == "nominal:2:none:test"
+    assert result.final_trace.analysis_latency_ms == pytest.approx(4.0)
+    assert result.final_trace.shield_latency_ms == pytest.approx(2.5)
+
+
+def test_default_builder_uses_resolved_hazard_oracle_constants(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_values = make_config().model_dump(mode="python")
+    hazard_values = config_values["agents"]["hazard"]  # type: ignore[index]
+    assert isinstance(hazard_values, dict)
+    hazard_values.update(
+        {
+            "reaction_delay_s": 0.25,
+            "ego_max_safe_deceleration_mps2": -2.0,
+        }
+    )
+    config = AppConfig.model_validate(config_values)
+    real_builder = SceneSnapshotBuilder
+    margins: list[float | None] = []
+
+    class CapturingSceneSnapshotBuilder:
+        def __init__(
+            self,
+            *,
+            reaction_delay_s: float,
+            safe_deceleration_mps2: float,
+        ) -> None:
+            self._delegate = real_builder(
+                reaction_delay_s=reaction_delay_s,
+                safe_deceleration_mps2=safe_deceleration_mps2,
+            )
+
+        def build(self, *args: Any, **kwargs: Any):
+            frame = self._delegate.build(*args, **kwargs)
+            margins.append(frame.privileged.minimum_actual_stopping_margin_m)
+            return frame
+
+    class LeadVehicle(FakeVehicle):
+        name = "lead"
+        position = (6.0, 0.0)
+        velocity = (0.0, 0.0)
+        last_velocity = (0.0, 0.0)
+        speed = 0.0
+
+    env = FakeControlEnv({})
+    lead = LeadVehicle()
+    env.engine.get_objects = lambda: {"ego": env.vehicle, "lead": lead}  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        control_smoke_module,
+        "SceneSnapshotBuilder",
+        CapturingSceneSnapshotBuilder,
+    )
+
+    result = run_control_smoke(
+        config,
+        env_factory=lambda options, control: env,
+    )
+
+    assert result.steps_completed == 2
+    assert margins
+    assert all(margin == pytest.approx(1.0) for margin in margins)
+
+
+def test_injected_builder_factory_remains_no_argument() -> None:
+    calls = 0
+
+    def builder_factory() -> SceneSnapshotBuilder:
+        nonlocal calls
+        calls += 1
+        return SceneSnapshotBuilder(reaction_delay_s=0.1, safe_deceleration_mps2=3.0)
+
+    result = run_control_smoke(
+        make_config(),
+        env_factory=FakeControlEnv,
+        builder_factory=builder_factory,
+    )
+
+    assert result.steps_completed == 2
+    assert calls == 1
 
 
 def test_analysis_failure_executes_stop_and_still_closes() -> None:
