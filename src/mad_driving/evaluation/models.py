@@ -879,7 +879,7 @@ def _canonical_reward_components(
         for name in REWARD_COMPONENT_KEYS
     }
     total = _require_finite("reward_total", reward_total)
-    if math.fsum(normalized.values()) != total:
+    if sum(normalized[name] for name in REWARD_COMPONENT_KEYS) != total:
         raise ValueError("reward_total must equal the sum of reward_components")
     return _FrozenFloatMapping(normalized)
 

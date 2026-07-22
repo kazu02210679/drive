@@ -227,6 +227,19 @@ def test_step_record_requires_reward_total_to_equal_exact_component_sum() -> Non
         make_step(reward_total=0.500_000_000_5)
 
 
+def test_step_record_accepts_exact_reward_calculator_sum_in_canonical_order() -> None:
+    components = {name: 0.0 for name in REWARD_COMPONENT_KEYS}
+    components["progress_reward"] = 0.1
+    components["collision_penalty"] = -0.6
+    components["near_miss_penalty"] = -0.3
+    producer_total = sum(components[name] for name in REWARD_COMPONENT_KEYS)
+    assert producer_total == -0.8
+
+    record = make_step(reward_components=components, reward_total=producer_total)
+
+    assert record.reward_total == producer_total
+
+
 @pytest.mark.parametrize(
     "frame_path",
     ["", "/tmp/frame.png", "../frame.png", "frames/../frame.png", "C:/frames/frame.png"],
