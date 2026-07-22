@@ -222,6 +222,11 @@ def test_step_record_requires_exact_reward_component_keys() -> None:
         make_step(reward_components=extra)
 
 
+def test_step_record_requires_reward_total_to_equal_exact_component_sum() -> None:
+    with pytest.raises(ValueError, match="reward_total"):
+        make_step(reward_total=0.500_000_000_5)
+
+
 @pytest.mark.parametrize(
     "frame_path",
     ["", "/tmp/frame.png", "../frame.png", "frames/../frame.png", "C:/frames/frame.png"],
@@ -272,6 +277,22 @@ def test_strict_from_dict_rejects_missing_and_unknown_fields() -> None:
         EvaluationStepRecord.from_dict(payload)
 
 
+def test_step_from_dict_rejects_boolean_difficulty_level() -> None:
+    payload = make_step().to_dict()
+    payload["difficulty_level"] = True
+
+    with pytest.raises(ValueError, match="difficulty_level"):
+        EvaluationStepRecord.from_dict(payload)
+
+
+def test_episode_from_dict_rejects_boolean_difficulty_level() -> None:
+    payload = make_episode().to_dict()
+    payload["difficulty_level"] = True
+
+    with pytest.raises(ValueError, match="difficulty_level"):
+        EvaluationEpisodeRecord.from_dict(payload)
+
+
 def test_strict_from_dict_rejects_non_boolean_claim_and_review_fields() -> None:
     payload = make_step().to_dict()
     claims = payload["claims"]
@@ -287,6 +308,20 @@ def test_strict_from_dict_rejects_non_boolean_claim_and_review_fields() -> None:
     review["unresolved_conflict"] = 0
     with pytest.raises(ValueError, match="CriticReview"):
         EvaluationStepRecord.from_dict(payload)
+
+
+@pytest.mark.parametrize(
+    "error",
+    (
+        "nominal:Evil\x00:message",
+        "nominal:Evil-Type:message",
+        "nominal:Runtime Error:message",
+        f"nominal:{'E' * 129}:message",
+    ),
+)
+def test_step_record_rejects_unsanitized_or_malformed_exception_type(error: str) -> None:
+    with pytest.raises(ValueError, match="exception type"):
+        make_step(failed_agent_ids=("nominal",), errors=(error,))
 
 
 def test_importing_evaluation_does_not_load_simulator_or_training_framework() -> None:

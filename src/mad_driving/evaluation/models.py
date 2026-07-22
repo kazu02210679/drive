@@ -11,9 +11,9 @@ from types import MappingProxyType
 from typing import Any, Literal, NoReturn, Self, cast, get_args
 from unicodedata import category
 
-from pydantic import Field, PositiveInt, model_validator
+from pydantic import Field, field_validator, model_validator
 
-from mad_driving.config.models import MethodId, StrictFrozenModel
+from mad_driving.config.models import MethodId, StrictTypedFrozenModel
 from mad_driving.interfaces import CollisionKind, CriticReview, RiskClaim
 from mad_driving.methods import MethodProfileSnapshot
 
@@ -56,6 +56,7 @@ _SHIELD_MODES = frozenset(get_args(ShieldMode))
 _COLLISION_KINDS = frozenset(get_args(CollisionKind))
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 _MAX_ERROR_MESSAGE_LENGTH = 256
+_PYTHON_EXCEPTION_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}\Z")
 _REPLACED_ERROR_CATEGORIES = frozenset({"Cc", "Zl", "Zp"})
 
 
@@ -189,12 +190,18 @@ class EvaluationRunSpec:
         )
 
 
-class PpoRunBinding(StrictFrozenModel):
+class PpoRunBinding(StrictTypedFrozenModel):
     """Plan provenance binding one PPO method seed to its training run."""
 
     method_id: MethodId
     policy_seed: int = Field(ge=0)
     training_run_dir: Path
+
+    @field_validator("training_run_dir", mode="before")
+    @classmethod
+    def validate_training_run_dir(cls, value: object) -> Path:
+        del cls
+        return _strict_non_empty_path(value, "training_run_dir")
 
     @model_validator(mode="after")
     def validate_ppo_binding(self) -> Self:
@@ -207,16 +214,28 @@ class PpoRunBinding(StrictFrozenModel):
         return self
 
 
-class EvaluationPlanConfig(StrictFrozenModel):
+class EvaluationPlanConfig(StrictTypedFrozenModel):
     """Strict YAML boundary for one smoke or formal evaluation plan."""
 
     plan_kind: Literal["phase6_smoke", "phase6_formal"]
     evaluation_id: str = Field(min_length=1)
     app_config_path: Path
-    episodes_per_case: PositiveInt
+    episodes_per_case: int = Field(gt=0)
     test_seed_start: int = Field(ge=TEST_SEED_START, lt=TEST_SEED_STOP)
     ppo_run_bindings: tuple[PpoRunBinding, ...]
     capture_episode_keys: tuple[str, ...]
+
+    @field_validator("app_config_path", mode="before")
+    @classmethod
+    def validate_app_config_path(cls, value: object) -> Path:
+        del cls
+        return _strict_non_empty_path(value, "app_config_path")
+
+    @field_validator("ppo_run_bindings", "capture_episode_keys", mode="before")
+    @classmethod
+    def normalize_yaml_sequences(cls, value: object) -> object:
+        del cls
+        return tuple(value) if isinstance(value, list) else value
 
     @model_validator(mode="after")
     def validate_unique_values(self) -> Self:
@@ -653,6 +672,18 @@ def _require_non_empty_string(name: str, value: object) -> str:
     return value
 
 
+def _strict_non_empty_path(value: object, name: str) -> Path:
+    if isinstance(value, Path):
+        raw_value = str(value)
+    elif isinstance(value, str):
+        raw_value = value
+    else:
+        raise ValueError(f"{name} must be a non-empty string path")
+    if not raw_value.strip() or raw_value == ".":
+        raise ValueError(f"{name} must be a non-empty string path")
+    return Path(raw_value)
+
+
 def _require_episode_seed(role: EvaluationRole, seed: object) -> int:
     seed_value = _require_int("episode_rng_seed", seed, minimum=0)
     bounds = (
@@ -750,6 +781,7 @@ def _validate_case_identity(
 ) -> None:
     if case_id not in _CASES_BY_ID:
         raise ValueError("case_id is unknown")
+    _require_int("difficulty_level", difficulty_level, minimum=0, maximum=3)
     case = _CASES_BY_ID[cast(ScenarioCellId, case_id)]
     if scenario_id != case.scenario_id or difficulty_level != case.difficulty_level:
         raise ValueError("case_id, scenario_id, and difficulty_level are inconsistent")
@@ -847,7 +879,7 @@ def _canonical_reward_components(
         for name in REWARD_COMPONENT_KEYS
     }
     total = _require_finite("reward_total", reward_total)
-    if not math.isclose(math.fsum(normalized.values()), total, rel_tol=0.0, abs_tol=1e-9):
+    if math.fsum(normalized.values()) != total:
         raise ValueError("reward_total must equal the sum of reward_components")
     return _FrozenFloatMapping(normalized)
 
@@ -995,6 +1027,8 @@ def _validate_error_mapping(failed: tuple[str, ...], errors: tuple[str, ...]) ->
         exception_type, separator, message = error[len(agent_id) + 1 :].partition(":")
         if not exception_type or not separator:
             raise ValueError("errors must use agent:type:message format")
+        if not _PYTHON_EXCEPTION_NAME_PATTERN.fullmatch(exception_type):
+            raise ValueError("errors exception type must be a bounded sanitized Python name")
         if len(message) > _MAX_ERROR_MESSAGE_LENGTH or any(
             category(character) in _REPLACED_ERROR_CATEGORIES for character in message
         ):

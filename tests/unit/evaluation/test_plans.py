@@ -54,6 +54,35 @@ def checkpoints(seeds: tuple[int, ...]) -> dict[tuple[str, int], str]:
     }
 
 
+def write_plan_yaml(
+    path: Path,
+    *,
+    episodes_per_case: str = "1",
+    test_seed_start: str = "20000",
+    policy_seed: str = "42",
+    app_config_path: str = "configs/base.yaml",
+    training_run_dir: str = "runs/proposed/seed-42",
+) -> None:
+    path.write_text(
+        "\n".join(
+            (
+                "plan_kind: phase6_smoke",
+                "evaluation_id: strict-plan",
+                f"app_config_path: {app_config_path}",
+                f"episodes_per_case: {episodes_per_case}",
+                f"test_seed_start: {test_seed_start}",
+                "ppo_run_bindings:",
+                "  - method_id: proposed",
+                f"    policy_seed: {policy_seed}",
+                f"    training_run_dir: {training_run_dir}",
+                "capture_episode_keys: []",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 def test_smoke_plan_has_exact_tracks_shields_cells_seeds_and_order() -> None:
     config = make_config("phase6_smoke", (77,))
     plan = build_smoke_plan(config, checkpoints((77,)))
@@ -208,3 +237,51 @@ def test_plan_config_rejects_duplicate_capture_episode_keys() -> None:
 
     with pytest.raises(ValidationError, match="capture_episode_keys"):
         EvaluationPlanConfig.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("field", "yaml_value"),
+    (
+        ("episodes_per_case", "1.0"),
+        ("episodes_per_case", "'1'"),
+        ("episodes_per_case", "true"),
+        ("test_seed_start", "20000.0"),
+        ("test_seed_start", "'20000'"),
+        ("test_seed_start", "true"),
+        ("policy_seed", "42.0"),
+        ("policy_seed", "'42'"),
+        ("policy_seed", "true"),
+    ),
+)
+def test_plan_yaml_rejects_coerced_integer_fields(
+    tmp_path: Path, field: str, yaml_value: str
+) -> None:
+    path = tmp_path / f"invalid-{field}.yaml"
+    overrides = {field: yaml_value}
+    write_plan_yaml(path, **overrides)  # type: ignore[arg-type]
+
+    with pytest.raises(ValidationError, match=field):
+        load_evaluation_plan(path)
+
+
+@pytest.mark.parametrize("yaml_value", ('""', '"   "'))
+@pytest.mark.parametrize("field", ("app_config_path", "training_run_dir"))
+def test_plan_yaml_rejects_empty_or_whitespace_paths(
+    tmp_path: Path, field: str, yaml_value: str
+) -> None:
+    path = tmp_path / f"invalid-{field}.yaml"
+    overrides = {field: yaml_value}
+    write_plan_yaml(path, **overrides)  # type: ignore[arg-type]
+
+    with pytest.raises(ValidationError, match=field):
+        load_evaluation_plan(path)
+
+
+def test_plan_yaml_converts_valid_string_paths_without_numeric_coercion(tmp_path: Path) -> None:
+    path = tmp_path / "valid.yaml"
+    write_plan_yaml(path)
+
+    config = load_evaluation_plan(path)
+
+    assert config.app_config_path == Path("configs/base.yaml")
+    assert config.ppo_run_bindings[0].training_run_dir == Path("runs/proposed/seed-42")
