@@ -97,6 +97,19 @@ def test_concrete_selection_uses_only_the_configured_allowed_scenario() -> None:
     assert state.scenario_id == "lead_brake"
 
 
+def test_default_registry_builds_cut_in_at_level_two() -> None:
+    runtime = ScenarioManagerRuntime(
+        ScenarioSplitsConfig(
+            selection="cut_in",
+            curriculum={"mode": "fixed", "fixed_level": 2},
+        )
+    )
+
+    state = runtime.reset(FakeEnvironment(), seeds=EpisodeSeeds(1, 2, 3))
+
+    assert state.scenario_id == "cut_in"
+
+
 def test_concrete_selection_rejects_a_scenario_outside_the_active_level() -> None:
     runtime = make_manager(level=0, selection="lead_brake")
 

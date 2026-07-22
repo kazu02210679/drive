@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import pytest
 
-from mad_driving.scenarios import ActorCommand, LaneVehicleSpawn, ScenarioActorManager
+from mad_driving.scenarios import (
+    ActorCommand,
+    LanePoseCommand,
+    LaneVehicleSpawn,
+    ScenarioActorManager,
+)
 
 
 class FakeActor:
@@ -15,9 +20,29 @@ class FakeActor:
         self.LENGTH = 4.5
         self.WIDTH = 1.8
         self.commands: list[ActorCommand] = []
+        self.position_calls: list[tuple[float, float]] = []
 
     def set_longitudinal_acceleration(self, command: ActorCommand) -> None:
         self.commands.append(command)
+
+    def set_position(self, position: tuple[float, float]) -> None:
+        self.position_calls.append(position)
+        self.position = position
+
+
+class FakeLane:
+    def position(self, longitudinal_m: float, lateral_m: float) -> tuple[float, float]:
+        return (longitudinal_m, lateral_m)
+
+
+class FakeRoadNetwork:
+    def get_lane(self, lane_index: tuple[str, str, int]) -> FakeLane:
+        del lane_index
+        return FakeLane()
+
+
+class FakeMap:
+    road_network = FakeRoadNetwork()
 
 
 class FakeEngine:
@@ -25,6 +50,7 @@ class FakeEngine:
         self.objects: dict[str, FakeActor] = {}
         self.spawn_calls: list[dict[str, object]] = []
         self.global_config = {"physics_world_step_size": 0.02, "decision_repeat": 5}
+        self.current_map = FakeMap()
 
     def spawn_object(self, object_class: object, **kwargs: object) -> FakeActor:
         del object_class
@@ -83,6 +109,17 @@ def test_actor_manager_forwards_pending_command_before_step() -> None:
 
     actor = manager.engine.get_objects(["lead"])["lead"]
     assert actor.commands == [command]
+
+
+def test_actor_manager_applies_lane_pose_command_before_step() -> None:
+    manager = manager_with_fake_engine()
+    manager.spawn_lane_vehicle(LaneVehicleSpawn("cut-in", (">", ">>", 1), 40.0, 0.0, 8.0))
+
+    manager.command_actor("cut-in", LanePoseCommand((">", ">>", 0), 42.0, 1.5))
+    manager.before_step()
+
+    actor = manager.engine.get_objects(["cut-in"])["cut-in"]
+    assert actor.position_calls == [(42.0, 1.5)]
 
 
 def test_actor_manager_rejects_duplicate_actor_ids() -> None:

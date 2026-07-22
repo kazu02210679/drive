@@ -4,11 +4,14 @@ from mad_driving.scenarios.actor_manager import ScenarioActorManager
 from mad_driving.scenarios.actors import (
     ActorCommand,
     KinematicActorSpawn,
+    LanePoseCommand,
     LaneVehicleSpawn,
     RoadGeometry,
+    ScenarioActorCommand,
     ScenarioActorState,
     StaticOccluderSpawn,
 )
+from mad_driving.scenarios.cut_in import CutInRuntime
 from mad_driving.scenarios.factory import ScenarioRuntimeFactory, build_scenario_runtime_factory
 from mad_driving.scenarios.lead_brake import LeadBrakeRuntime, NominalScenarioRuntime
 from mad_driving.scenarios.manager import ScenarioManagerRuntime
@@ -29,15 +32,18 @@ from mad_driving.scenarios.seeding import (
 
 __all__ = [
     "ActorCommand",
+    "CutInRuntime",
     "EnvironmentRole",
     "EpisodeSeedAllocator",
     "EpisodeSeeds",
     "KinematicActorSpawn",
+    "LanePoseCommand",
     "LaneVehicleSpawn",
     "LeadBrakeRuntime",
     "NoOpScenarioRuntime",
     "NominalScenarioRuntime",
     "RoadGeometry",
+    "ScenarioActorCommand",
     "ScenarioActorManager",
     "ScenarioActorState",
     "ScenarioManagerRuntime",

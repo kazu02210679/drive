@@ -8,6 +8,7 @@ from numbers import Integral
 from typing import TYPE_CHECKING
 
 from mad_driving.config.models import ScenarioSplitsConfig
+from mad_driving.scenarios.cut_in import CutInRuntime
 from mad_driving.scenarios.lead_brake import LeadBrakeRuntime, NominalScenarioRuntime
 from mad_driving.scenarios.parameters import ScenarioParameterSampler
 from mad_driving.scenarios.runtime import (
@@ -135,6 +136,11 @@ class ScenarioManagerRuntime:
             ),
             "lead_brake": lambda level, sampler: LeadBrakeRuntime(
                 self._config.lead_brake,
+                sampler,
+                difficulty_level=level,
+            ),
+            "cut_in": lambda level, sampler: CutInRuntime(
+                self._config.cut_in,
                 sampler,
                 difficulty_level=level,
             ),

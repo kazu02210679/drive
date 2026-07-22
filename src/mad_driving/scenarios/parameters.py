@@ -1,9 +1,12 @@
 """Deterministic per-episode scenario parameter sampling."""
 
 from numbers import Integral
+from typing import TypeVar
 
 import numpy as np
 from numpy.random import Generator
+
+_Choice = TypeVar("_Choice")
 
 
 class ScenarioParameterSampler:
@@ -20,7 +23,7 @@ class ScenarioParameterSampler:
         del name
         return float(self._generator.uniform(minimum, maximum))
 
-    def choose(self, values: tuple[str, ...]) -> str:
+    def choose(self, values: tuple[_Choice, ...]) -> _Choice:
         """Choose one item from a stable, non-empty ordered scenario table."""
 
         if not values:

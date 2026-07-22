@@ -60,6 +60,15 @@ def test_overlay_selects_fixed_lead_brake() -> None:
     assert config.scenarios.selection == "lead_brake"
 
 
+def test_overlay_selects_fixed_cut_in() -> None:
+    config = load_config("configs/base.yaml", "configs/scenarios/cut_in.yaml")
+
+    assert config.scenarios.selection == "cut_in"
+    assert config.scenarios.curriculum.fixed_level == 2
+    assert config.scenarios.cut_in.initial_gap_m.minimum == 20.0
+    assert config.scenarios.cut_in.initial_gap_m.maximum == 40.0
+
+
 def test_overlay_rejects_mapping_scalar_conflict(tmp_path: Path) -> None:
     overlay = tmp_path / "bad.yaml"
     overlay.write_text("scenarios:\n  lead_brake: 4\n", encoding="utf-8")

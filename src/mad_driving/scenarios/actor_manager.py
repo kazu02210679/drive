@@ -14,7 +14,9 @@ from metadrive.manager.base_manager import BaseManager  # type: ignore[import-un
 from mad_driving.scenarios.actors import (
     ActorCommand,
     KinematicActorSpawn,
+    LanePoseCommand,
     LaneVehicleSpawn,
+    ScenarioActorCommand,
     ScenarioActorState,
     StaticOccluderSpawn,
 )
@@ -27,7 +29,7 @@ class ScenarioActorManager(BaseManager):  # type: ignore[misc]
 
     def __init__(self, *, engine: Any | None = None) -> None:
         self._engine_override = engine
-        self._pending_commands: dict[str, ActorCommand] = {}
+        self._pending_commands: dict[str, ScenarioActorCommand] = {}
         self._states: dict[str, ScenarioActorState] = {}
         if engine is None:
             super().__init__()
@@ -84,12 +86,12 @@ class ScenarioActorManager(BaseManager):  # type: ignore[misc]
             setter(True)
         return actor_id
 
-    def command_actor(self, actor_id: str, command: ActorCommand) -> None:
+    def command_actor(self, actor_id: str, command: ScenarioActorCommand) -> None:
         """Queue a command for the next MetaDrive manager before-step hook."""
 
         self._require_actor(actor_id)
-        if not isinstance(command, ActorCommand):
-            raise TypeError("scenario actor command must be an ActorCommand")
+        if not isinstance(command, ActorCommand | LanePoseCommand):
+            raise TypeError("scenario actor command must be a supported command type")
         self._pending_commands[actor_id] = command
 
     def actor_state(self, actor_id: str) -> ScenarioActorState:
@@ -110,17 +112,22 @@ class ScenarioActorManager(BaseManager):  # type: ignore[misc]
         del args, kwargs
         for actor_id, command in tuple(self._pending_commands.items()):
             actor = self._require_actor(actor_id)
-            setter = getattr(actor, "set_longitudinal_acceleration", None)
-            if callable(setter):
-                setter(command)
+            if isinstance(command, ActorCommand):
+                setter = getattr(actor, "set_longitudinal_acceleration", None)
+                if callable(setter):
+                    setter(command)
+                else:
+                    speed = float(getattr(actor, "speed", 0.0))
+                    next_speed = max(
+                        0.0,
+                        speed
+                        + command.longitudinal_acceleration_mps2 * self._decision_interval_s(),
+                    )
+                    heading = float(getattr(actor, "heading_theta", 0.0))
+                    actor.set_velocity((cos(heading), sin(heading)), next_speed)
             else:
-                speed = float(getattr(actor, "speed", 0.0))
-                next_speed = max(
-                    0.0,
-                    speed + command.longitudinal_acceleration_mps2 * self._decision_interval_s(),
-                )
-                heading = float(getattr(actor, "heading_theta", 0.0))
-                actor.set_velocity((cos(heading), sin(heading)), next_speed)
+                lane = self.engine.current_map.road_network.get_lane(command.lane_index)
+                actor.set_position(lane.position(command.longitudinal_m, command.lateral_m))
         self._pending_commands.clear()
         return {}
 
@@ -133,11 +140,12 @@ class ScenarioActorManager(BaseManager):  # type: ignore[misc]
         return {}
 
     def before_reset(self) -> None:
-        """Discard pending data and let BaseManager clear all owned objects."""
+        """Destroy owned scenario actors so no episode state can be recycled."""
 
         self._pending_commands.clear()
         self._states.clear()
-        super().before_reset()
+        self.clear_objects(list(self.spawned_objects), force_destroy=True)
+        self.spawned_objects = {}
 
     def _spawn(self, actor_id: str, object_class: type[Any], **kwargs: object) -> str:
         if actor_id in self.spawned_objects:

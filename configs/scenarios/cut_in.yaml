@@ -1,0 +1,6 @@
+scenario_id: phase5
+scenarios:
+  selection: cut_in
+  curriculum:
+    mode: fixed
+    fixed_level: 2

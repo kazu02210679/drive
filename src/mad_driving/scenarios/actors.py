@@ -39,6 +39,8 @@ class RoadGeometry:
     ego_lateral_m: float
     ego_speed_mps: float
     decision_interval_s: float
+    adjacent_lane_indices: tuple[LaneIndex, ...] = ()
+    lane_width_m: float = 3.5
 
     def __post_init__(self) -> None:
         _validate_lane_index(self.ego_lane_index)
@@ -46,6 +48,17 @@ class RoadGeometry:
         require_finite("ego_lateral_m", self.ego_lateral_m)
         require_non_negative("ego_speed_mps", self.ego_speed_mps)
         require_positive("decision_interval_s", self.decision_interval_s)
+        adjacent_lane_indices = tuple(self.adjacent_lane_indices)
+        if adjacent_lane_indices != tuple(sorted(adjacent_lane_indices)):
+            raise ValueError("adjacent_lane_indices must be in stable sorted order")
+        if len(adjacent_lane_indices) != len(set(adjacent_lane_indices)):
+            raise ValueError("adjacent_lane_indices must not contain duplicates")
+        for lane_index in adjacent_lane_indices:
+            _validate_lane_index(lane_index)
+            if lane_index == self.ego_lane_index:
+                raise ValueError("adjacent_lane_indices must not contain ego_lane_index")
+        require_positive("lane_width_m", self.lane_width_m)
+        object.__setattr__(self, "adjacent_lane_indices", adjacent_lane_indices)
 
 
 @dataclass(frozen=True)
@@ -121,6 +134,23 @@ class ActorCommand:
         """Create one finite longitudinal acceleration command."""
 
         return cls(acceleration_mps2)
+
+
+@dataclass(frozen=True)
+class LanePoseCommand:
+    """A lane-relative scripted pose command for one scenario actor."""
+
+    lane_index: LaneIndex
+    longitudinal_m: float
+    lateral_m: float
+
+    def __post_init__(self) -> None:
+        _validate_lane_index(self.lane_index)
+        require_finite("longitudinal_m", self.longitudinal_m)
+        require_finite("lateral_m", self.lateral_m)
+
+
+ScenarioActorCommand = ActorCommand | LanePoseCommand
 
 
 @dataclass(frozen=True)

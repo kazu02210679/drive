@@ -40,13 +40,13 @@ from mad_driving.interfaces import (
 )
 from mad_driving.safety import SafetyShield
 from mad_driving.scenarios import (
-    ActorCommand,
     EnvironmentRole,
     EpisodeSeedAllocator,
     EpisodeSeeds,
     KinematicActorSpawn,
     LaneVehicleSpawn,
     RoadGeometry,
+    ScenarioActorCommand,
     ScenarioActorState,
     ScenarioObservationContext,
     ScenarioRuntime,
@@ -85,7 +85,7 @@ class DrivingEnvironment(Protocol):
 
     def scenario_spawn_occluder(self, spawn: StaticOccluderSpawn) -> str: ...
 
-    def scenario_command_actor(self, actor_id: str, command: ActorCommand) -> None: ...
+    def scenario_command_actor(self, actor_id: str, command: ScenarioActorCommand) -> None: ...
 
     def scenario_actor_state(self, actor_id: str) -> ScenarioActorState: ...
 

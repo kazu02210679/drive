@@ -8,10 +8,10 @@ from mad_driving.config.models import ControlConfig
 from mad_driving.control import LaneKeepingLongitudinalPolicy
 from mad_driving.envs.multi_agent_speed_env import DrivingEnvironment
 from mad_driving.scenarios import (
-    ActorCommand,
     KinematicActorSpawn,
     LaneVehicleSpawn,
     RoadGeometry,
+    ScenarioActorCommand,
     ScenarioActorManager,
     ScenarioActorState,
     StaticOccluderSpawn,
@@ -87,13 +87,27 @@ def create_control_metadrive_env(
             lane_index = tuple(self.vehicle.lane_index)
             if len(lane_index) != 3:
                 raise RuntimeError("ego lane index must contain three values")
+            normalized_lane_index = (str(lane_index[0]), str(lane_index[1]), int(lane_index[2]))
+            road_network = self.engine.current_map.road_network
+            road_lanes = road_network.graph[normalized_lane_index[0]][normalized_lane_index[1]]
+            adjacent_lane_indices = tuple(
+                candidate
+                for candidate in sorted(
+                    (normalized_lane_index[0], normalized_lane_index[1], lane_id)
+                    for lane_id in range(len(road_lanes))
+                    if abs(lane_id - normalized_lane_index[2]) == 1
+                )
+                if road_network.get_lane(candidate) is not None
+            )
             return RoadGeometry(
-                ego_lane_index=(str(lane_index[0]), str(lane_index[1]), int(lane_index[2])),
+                ego_lane_index=normalized_lane_index,
                 ego_longitudinal_m=float(longitudinal),
                 ego_lateral_m=float(lateral),
                 ego_speed_mps=float(self.vehicle.speed),
                 decision_interval_s=float(self.config["physics_world_step_size"])
                 * int(self.config["decision_repeat"]),
+                adjacent_lane_indices=adjacent_lane_indices,
+                lane_width_m=float(lane.width_at(longitudinal)),
             )
 
         def scenario_spawn_lane_vehicle(self, spawn: LaneVehicleSpawn) -> str:
@@ -105,7 +119,7 @@ def create_control_metadrive_env(
         def scenario_spawn_occluder(self, spawn: StaticOccluderSpawn) -> str:
             return self._scenario_actor_manager().spawn_occluder(spawn)
 
-        def scenario_command_actor(self, actor_id: str, command: ActorCommand) -> None:
+        def scenario_command_actor(self, actor_id: str, command: ScenarioActorCommand) -> None:
             self._scenario_actor_manager().command_actor(actor_id, command)
 
         def scenario_actor_state(self, actor_id: str) -> ScenarioActorState:

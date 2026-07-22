@@ -66,6 +66,16 @@ class LeadBrakeScenarioConfig(StrictTypedFrozenModel):
     survival_s: FiniteFloat = Field(default=4.0, gt=0.0)
 
 
+class CutInScenarioConfig(StrictTypedFrozenModel):
+    """Validated parameter ranges for the Cut-in scenario."""
+
+    initial_gap_m: FloatRangeConfig = FloatRangeConfig(minimum=20.0, maximum=40.0)
+    trigger_s: FloatRangeConfig = FloatRangeConfig(minimum=1.0, maximum=3.0)
+    merge_duration_s: FloatRangeConfig = FloatRangeConfig(minimum=1.5, maximum=3.0)
+    speed_fraction: FloatRangeConfig = FloatRangeConfig(minimum=0.75, maximum=1.05)
+    survival_s: FiniteFloat = Field(default=3.0, gt=0.0)
+
+
 class ScenarioSplitsConfig(StrictTypedFrozenModel):
     """Disjoint scenario seed ranges for training and evaluation roles."""
 
@@ -75,6 +85,7 @@ class ScenarioSplitsConfig(StrictTypedFrozenModel):
     selection: Literal["auto", "nominal", "lead_brake", "cut_in", "occluded_crossing"] = "auto"
     curriculum: CurriculumConfig = CurriculumConfig()
     lead_brake: LeadBrakeScenarioConfig = LeadBrakeScenarioConfig()
+    cut_in: CutInScenarioConfig = CutInScenarioConfig()
 
     @model_validator(mode="after")
     def validate_disjoint_ranges(self) -> Self:
