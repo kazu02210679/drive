@@ -802,10 +802,11 @@ def test_discovery_rejects_malformed_zip_and_duplicate_data_member(tmp_path: Pat
         tmp_path / "malformed",
         malformed_checkpoints=frozenset({"final_model.zip"}),
     )
-    duplicate = completed_training_run(
-        tmp_path / "duplicate",
-        duplicate_data_members=frozenset({"final_model.zip"}),
-    )
+    with pytest.warns(UserWarning, match="Duplicate name: 'data'"):
+        duplicate = completed_training_run(
+            tmp_path / "duplicate",
+            duplicate_data_members=frozenset({"final_model.zip"}),
+        )
 
     with pytest.raises(ValueError, match="ZIP|checkpoint"):
         discover_checkpoint_candidates(malformed)

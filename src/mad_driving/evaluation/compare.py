@@ -329,6 +329,21 @@ def write_comparison_csv(path: Path, rows: Sequence[ComparisonRow]) -> None:
     values = tuple(rows)
     if any(type(row) is not ComparisonRow for row in values):
         raise TypeError("rows must contain ComparisonRow values")
+    tracks = {row.track for row in values}
+    required_tracks = set(_METHODS_BY_TRACK)
+    if tracks != required_tracks:
+        raise ValueError(
+            "comparison rows required tracks mismatch: "
+            f"expected {sorted(required_tracks)}, got {sorted(tracks)}"
+        )
+    for track, method_ids in _METHODS_BY_TRACK.items():
+        actual_methods = {row.method_id for row in values if row.track == track}
+        expected_methods = set(method_ids)
+        if actual_methods != expected_methods:
+            raise ValueError(
+                f"comparison rows track {track} required methods mismatch: "
+                f"expected {sorted(expected_methods)}, got {sorted(actual_methods)}"
+            )
     payload = tuple(
         {
             "result_label": row.result_label,

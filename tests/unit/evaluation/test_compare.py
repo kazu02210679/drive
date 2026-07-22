@@ -174,6 +174,46 @@ def test_validation_rejects_a_wholly_missing_required_track(missing_track: str) 
         validate_matched_episodes(incomplete)
 
 
+def test_comparison_csv_writer_rejects_a_missing_required_track(tmp_path: Path) -> None:
+    rows = tuple(
+        row for row in build_comparison_rows(_matched_records()) if row.track != "ablation"
+    )
+    destination = tmp_path / "comparison.csv"
+
+    with pytest.raises(ValueError, match="required tracks"):
+        write_comparison_csv(destination, rows)
+
+    assert not destination.exists()
+
+
+def test_comparison_csv_writer_rejects_a_missing_required_method(tmp_path: Path) -> None:
+    rows = tuple(
+        row
+        for row in build_comparison_rows(_matched_records())
+        if not (row.track == "decision" and row.method_id == "proposed")
+    )
+    destination = tmp_path / "comparison.csv"
+
+    with pytest.raises(ValueError, match="required methods"):
+        write_comparison_csv(destination, rows)
+
+    assert not destination.exists()
+
+
+def test_comparison_csv_writer_rejects_an_extra_track_method(tmp_path: Path) -> None:
+    rows = build_comparison_rows(_matched_records())
+    extra = replace(
+        next(row for row in rows if row.track == "system" and row.method_id == "b0_rule")
+    )
+    object.__setattr__(extra, "track", "decision")
+    destination = tmp_path / "comparison.csv"
+
+    with pytest.raises(ValueError, match="required methods"):
+        write_comparison_csv(destination, (*rows, extra))
+
+    assert not destination.exists()
+
+
 def test_comparison_uses_matched_physical_episodes_then_policy_replicates() -> None:
     rows = build_comparison_rows(_matched_records())
     proposed_reward = next(
