@@ -38,6 +38,7 @@ from mad_driving.evaluation.selection import (
     ValidationPhysicalIdentity,
     discover_checkpoint_candidates,
     select_checkpoint,
+    validate_ppo_checkpoint_archive,
     write_selection_artifacts,
 )
 from mad_driving.evaluation.serialization import (
@@ -89,6 +90,7 @@ __all__ = [
     "run_evaluation_episode",
     "select_checkpoint",
     "validate_matched_episodes",
+    "validate_ppo_checkpoint_archive",
     "write_comparison_csv",
     "write_eval_metrics_csv",
     "write_jsonl_strict",

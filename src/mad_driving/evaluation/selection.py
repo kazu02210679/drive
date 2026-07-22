@@ -419,6 +419,27 @@ def _checkpoint_training_timestep(checkpoint: Path, expected_sha256: str) -> int
     return timestep
 
 
+def validate_ppo_checkpoint_archive(checkpoint_path: Path) -> str:
+    """Validate one stable SB3 ZIP boundary and return its authenticated digest."""
+
+    checkpoint = _validated_regular_file(Path(checkpoint_path), "PPO checkpoint")
+    try:
+        with checkpoint.open("rb", buffering=0) as source:
+            signature = _file_stat_signature(os.fstat(source.fileno()))
+            _assert_checkpoint_unchanged(checkpoint, source.fileno(), signature)
+            digest = hashlib.sha256()
+            while chunk := source.read(_FILE_READ_CHUNK_BYTES):
+                digest.update(chunk)
+            _assert_checkpoint_unchanged(checkpoint, source.fileno(), signature)
+    except ValueError:
+        raise
+    except OSError as error:
+        raise ValueError(f"PPO checkpoint is unreadable: {checkpoint}") from error
+    result = digest.hexdigest()
+    _checkpoint_training_timestep(checkpoint, result)
+    return result
+
+
 def _resolved_method_and_seed(config: Mapping[str, object]) -> tuple[str, int]:
     method = config.get("method")
     if not isinstance(method, Mapping) or set(method) != {"id"}:
@@ -712,5 +733,6 @@ __all__ = [
     "ValidationPhysicalIdentity",
     "discover_checkpoint_candidates",
     "select_checkpoint",
+    "validate_ppo_checkpoint_archive",
     "write_selection_artifacts",
 ]

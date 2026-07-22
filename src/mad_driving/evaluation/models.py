@@ -222,12 +222,21 @@ class PpoRunBinding(StrictTypedFrozenModel):
     method_id: MethodId
     policy_seed: int = Field(ge=0)
     training_run_dir: Path
+    checkpoint_path: Path | None = None
 
     @field_validator("training_run_dir", mode="before")
     @classmethod
     def validate_training_run_dir(cls, value: object) -> Path:
         del cls
         return _strict_non_empty_path(value, "training_run_dir")
+
+    @field_validator("checkpoint_path", mode="before")
+    @classmethod
+    def validate_checkpoint_path(cls, value: object) -> Path | None:
+        del cls
+        if value is None:
+            return None
+        return _strict_non_empty_path(value, "checkpoint_path")
 
     @model_validator(mode="after")
     def validate_ppo_binding(self) -> Self:
@@ -245,7 +254,11 @@ class EvaluationPlanConfig(StrictTypedFrozenModel):
 
     plan_kind: Literal["phase6_smoke", "phase6_formal"]
     evaluation_id: str = Field(min_length=1)
+    is_formal: bool | None = None
+    result_label: str | None = None
     app_config_path: Path
+    method_overlays: tuple[Path, ...] = ()
+    max_episode_steps: int | None = Field(default=None, gt=0)
     episodes_per_case: int = Field(gt=0)
     test_seed_start: int = Field(ge=TEST_SEED_START, lt=TEST_SEED_STOP)
     ppo_run_bindings: tuple[PpoRunBinding, ...]
@@ -256,6 +269,15 @@ class EvaluationPlanConfig(StrictTypedFrozenModel):
     def validate_app_config_path(cls, value: object) -> Path:
         del cls
         return _strict_non_empty_path(value, "app_config_path")
+
+    @field_validator("method_overlays", mode="before")
+    @classmethod
+    def normalize_method_overlays(cls, value: object) -> object:
+        del cls
+        values = tuple(value) if isinstance(value, list | tuple) else value
+        if not isinstance(values, tuple):
+            return values
+        return tuple(_strict_non_empty_path(item, "method_overlays") for item in values)
 
     @field_validator("ppo_run_bindings", "capture_episode_keys", mode="before")
     @classmethod
@@ -274,6 +296,10 @@ class EvaluationPlanConfig(StrictTypedFrozenModel):
             self.capture_episode_keys
         ) != len(set(self.capture_episode_keys)):
             raise ValueError("capture_episode_keys must contain unique non-empty strings")
+        if len(self.method_overlays) != len(set(self.method_overlays)):
+            raise ValueError("method_overlays must not contain duplicate paths")
+        for overlay in self.method_overlays:
+            _strict_non_empty_path(overlay, "method_overlays")
         if not str(self.app_config_path):
             raise ValueError("app_config_path must not be empty")
         return self
