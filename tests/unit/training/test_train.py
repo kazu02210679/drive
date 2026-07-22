@@ -2226,7 +2226,9 @@ class RemoteCloseFailingSubprocVecEnv:
 
 def test_subprocess_cleanup_confirms_workers_dead_before_reporting_construction_failure(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(train_module, "_monotonic", lambda: 0.0, raising=False)
     dummy = VecFactory()
 
     with pytest.raises(OSError, match="subprocess handshake failed"):
@@ -2255,7 +2257,11 @@ def test_subprocess_cleanup_confirms_workers_dead_before_reporting_construction_
     assert dummy.created == []
 
 
-def test_subprocess_cleanup_refuses_fallback_when_worker_survives(tmp_path: Path) -> None:
+def test_subprocess_cleanup_refuses_fallback_when_worker_survives(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(train_module, "_monotonic", lambda: 0.0, raising=False)
     dummy = VecFactory()
 
     with pytest.raises(OSError, match="subprocess handshake failed") as raised:
