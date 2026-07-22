@@ -7,12 +7,8 @@ from dataclasses import dataclass, replace
 from typing import Protocol
 from unicodedata import category
 
-from mad_driving.agents.critic import CriticAgent
-from mad_driving.agents.hazard import HazardAgent
-from mad_driving.agents.nominal import NominalMotionAgent
 from mad_driving.agents.protocol import DrivingAgent
-from mad_driving.agents.rule import RuleAgent
-from mad_driving.config.models import AgentsConfig
+from mad_driving.config.models import AgentsConfig, MethodId
 from mad_driving.interfaces import CriticReview, RiskClaim, SceneObservation
 from mad_driving.interfaces.defensive_validation import valid_claim
 
@@ -100,13 +96,12 @@ class AgentSuite:
     critic: ReviewingAgent
 
     @classmethod
-    def from_config(cls, config: AgentsConfig) -> AgentSuite:
-        return cls(
-            nominal=NominalMotionAgent(config.nominal),
-            hazard=HazardAgent(config.hazard),
-            rule=RuleAgent(config.rule),
-            critic=CriticAgent(config.critic),
-        )
+    def from_config(
+        cls, config: AgentsConfig, method_id: MethodId = "proposed"
+    ) -> AgentSuite:
+        from mad_driving.methods import build_method_suite
+
+        return build_method_suite(config, method_id)
 
     @property
     def expected_agent_ids(self) -> tuple[str, ...]:

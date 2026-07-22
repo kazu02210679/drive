@@ -2,6 +2,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
+from mad_driving.agents import NoOpCritic
 from mad_driving.agents.claim_factory import neutral_claim
 from mad_driving.agents.suite import AgentAnalysisResult, AgentSuite, analyze_safely
 from mad_driving.config.models import AgentsConfig
@@ -19,6 +20,17 @@ def test_suite_returns_claims_in_fixed_order_and_one_review() -> None:
         "rule",
     )
     assert isinstance(result.review, CriticReview)
+
+
+def test_from_config_selects_method_through_the_central_registry() -> None:
+    suite = AgentSuite.from_config(AgentsConfig(), method_id="b1_nominal")
+
+    result = suite.analyze(make_snapshot())
+
+    assert suite.expected_agent_ids == ("nominal",)
+    assert isinstance(suite.critic, NoOpCritic)
+    assert result.expected_agent_ids == ("nominal",)
+    assert result.review.reasons == ("critic_intentionally_disabled",)
 
 
 def test_suite_is_stateless_and_deterministic() -> None:
