@@ -224,6 +224,130 @@ def test_episode_metric_record_requires_exact_concrete_members() -> None:
 
 
 @pytest.mark.parametrize(
+    "changes",
+    [
+        {"collision": 1},
+        {"unnecessary_braking_event_count": -1},
+        {"raw_unsafe_request_rate": 1.1},
+        {"shield_intervention_rate": nan},
+        {"minimum_actual_ttc_s": -0.1},
+        {"minimum_stopping_margin_m": nan},
+        {"final_route_completion": 1.1},
+        {"average_speed_mps": -0.1},
+        {"simulated_travel_time_s": -0.1},
+        {"longitudinal_jerk_rms_mps3": -0.1},
+        {"decision_latency_p99_ms": -0.1},
+        {"episode_reward": nan},
+    ],
+)
+def test_episode_metrics_rejects_invalid_scalar_values(changes: dict[str, object]) -> None:
+    metrics = reduce_episode((make_step(),), 0.1)
+
+    with pytest.raises((TypeError, ValueError)):
+        replace(metrics, **changes)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {
+            "agent_disagreement_eligible_steps": 1,
+            "agent_disagreement_count": 2,
+            "agent_disagreement_rate": 2.0,
+        },
+        {
+            "agent_disagreement_eligible_steps": 2,
+            "agent_disagreement_count": 1,
+            "agent_disagreement_rate": 0.4,
+        },
+        {
+            "agent_disagreement_eligible_steps": 0,
+            "agent_disagreement_count": 0,
+            "agent_disagreement_rate": 0.0,
+        },
+        {
+            "critic_challenge_eligible_steps": 1,
+            "critic_challenge_count": 0,
+            "critic_challenge_rate": None,
+        },
+        {
+            "critic_challenge_eligible_steps": 1,
+            "critic_challenge_count": 1,
+            "critic_challenge_rate": 1.0,
+            "critic_found_missed_danger_count": 2,
+            "critic_found_missed_danger_rate": 2.0,
+        },
+        {
+            "critic_challenge_eligible_steps": 1,
+            "critic_challenge_count": 1,
+            "critic_challenge_rate": 1.0,
+            "critic_false_challenge_count": 0,
+            "critic_false_challenge_rate": None,
+        },
+    ],
+)
+def test_episode_metrics_rejects_inconsistent_counts_and_rates(
+    changes: dict[str, object],
+) -> None:
+    metrics = reduce_episode((make_step(),), 0.1)
+
+    with pytest.raises(ValueError):
+        replace(metrics, **changes)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"crossing_actor_collision": True},
+        {"collision": True, "near_miss": True},
+        {"minimum_stopping_margin_m": -0.1},
+        {"negative_stopping_margin": True},
+    ],
+)
+def test_episode_metrics_rejects_inconsistent_safety_flags(
+    changes: dict[str, object],
+) -> None:
+    metrics = reduce_episode((make_step(),), 0.1)
+
+    with pytest.raises(ValueError):
+        replace(metrics, **changes)
+
+
+@pytest.mark.parametrize(
+    "inconsistency",
+    [
+        "collision",
+        "crossing_kind",
+        "scenario_success",
+        "off_road",
+        "reward",
+        "duration",
+    ],
+)
+def test_episode_metric_record_rejects_summary_metric_inconsistency(
+    inconsistency: str,
+) -> None:
+    episode = make_episode()
+    metrics = reduce_episode((make_step(),), 0.1)
+    if inconsistency == "collision":
+        episode = replace(episode, collision_occurred=True, collision_kind="vehicle")
+    elif inconsistency == "crossing_kind":
+        episode = replace(episode, collision_occurred=True, collision_kind="crossing_actor")
+        metrics = replace(metrics, collision=True)
+    elif inconsistency == "scenario_success":
+        episode = replace(episode, scenario_success=True)
+    elif inconsistency == "off_road":
+        episode = replace(episode, off_road=True)
+    elif inconsistency == "reward":
+        episode = replace(episode, cumulative_reward=2.0)
+    else:
+        episode = replace(episode, simulated_duration_s=0.2)
+
+    with pytest.raises(ValueError):
+        EpisodeMetricRecord(episode, metrics)
+
+
+@pytest.mark.parametrize(
     ("records", "decision_dt_s", "near_miss_ttc_s", "message"),
     [
         ((), 0.1, 3.0, "non-empty"),
@@ -253,10 +377,84 @@ def test_reducer_rejects_records_from_more_than_one_episode() -> None:
         reduce_episode((make_step(), other), 0.1)
 
 
+@pytest.mark.parametrize(
+    ("field_name", "replacement"),
+    [
+        ("checkpoint_path", "runs/proposed/seed-42/replaced.zip"),
+        ("checkpoint_sha256", "b" * 64),
+        ("method_profile", MethodProfileSnapshot.from_method_id("b2_multi_no_review")),
+        ("episode_key", replace(make_step().episode_key, policy_seed=43)),
+        ("episode_rng_seed", 10_002),
+        ("case_id", "level2_lead_brake"),
+        ("scenario_id", "cut_in"),
+        ("difficulty_level", 2),
+        ("metadrive_scenario_index", 18),
+        ("scenario_selection_seed", 32),
+        ("scenario_parameter_seed", 38),
+    ],
+)
+def test_reducer_rejects_mixed_step_contract_fields(
+    field_name: str,
+    replacement: object,
+) -> None:
+    first = make_step(0, terminated=False)
+    second = make_step(1)
+    object.__setattr__(second, field_name, replacement)
+
+    with pytest.raises(ValueError, match="episode contract"):
+        reduce_episode((first, second), 0.1)
+
+
+@pytest.mark.parametrize(
+    ("durations", "expected_events"),
+    [
+        ((0.05,), 1),
+        ((0.1,), 1),
+        ((0.1, 0.2), 1),
+        ((0.1, 0.1, 0.2), 2),
+    ],
+)
+def test_unnecessary_braking_counts_rising_edges_from_zero_baseline(
+    durations: tuple[float, ...],
+    expected_events: int,
+) -> None:
+    records = tuple(
+        make_step(
+            index,
+            cumulative_unnecessary_stop_duration_s=duration,
+            terminated=index == len(durations) - 1,
+        )
+        for index, duration in enumerate(durations)
+    )
+
+    metrics = reduce_episode(records, 0.1)
+
+    assert metrics.unnecessary_braking_event_count == expected_events
+    assert metrics.unnecessary_stop_duration_s == durations[-1]
+
+
+def test_unnecessary_braking_rejects_cumulative_duration_decrease() -> None:
+    records = (
+        make_step(0, cumulative_unnecessary_stop_duration_s=0.1, terminated=False),
+        make_step(1, cumulative_unnecessary_stop_duration_s=0.0),
+    )
+
+    with pytest.raises(ValueError, match="cumulative_unnecessary_stop_duration_s"):
+        reduce_episode(records, 0.1)
+
+
+def test_unnecessary_braking_rejects_increment_inconsistent_with_decision_interval() -> None:
+    with pytest.raises(ValueError, match="decision interval"):
+        reduce_episode(
+            (make_step(cumulative_unnecessary_stop_duration_s=0.2),),
+            0.1,
+        )
+
+
 def test_reducer_computes_hand_calculated_trajectory_metrics() -> None:
     speeds = (2.0, 4.0, 6.0, 8.0, 10.0)
     accelerations = (1.0, -2.0, -3.0, 1.0, 1.0)
-    stop_durations = (0.0, 0.1, 0.2, 0.2, 0.3)
+    stop_durations = (0.0, 0.5, 1.0, 1.0, 1.5)
     latencies = (50.0, 10.0, 40.0, 20.0, 30.0)
     records = tuple(
         make_step(
@@ -302,7 +500,7 @@ def test_reducer_computes_hand_calculated_trajectory_metrics() -> None:
     assert metrics.average_speed_mps == 6.0
     assert metrics.simulated_travel_time_s == 2.5
     assert metrics.unnecessary_braking_event_count == 2
-    assert metrics.unnecessary_stop_duration_s == 0.3
+    assert metrics.unnecessary_stop_duration_s == 1.5
     assert metrics.longitudinal_acceleration_rms_mps2 == pytest.approx(sqrt(3.2))
     assert metrics.maximum_deceleration_mps2 == 3.0
     assert metrics.longitudinal_jerk_rms_mps3 == pytest.approx(sqrt(26.0))

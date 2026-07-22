@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import csv
 import json
-import math
 import re
 import stat
+import zipfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 from mad_driving.evaluation.metrics import EpisodeMetricRecord
 from mad_driving.evaluation.models import EVALUATION_CASES
@@ -18,7 +18,7 @@ from mad_driving.methods import MethodProfileSnapshot
 
 CheckpointKind = Literal["periodic", "level_best", "final"]
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
-_PERIODIC_PATTERN = re.compile(r"ppo_checkpoint_[0-9]+_steps\.zip\Z")
+_PERIODIC_PATTERN = re.compile(r"ppo_checkpoint_([0-9]+)_steps\.zip\Z")
 _LEVEL_BEST_PATTERN = re.compile(r"best_model_level_[0-3]\.zip\Z")
 _FILE_ATTRIBUTE_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 _MODEL_SELECTION_COLUMNS = (
@@ -44,6 +44,7 @@ class CheckpointCandidate:
     policy_seed: int
     checkpoint_kind: CheckpointKind
     curriculum_level: int
+    training_timestep: int
 
     def __post_init__(self) -> None:
         path = Path(self.path)
@@ -63,7 +64,51 @@ class CheckpointCandidate:
             raise ValueError("candidate checkpoint_kind is unknown")
         if type(self.curriculum_level) is not int or not 0 <= self.curriculum_level <= 3:
             raise ValueError("candidate curriculum_level must be from 0 through 3")
+        if type(self.training_timestep) is not int or self.training_timestep < 0:
+            raise ValueError("candidate training_timestep must be a non-negative integer")
         object.__setattr__(self, "path", path)
+
+
+def _plain_json(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {key: _plain_json(value[key]) for key in sorted(value)}
+    if isinstance(value, list | tuple):
+        return [_plain_json(item) for item in value]
+    return value
+
+
+@dataclass(frozen=True)
+class ValidationPhysicalIdentity:
+    """Canonical ordered identity of one physically instantiated validation episode."""
+
+    case_id: str
+    episode_rng_seed: int
+    scenario_id: str
+    difficulty_level: int
+    metadrive_scenario_index: int
+    scenario_selection_seed: int
+    scenario_parameter_seed: int
+    canonical_sampled_scenario_parameters: str
+
+    @classmethod
+    def from_record(cls, record: EpisodeMetricRecord) -> ValidationPhysicalIdentity:
+        episode = record.episode
+        return cls(
+            case_id=episode.case_id,
+            episode_rng_seed=episode.episode_rng_seed,
+            scenario_id=episode.scenario_id,
+            difficulty_level=episode.difficulty_level,
+            metadrive_scenario_index=episode.metadrive_scenario_index,
+            scenario_selection_seed=episode.scenario_selection_seed,
+            scenario_parameter_seed=episode.scenario_parameter_seed,
+            canonical_sampled_scenario_parameters=json.dumps(
+                _plain_json(episode.sampled_scenario_parameters),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ),
+        )
 
 
 @dataclass(frozen=True)
@@ -71,6 +116,7 @@ class CheckpointScore:
     candidate: CheckpointCandidate
     training_timestep: int
     validation_plan_sha256: str
+    validation_plan_rows: tuple[tuple[str, int], ...]
     episodes: tuple[EpisodeMetricRecord, ...]
 
     def __post_init__(self) -> None:
@@ -78,6 +124,8 @@ class CheckpointScore:
             raise TypeError("candidate must be a CheckpointCandidate")
         if type(self.training_timestep) is not int or self.training_timestep < 0:
             raise ValueError("training_timestep must be a non-negative integer")
+        if self.training_timestep != self.candidate.training_timestep:
+            raise ValueError("training_timestep does not match the authenticated candidate")
         if (
             not isinstance(self.validation_plan_sha256, str)
             or _SHA256_PATTERN.fullmatch(self.validation_plan_sha256) is None
@@ -87,13 +135,27 @@ class CheckpointScore:
             raise ValueError("episodes must be a non-empty tuple")
         if any(type(record) is not EpisodeMetricRecord for record in self.episodes):
             raise TypeError("episodes must contain EpisodeMetricRecord values")
+        if not isinstance(self.validation_plan_rows, tuple) or any(
+            type(row) is not tuple
+            or len(row) != 2
+            or not isinstance(row[0], str)
+            or type(row[1]) is not int
+            or row[1] < 0
+            for row in self.validation_plan_rows
+        ):
+            raise ValueError("validation_plan_rows must be ordered case/RNG pairs")
         expected_cases = {case.case_id for case in EVALUATION_CASES}
         actual_cases = {record.episode.case_id for record in self.episodes}
         if actual_cases != expected_cases:
             raise ValueError("checkpoint score must cover the fixed all-level validation cases")
         matrix = self.validation_matrix
+        if matrix != self.validation_plan_rows:
+            raise ValueError("checkpoint score episodes do not bind the validation plan rows")
+        physical_identities = self.physical_identities
+        if len(physical_identities) != len(set(physical_identities)):
+            raise ValueError("checkpoint score contains a duplicate physical identity")
         if len(matrix) != len(set(matrix)):
-            raise ValueError("checkpoint score contains a duplicate validation matrix row")
+            raise ValueError("checkpoint score contains a duplicate validation plan row")
         tracks = {record.episode.episode_key.track for record in self.episodes}
         if len(tracks) != 1:
             raise ValueError("checkpoint score must use one validation track")
@@ -101,20 +163,8 @@ class CheckpointScore:
             episode = record.episode
             key = episode.episode_key
             metrics = record.metrics
-            if type(metrics.collision) is not bool or type(metrics.scenario_success) is not bool:
-                raise ValueError("checkpoint ranking indicators must be boolean")
-            for name, value in (
-                ("episode_reward", metrics.episode_reward),
-                ("final_route_completion", metrics.final_route_completion),
-            ):
-                if (
-                    isinstance(value, bool)
-                    or not isinstance(value, int | float)
-                    or not math.isfinite(value)
-                ):
-                    raise ValueError(f"checkpoint ranking {name} must be finite")
-            if not 0.0 <= metrics.final_route_completion <= 1.0:
-                raise ValueError("checkpoint ranking final_route_completion is out of range")
+            metrics.__post_init__()
+            record.__post_init__()
             if key.role != "validation":
                 raise ValueError("checkpoint scores accept validation episodes only")
             if (
@@ -139,6 +189,10 @@ class CheckpointScore:
     @property
     def validation_track(self) -> str:
         return self.episodes[0].episode.episode_key.track
+
+    @property
+    def physical_identities(self) -> tuple[ValidationPhysicalIdentity, ...]:
+        return tuple(ValidationPhysicalIdentity.from_record(record) for record in self.episodes)
 
     @property
     def mean_episode_reward(self) -> float:
@@ -204,6 +258,48 @@ def _json_equivalent(left: object, right: object) -> bool:
     return type(left) is type(right) and left == right
 
 
+def _strict_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON field: {key}")
+        result[key] = value
+    return result
+
+
+def _strict_json_integer(value: object, name: str, *, minimum: int = 0) -> int:
+    if type(value) is not int or value < minimum:
+        raise ValueError(f"{name} must be an integer >= {minimum}")
+    return value
+
+
+def _checkpoint_training_timestep(checkpoint: Path) -> int:
+    try:
+        with zipfile.ZipFile(checkpoint, "r") as archive:
+            data_members = [member for member in archive.infolist() if member.filename == "data"]
+            if len(data_members) != 1:
+                raise ValueError("SB3 checkpoint must contain exactly one canonical data member")
+            payload = archive.read(data_members[0])
+    except (OSError, RuntimeError, zipfile.BadZipFile) as error:
+        raise ValueError(f"authenticated checkpoint is not a readable ZIP: {checkpoint}") from error
+    try:
+        data = json.loads(
+            payload.decode("utf-8"),
+            parse_constant=lambda constant: (_ for _ in ()).throw(
+                ValueError(f"non-finite JSON number: {constant}")
+            ),
+            object_pairs_hook=_strict_json_object,
+        )
+    except (UnicodeError, json.JSONDecodeError, ValueError) as error:
+        raise ValueError("SB3 checkpoint data member is malformed") from error
+    if not isinstance(data, dict):
+        raise ValueError("SB3 checkpoint data member must be a JSON object")
+    timestep = data.get("num_timesteps")
+    if type(timestep) is not int or timestep < 0:
+        raise ValueError("SB3 checkpoint num_timesteps must be a non-negative integer")
+    return timestep
+
+
 def _resolved_method_and_seed(config: Mapping[str, object]) -> tuple[str, int]:
     method = config.get("method")
     if not isinstance(method, Mapping) or set(method) != {"id"}:
@@ -235,10 +331,15 @@ def discover_checkpoint_candidates(
     import yaml
 
     from mad_driving.config.parsing import load_unique_yaml
+    from mad_driving.scenarios import EnvironmentRole
     from mad_driving.training import metadata as training_metadata
     from mad_driving.training.curriculum import (
         read_curriculum_state_artifact,
         read_stable_artifact_bytes,
+    )
+    from mad_driving.training.episode_seeds import (
+        EpisodeSeedArtifactDescriptor,
+        summarize_episode_seed_artifacts,
     )
 
     run_dir = _validated_directory(Path(completed_run_dir), "completed training run")
@@ -268,6 +369,35 @@ def discover_checkpoint_candidates(
     if not _json_equivalent(config_payload, metadata.resolved_config):
         raise ValueError("resolved training config does not match run metadata")
 
+    try:
+        seed_descriptors = tuple(
+            EpisodeSeedArtifactDescriptor(
+                role=cast(EnvironmentRole, summary["role"]),
+                worker_index=_strict_json_integer(
+                    summary["worker_index"], "episode seed worker_index"
+                ),
+                relative_path=str(summary["path"]),
+                device=_strict_json_integer(
+                    cast(Mapping[str, object], summary["file_identity"])["device"],
+                    "episode seed device",
+                ),
+                inode=_strict_json_integer(
+                    cast(Mapping[str, object], summary["file_identity"])["inode"],
+                    "episode seed inode",
+                    minimum=1,
+                ),
+            )
+            for summary in metadata.episode_seed_artifacts
+        )
+        actual_seed_artifacts = summarize_episode_seed_artifacts(
+            run_dir,
+            expected_descriptors=seed_descriptors,
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("episode seed artifact authentication failed") from error
+    if not _json_equivalent(actual_seed_artifacts, metadata.episode_seed_artifacts):
+        raise ValueError("episode seed artifact inventory does not match run metadata")
+
     state_summary = metadata.curriculum_state
     state_path = _validated_regular_file(
         run_dir / str(state_summary["path"]), "final curriculum state"
@@ -293,13 +423,16 @@ def discover_checkpoint_candidates(
     for artifact in metadata.checkpoint_curriculum_artifacts:
         relative_path = str(artifact["checkpoint_path"])
         name = Path(relative_path).name
+        training_timestep = _checkpoint_training_timestep(run_dir / Path(relative_path))
         kind: CheckpointKind
         if _LEVEL_BEST_PATTERN.fullmatch(name) is not None:
             kind = "level_best"
         elif name == "final_model.zip":
             kind = "final"
-        elif _PERIODIC_PATTERN.fullmatch(name) is not None:
+        elif (periodic_match := _PERIODIC_PATTERN.fullmatch(name)) is not None:
             kind = "periodic"
+            if training_timestep != int(periodic_match.group(1)):
+                raise ValueError("periodic checkpoint filename timestep mismatch")
         elif name == "best_model.zip":
             continue
         else:
@@ -312,6 +445,7 @@ def discover_checkpoint_candidates(
                 policy_seed=metadata_seed,
                 checkpoint_kind=kind,
                 curriculum_level=int(artifact["level"]),
+                training_timestep=training_timestep,
             )
         )
     if not candidates:
@@ -337,10 +471,11 @@ def select_checkpoint(scores: Sequence[CheckpointScore]) -> CheckpointScore:
         if score.validation_plan_sha256 != first.validation_plan_sha256:
             raise ValueError("scores must share one validation plan hash")
         if (
-            score.validation_matrix != first.validation_matrix
+            score.validation_plan_rows != first.validation_plan_rows
+            or score.physical_identities != first.physical_identities
             or score.validation_track != first.validation_track
         ):
-            raise ValueError("scores use a different scenario/seed matrix")
+            raise ValueError("scores use a different scenario/seed matrix or physical identities")
     return min(
         values,
         key=lambda score: (
@@ -370,10 +505,11 @@ def write_selection_artifacts(
         if score.validation_plan_sha256 != reference.validation_plan_sha256:
             raise ValueError("scores do not share one validation plan hash")
         if (
-            score.validation_matrix != reference.validation_matrix
+            score.validation_plan_rows != reference.validation_plan_rows
+            or score.physical_identities != reference.physical_identities
             or score.validation_track != reference.validation_track
         ):
-            raise ValueError("scores use a different scenario/seed matrix")
+            raise ValueError("scores use a different scenario/seed matrix or physical identities")
     identities = tuple((score.candidate.path, score.candidate.sha256) for score in values)
     if len(identities) != len(set(identities)):
         raise ValueError("scores contain a duplicate checkpoint candidate")
@@ -451,6 +587,7 @@ def write_selection_artifacts(
 __all__ = [
     "CheckpointCandidate",
     "CheckpointScore",
+    "ValidationPhysicalIdentity",
     "discover_checkpoint_candidates",
     "select_checkpoint",
     "write_selection_artifacts",

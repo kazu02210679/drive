@@ -12,6 +12,54 @@ from mad_driving.coordinator.observation import aggregate_agent_claims
 from mad_driving.evaluation.models import EvaluationEpisodeRecord, EvaluationStepRecord
 
 
+def _require_bool(name: str, value: object) -> None:
+    if type(value) is not bool:
+        raise TypeError(f"{name} must be a bool")
+
+
+def _require_count(name: str, value: object) -> int:
+    if type(value) is not int:
+        raise TypeError(f"{name} must be an int")
+    if value < 0:
+        raise ValueError(f"{name} must be non-negative")
+    return value
+
+
+def _require_finite(name: str, value: object, *, non_negative: bool = False) -> float:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise TypeError(f"{name} must be numeric")
+    result = float(value)
+    if not math.isfinite(result):
+        raise ValueError(f"{name} must be finite")
+    if non_negative and result < 0.0:
+        raise ValueError(f"{name} must be non-negative")
+    return result
+
+
+def _require_rate(name: str, value: object) -> float:
+    result = _require_finite(name, value)
+    if not 0.0 <= result <= 1.0:
+        raise ValueError(f"{name} must be in [0, 1]")
+    return result
+
+
+def _require_optional_rate(
+    name: str,
+    value: object,
+    *,
+    count: int,
+    denominator: int,
+) -> None:
+    if denominator == 0:
+        if value is not None:
+            raise ValueError(f"{name} must be None when its denominator is zero")
+        return
+    if value is None:
+        raise ValueError(f"{name} must be defined when its denominator is non-zero")
+    if _require_rate(name, value) != count / denominator:
+        raise ValueError(f"{name} is inconsistent with its count and denominator")
+
+
 @dataclass(frozen=True)
 class EpisodeMetrics:
     collision: bool
@@ -49,6 +97,107 @@ class EpisodeMetrics:
     decision_latency_p99_ms: float
     episode_reward: float
 
+    def __post_init__(self) -> None:
+        for name in (
+            "collision",
+            "crossing_actor_collision",
+            "near_miss",
+            "negative_stopping_margin",
+            "hard_rule_violation",
+            "off_road",
+            "scenario_success",
+        ):
+            _require_bool(name, getattr(self, name))
+
+        counts = {
+            name: _require_count(name, getattr(self, name))
+            for name in (
+                "unnecessary_braking_event_count",
+                "agent_disagreement_eligible_steps",
+                "agent_disagreement_count",
+                "critic_challenge_eligible_steps",
+                "critic_challenge_count",
+                "critic_found_missed_danger_count",
+                "critic_false_challenge_count",
+                "agent_failure_fallback_count",
+            )
+        }
+        if counts["agent_disagreement_count"] > counts["agent_disagreement_eligible_steps"]:
+            raise ValueError("agent disagreement count exceeds eligible steps")
+        if counts["critic_challenge_count"] > counts["critic_challenge_eligible_steps"]:
+            raise ValueError("critic challenge count exceeds eligible steps")
+        for name in (
+            "critic_found_missed_danger_count",
+            "critic_false_challenge_count",
+        ):
+            if counts[name] > counts["critic_challenge_count"]:
+                raise ValueError(f"{name} exceeds critic challenge count")
+
+        _require_rate("raw_unsafe_request_rate", self.raw_unsafe_request_rate)
+        _require_rate("shield_intervention_rate", self.shield_intervention_rate)
+        route_completion = _require_finite(
+            "final_route_completion", self.final_route_completion, non_negative=True
+        )
+        if route_completion > 1.0:
+            raise ValueError("final_route_completion must be in [0, 1]")
+        for name in (
+            "average_speed_mps",
+            "simulated_travel_time_s",
+            "unnecessary_stop_duration_s",
+            "longitudinal_acceleration_rms_mps2",
+            "maximum_deceleration_mps2",
+            "decision_latency_p50_ms",
+            "decision_latency_p95_ms",
+            "decision_latency_p99_ms",
+        ):
+            _require_finite(name, getattr(self, name), non_negative=True)
+        if self.longitudinal_jerk_rms_mps3 is not None:
+            _require_finite(
+                "longitudinal_jerk_rms_mps3",
+                self.longitudinal_jerk_rms_mps3,
+                non_negative=True,
+            )
+        if self.minimum_actual_ttc_s is not None:
+            _require_finite("minimum_actual_ttc_s", self.minimum_actual_ttc_s, non_negative=True)
+        if self.minimum_stopping_margin_m is not None:
+            _require_finite("minimum_stopping_margin_m", self.minimum_stopping_margin_m)
+        _require_finite("episode_reward", self.episode_reward)
+
+        _require_optional_rate(
+            "agent_disagreement_rate",
+            self.agent_disagreement_rate,
+            count=counts["agent_disagreement_count"],
+            denominator=counts["agent_disagreement_eligible_steps"],
+        )
+        _require_optional_rate(
+            "critic_challenge_rate",
+            self.critic_challenge_rate,
+            count=counts["critic_challenge_count"],
+            denominator=counts["critic_challenge_eligible_steps"],
+        )
+        _require_optional_rate(
+            "critic_found_missed_danger_rate",
+            self.critic_found_missed_danger_rate,
+            count=counts["critic_found_missed_danger_count"],
+            denominator=counts["critic_challenge_count"],
+        )
+        _require_optional_rate(
+            "critic_false_challenge_rate",
+            self.critic_false_challenge_rate,
+            count=counts["critic_false_challenge_count"],
+            denominator=counts["critic_challenge_count"],
+        )
+
+        if self.crossing_actor_collision and not self.collision:
+            raise ValueError("crossing_actor_collision requires collision")
+        if self.near_miss and self.collision:
+            raise ValueError("near_miss excludes collision")
+        expected_negative_margin = (
+            self.minimum_stopping_margin_m is not None and self.minimum_stopping_margin_m < 0.0
+        )
+        if self.negative_stopping_margin is not expected_negative_margin:
+            raise ValueError("negative_stopping_margin is inconsistent with the minimum")
+
 
 @dataclass(frozen=True)
 class EpisodeMetricRecord:
@@ -62,6 +211,19 @@ class EpisodeMetricRecord:
             raise TypeError("episode must be an EvaluationEpisodeRecord")
         if type(self.metrics) is not EpisodeMetrics:
             raise TypeError("metrics must be EpisodeMetrics")
+        if self.episode.collision_occurred is not self.metrics.collision:
+            raise ValueError("episode collision is inconsistent with metrics")
+        expected_crossing_collision = self.episode.collision_kind == "crossing_actor"
+        if expected_crossing_collision is not self.metrics.crossing_actor_collision:
+            raise ValueError("episode collision kind is inconsistent with metrics")
+        if self.episode.scenario_success is not self.metrics.scenario_success:
+            raise ValueError("episode scenario success is inconsistent with metrics")
+        if self.episode.off_road is not self.metrics.off_road:
+            raise ValueError("episode off-road status is inconsistent with metrics")
+        if self.episode.cumulative_reward != self.metrics.episode_reward:
+            raise ValueError("episode cumulative reward is inconsistent with metrics")
+        if self.episode.simulated_duration_s != self.metrics.simulated_travel_time_s:
+            raise ValueError("episode simulated duration is inconsistent with metrics")
 
 
 def _positive_finite(name: str, value: float) -> float:
@@ -83,9 +245,38 @@ def _validated_records(
         raise TypeError("records must contain EvaluationStepRecord values")
     if tuple(record.step_index for record in values) != tuple(range(len(values))):
         raise ValueError("record step indices must be contiguous from zero")
-    episode_key = values[0].episode_key
-    if any(record.episode_key != episode_key for record in values[1:]):
-        raise ValueError("records must belong to a single episode")
+    first = values[0]
+    episode_contract = (
+        first.checkpoint_path,
+        first.checkpoint_sha256,
+        first.method_profile,
+        first.episode_key,
+        first.episode_rng_seed,
+        first.case_id,
+        first.scenario_id,
+        first.difficulty_level,
+        first.metadrive_scenario_index,
+        first.scenario_selection_seed,
+        first.scenario_parameter_seed,
+    )
+    if any(
+        (
+            record.checkpoint_path,
+            record.checkpoint_sha256,
+            record.method_profile,
+            record.episode_key,
+            record.episode_rng_seed,
+            record.case_id,
+            record.scenario_id,
+            record.difficulty_level,
+            record.metadrive_scenario_index,
+            record.scenario_selection_seed,
+            record.scenario_parameter_seed,
+        )
+        != episode_contract
+        for record in values[1:]
+    ):
+        raise ValueError("records must share a single episode contract")
     if any(record.decision_interval_s != decision_dt_s for record in values):
         raise ValueError("every decision_interval_s must equal decision_dt_s")
     return values
@@ -99,6 +290,28 @@ def _nearest_rank(values: Sequence[float], percentile: int) -> float:
     ordered = sorted(values)
     rank = math.ceil(percentile / 100 * len(ordered))
     return ordered[rank - 1]
+
+
+def _unnecessary_braking_events(
+    records: Sequence[EvaluationStepRecord], decision_dt_s: float
+) -> int:
+    previous_duration = 0.0
+    previous_active = False
+    events = 0
+    for record in records:
+        current_duration = record.cumulative_unnecessary_stop_duration_s
+        if current_duration < previous_duration:
+            raise ValueError("cumulative_unnecessary_stop_duration_s must not decrease")
+        active = current_duration > previous_duration
+        if active and current_duration > previous_duration + decision_dt_s:
+            raise ValueError(
+                "cumulative unnecessary-stop increment cannot exceed the decision interval"
+            )
+        if active and not previous_active:
+            events += 1
+        previous_duration = current_duration
+        previous_active = active
+    return events
 
 
 def _specialist_actions(record: EvaluationStepRecord) -> dict[str, DrivingAction]:
@@ -177,17 +390,7 @@ def reduce_episode(
         for record in values
     )
     latencies = tuple(record.total_decision_latency_ms for record in values)
-    braking_conditions = (
-        False,
-        *(
-            current.cumulative_unnecessary_stop_duration_s
-            > previous.cumulative_unnecessary_stop_duration_s
-            for previous, current in pairwise(values)
-        ),
-    )
-    braking_events = sum(
-        current and not previous for previous, current in pairwise((False, *braking_conditions))
-    )
+    braking_events = _unnecessary_braking_events(values, dt)
     jerk_rms: float | None = None
     if len(values) > 1:
         jerk_square_time = sum(
@@ -242,7 +445,8 @@ def reduce_episode(
         negative_stopping_margin=minimum_margin is not None and minimum_margin < 0.0,
         minimum_stopping_margin_m=minimum_margin,
         hard_rule_violation=any(
-            record.pre_step_hard_rule_constraint and record.executed_action < 3 for record in values
+            record.pre_step_hard_rule_constraint and record.executed_action < DrivingAction.STOP
+            for record in values
         ),
         raw_unsafe_request_rate=sum(record.unsafe_request for record in values) / count,
         shield_intervention_rate=sum(record.shield_intervened for record in values) / count,

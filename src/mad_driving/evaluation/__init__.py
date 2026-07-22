@@ -28,6 +28,7 @@ from mad_driving.evaluation.runner import EvaluationRunResult, run_evaluation_ep
 from mad_driving.evaluation.selection import (
     CheckpointCandidate,
     CheckpointScore,
+    ValidationPhysicalIdentity,
     discover_checkpoint_candidates,
     select_checkpoint,
     write_selection_artifacts,
@@ -59,6 +60,7 @@ __all__ = [
     "PpoPolicyAdapter",
     "PpoRunBinding",
     "ScenarioCellId",
+    "ValidationPhysicalIdentity",
     "VisibleTtcRulePolicy",
     "build_formal_plan",
     "build_smoke_plan",

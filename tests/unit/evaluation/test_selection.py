@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import csv
-import hashlib
 import json
+import zipfile
 from dataclasses import replace
 from math import nan
 from pathlib import Path
@@ -19,6 +19,7 @@ from mad_driving.evaluation.models import (
 from mad_driving.evaluation.selection import (
     CheckpointCandidate,
     CheckpointScore,
+    ValidationPhysicalIdentity,
     discover_checkpoint_candidates,
     select_checkpoint,
     write_selection_artifacts,
@@ -28,6 +29,10 @@ from mad_driving.training.curriculum import (
     CurriculumState,
     write_checkpoint_curriculum_state,
     write_curriculum_state,
+)
+from mad_driving.training.episode_seeds import (
+    EpisodeSeedArtifactDescriptor,
+    summarize_episode_seed_artifacts,
 )
 from mad_driving.training.metadata import (
     RunMetadata,
@@ -58,7 +63,7 @@ def metrics(
         scenario_success=success,
         final_route_completion=route_completion,
         average_speed_mps=5.0,
-        simulated_travel_time_s=10.0,
+        simulated_travel_time_s=0.1,
         unnecessary_braking_event_count=0,
         unnecessary_stop_duration_s=0.0,
         longitudinal_acceleration_rms_mps2=0.0,
@@ -88,6 +93,7 @@ def candidate(
     name: str,
     *,
     policy_seed: int = 42,
+    training_timestep: int = 100,
 ) -> CheckpointCandidate:
     return CheckpointCandidate(
         path=tmp_path / "checkpoints" / name,
@@ -96,6 +102,7 @@ def candidate(
         policy_seed=policy_seed,
         checkpoint_kind="periodic",
         curriculum_level=3,
+        training_timestep=training_timestep,
     )
 
 
@@ -113,7 +120,13 @@ def score(
     role: str = "validation",
     policy_seed: int = 42,
 ) -> CheckpointScore:
-    checkpoint = candidate(tmp_path, digest, name, policy_seed=policy_seed)
+    checkpoint = candidate(
+        tmp_path,
+        digest,
+        name,
+        policy_seed=policy_seed,
+        training_timestep=timestep,
+    )
     profile = MethodProfileSnapshot.from_method_id("proposed")
     episode_records: list[EpisodeMetricRecord] = []
     for index, case in enumerate(EVALUATION_CASES):
@@ -170,8 +183,135 @@ def score(
         candidate=checkpoint,
         training_timestep=timestep,
         validation_plan_sha256="f" * 64,
+        validation_plan_rows=tuple(
+            (record.episode.case_id, record.episode.episode_rng_seed) for record in episode_records
+        ),
         episodes=tuple(episode_records),
     )
+
+
+def with_physical_change(
+    checkpoint_score: CheckpointScore,
+    field_name: str,
+) -> CheckpointScore:
+    first = checkpoint_score.episodes[0]
+    episode = replace(first.episode)
+    replacements: dict[str, object] = {
+        "scenario_id": "cut_in",
+        "difficulty_level": 2,
+        "metadrive_scenario_index": episode.metadrive_scenario_index + 1,
+        "scenario_selection_seed": episode.scenario_selection_seed + 1,
+        "scenario_parameter_seed": episode.scenario_parameter_seed + 1,
+        "sampled_scenario_parameters": {
+            "index": 0,
+            "nested": {"actors": ["lead", "crossing"]},
+        },
+    }
+    object.__setattr__(episode, field_name, replacements[field_name])
+    changed = EpisodeMetricRecord(episode, first.metrics)
+    return replace(
+        checkpoint_score,
+        episodes=(changed, *checkpoint_score.episodes[1:]),
+    )
+
+
+def test_checkpoint_score_binds_supplied_ordered_validation_plan_rows(
+    tmp_path: Path,
+) -> None:
+    valid = score(
+        tmp_path,
+        digest="a" * 64,
+        name="plan.zip",
+        timestep=100,
+        reward=1.0,
+        collisions=0,
+        successes=0,
+        route_completion=0.1,
+    )
+
+    with pytest.raises(ValueError, match="validation plan rows"):
+        replace(valid, validation_plan_rows=tuple(reversed(valid.validation_plan_rows)))
+
+
+def test_checkpoint_score_rejects_duplicate_physical_identity(tmp_path: Path) -> None:
+    valid = score(
+        tmp_path,
+        digest="a" * 64,
+        name="duplicate.zip",
+        timestep=100,
+        reward=1.0,
+        collisions=0,
+        successes=0,
+        route_completion=0.1,
+    )
+
+    with pytest.raises(ValueError, match="physical identity"):
+        replace(
+            valid,
+            episodes=(*valid.episodes, valid.episodes[0]),
+            validation_plan_rows=(*valid.validation_plan_rows, valid.validation_plan_rows[0]),
+        )
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "scenario_id",
+        "difficulty_level",
+        "metadrive_scenario_index",
+        "scenario_selection_seed",
+        "scenario_parameter_seed",
+        "sampled_scenario_parameters",
+    ],
+)
+def test_selection_rejects_complete_physical_identity_drift_before_ranking(
+    tmp_path: Path,
+    field_name: str,
+) -> None:
+    first = score(
+        tmp_path,
+        digest="a" * 64,
+        name="first.zip",
+        timestep=100,
+        reward=1.0,
+        collisions=0,
+        successes=0,
+        route_completion=0.1,
+    )
+    second = score(
+        tmp_path,
+        digest="b" * 64,
+        name="second.zip",
+        timestep=200,
+        reward=2.0,
+        collisions=0,
+        successes=0,
+        route_completion=0.2,
+    )
+    second = with_physical_change(second, field_name)
+
+    with pytest.raises(ValueError, match="physical identities"):
+        select_checkpoint((first, second))
+
+
+def test_physical_identity_canonicalizes_nested_sampled_parameters(
+    tmp_path: Path,
+) -> None:
+    checkpoint_score = score(
+        tmp_path,
+        digest="a" * 64,
+        name="canonical.zip",
+        timestep=100,
+        reward=1.0,
+        collisions=0,
+        successes=0,
+        route_completion=0.1,
+    )
+
+    identity = checkpoint_score.physical_identities[0]
+
+    assert type(identity) is ValidationPhysicalIdentity
+    assert identity.canonical_sampled_scenario_parameters == '{"index":0}'
 
 
 def test_select_checkpoint_uses_all_six_lexicographic_keys(tmp_path: Path) -> None:
@@ -307,6 +447,9 @@ def completed_training_run(
     complete: bool = True,
     include_supported_checkpoints: bool = True,
     include_unknown_listed_checkpoint: bool = False,
+    checkpoint_data_payloads: dict[str, object] | None = None,
+    malformed_checkpoints: frozenset[str] = frozenset(),
+    duplicate_data_members: frozenset[str] = frozenset(),
 ) -> Path:
     run_dir = tmp_path / "run"
     checkpoints_dir = run_dir / "checkpoints"
@@ -322,41 +465,88 @@ def completed_training_run(
     state_path = run_dir / "curriculum_state.yaml"
     write_curriculum_state(state, state_path)
 
-    checkpoints: list[tuple[str, CurriculumState]] = [("best_model.zip", state)]
+    checkpoints: list[tuple[str, CurriculumState, int]] = [("best_model.zip", state, 5_000)]
     if include_supported_checkpoints:
         checkpoints.extend(
             (
                 (
                     "best_model_level_1.zip",
                     CurriculumState(level=2, consecutive_passes=0, evaluations=4),
+                    2_000,
                 ),
-                ("final_model.zip", state),
+                ("final_model.zip", state, 5_000),
                 (
                     "ppo_checkpoint_2500_steps.zip",
                     CurriculumState(level=1, consecutive_passes=0, evaluations=2),
+                    2_500,
                 ),
             )
         )
     if include_unknown_listed_checkpoint:
-        checkpoints.append(("researcher_favorite.zip", state))
-    for name, checkpoint_state in checkpoints:
+        checkpoints.append(("researcher_favorite.zip", state, 5_000))
+    for name, checkpoint_state, default_timestep in checkpoints:
         checkpoint = checkpoints_dir / name
-        checkpoint.write_bytes(f"authenticated:{name}".encode())
+        if name in malformed_checkpoints:
+            checkpoint.write_bytes(b"not a ZIP")
+        else:
+            configured = (checkpoint_data_payloads or {}).get(name, default_timestep)
+            with zipfile.ZipFile(checkpoint, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                if configured is not None:
+                    data = (
+                        configured
+                        if isinstance(configured, bytes)
+                        else json.dumps({"num_timesteps": configured}).encode("utf-8")
+                    )
+                    archive.writestr("data", data)
+                    if name in duplicate_data_members:
+                        archive.writestr("data", data)
+                archive.writestr("_stable_baselines3_version", "2.6.0")
+                archive.writestr("system_info.txt", "python: test\n")
         write_checkpoint_curriculum_state(checkpoint_state, checkpoint)
 
     seed_artifact = seeds_dir / "train-worker-000.jsonl"
-    seed_artifact.write_text('{"seed":1}\n', encoding="utf-8")
-    metadata = seed_artifact.stat()
-    episode_seed_artifacts = (
+    seed_artifact.touch()
+    seed_metadata = seed_artifact.stat()
+    seed_records = (
         {
-            "file_identity": {"device": metadata.st_dev, "inode": metadata.st_ino},
-            "path": "episode_seeds/train-worker-000.jsonl",
-            "record_count": 1,
+            "file_identity": {
+                "device": seed_metadata.st_dev,
+                "inode": seed_metadata.st_ino,
+            },
+            "record_type": "episode_seed_artifact",
             "role": "train",
             "schema_version": 4,
-            "sha256": hashlib.sha256(seed_artifact.read_bytes()).hexdigest(),
             "worker_index": 0,
         },
+        {
+            "role": "train",
+            "worker_index": 0,
+            "environment_seed": 101,
+            "scenario_selection_seed": 102,
+            "scenario_parameter_seed": 103,
+            "scenario_id": "lead_brake",
+            "difficulty_level": 1,
+            "scenario_parameters": {"initial_gap_m": 30.0},
+        },
+    )
+    seed_artifact.write_text(
+        "".join(
+            json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
+            for record in seed_records
+        ),
+        encoding="utf-8",
+    )
+    episode_seed_artifacts = summarize_episode_seed_artifacts(
+        run_dir,
+        expected_descriptors=(
+            EpisodeSeedArtifactDescriptor(
+                role="train",
+                worker_index=0,
+                relative_path="episode_seeds/train-worker-000.jsonl",
+                device=seed_metadata.st_dev,
+                inode=seed_metadata.st_ino,
+            ),
+        ),
     )
     write_run_metadata(
         RunMetadata(
@@ -391,6 +581,7 @@ def test_discovery_accepts_only_supported_candidates_from_verified_inventory(
         "periodic",
     )
     assert tuple(candidate.curriculum_level for candidate in candidates) == (2, 3, 1)
+    assert tuple(candidate.training_timestep for candidate in candidates) == (2_000, 5_000, 2_500)
     assert {candidate.method_id for candidate in candidates} == {"proposed"}
     assert {candidate.policy_seed for candidate in candidates} == {42}
     assert all(candidate.path.is_absolute() for candidate in candidates)
@@ -406,6 +597,10 @@ def test_discovery_accepts_only_supported_candidates_from_verified_inventory(
         ("method", "method"),
         ("seed", "seed"),
         ("schema", "research_contract_version|contract"),
+        ("missing_seed_artifact", "seed artifact|inventory|environment"),
+        ("replaced_seed_artifact", "seed artifact|identity"),
+        ("extra_seed_artifact", "seed artifact|inventory|environment"),
+        ("malformed_seed_artifact", "seed artifact|malformed"),
     ],
 )
 def test_discovery_rejects_corrupt_or_mismatched_training_runs(
@@ -424,6 +619,18 @@ def test_discovery_rejects_corrupt_or_mismatched_training_runs(
         sidecar.write_text("schema_version: [\n", encoding="utf-8")
     elif corruption == "checkpoint_hash":
         checkpoint.write_bytes(b"replacement")
+    elif corruption == "missing_seed_artifact":
+        (run_dir / "episode_seeds" / "train-worker-000.jsonl").unlink()
+    elif corruption == "replaced_seed_artifact":
+        seed_artifact = run_dir / "episode_seeds" / "train-worker-000.jsonl"
+        seed_artifact.unlink()
+        seed_artifact.write_text("replacement\n", encoding="utf-8")
+    elif corruption == "extra_seed_artifact":
+        (run_dir / "episode_seeds" / "extra.jsonl").write_text("extra\n", encoding="utf-8")
+    elif corruption == "malformed_seed_artifact":
+        (run_dir / "episode_seeds" / "train-worker-000.jsonl").write_text(
+            "{malformed\n", encoding="utf-8"
+        )
     elif corruption in ("method", "seed"):
         config_path = run_dir / "config_resolved.yaml"
         config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
@@ -453,6 +660,73 @@ def test_discovery_rejects_incomplete_or_unknown_inventory_entries(tmp_path: Pat
         discover_checkpoint_candidates(incomplete)
     with pytest.raises(ValueError, match="unsupported|candidate"):
         discover_checkpoint_candidates(unknown)
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        (None, "data"),
+        (b"{malformed", "data"),
+        (True, "num_timesteps"),
+        (-1, "num_timesteps"),
+        (1.5, "num_timesteps"),
+        ("5000", "num_timesteps"),
+    ],
+)
+def test_discovery_rejects_missing_malformed_or_invalid_sb3_timestep_data(
+    tmp_path: Path,
+    payload: object,
+    message: str,
+) -> None:
+    run_dir = completed_training_run(
+        tmp_path,
+        checkpoint_data_payloads={"final_model.zip": payload},
+    )
+
+    with pytest.raises(ValueError, match=message):
+        discover_checkpoint_candidates(run_dir)
+
+
+def test_discovery_rejects_malformed_zip_and_duplicate_data_member(tmp_path: Path) -> None:
+    malformed = completed_training_run(
+        tmp_path / "malformed",
+        malformed_checkpoints=frozenset({"final_model.zip"}),
+    )
+    duplicate = completed_training_run(
+        tmp_path / "duplicate",
+        duplicate_data_members=frozenset({"final_model.zip"}),
+    )
+
+    with pytest.raises(ValueError, match="ZIP|checkpoint"):
+        discover_checkpoint_candidates(malformed)
+    with pytest.raises(ValueError, match="data"):
+        discover_checkpoint_candidates(duplicate)
+
+
+def test_discovery_rejects_periodic_filename_timestep_mismatch(tmp_path: Path) -> None:
+    run_dir = completed_training_run(
+        tmp_path,
+        checkpoint_data_payloads={"ppo_checkpoint_2500_steps.zip": 2_499},
+    )
+
+    with pytest.raises(ValueError, match="filename|timestep"):
+        discover_checkpoint_candidates(run_dir)
+
+
+def test_checkpoint_score_rejects_caller_timestep_mismatch(tmp_path: Path) -> None:
+    valid = score(
+        tmp_path,
+        digest="a" * 64,
+        name="mismatch.zip",
+        timestep=100,
+        reward=1.0,
+        collisions=0,
+        successes=0,
+        route_completion=0.1,
+    )
+
+    with pytest.raises(ValueError, match="authenticated candidate"):
+        replace(valid, training_timestep=101)
 
 
 def test_selection_artifacts_record_all_scores_and_full_selected_identity(
@@ -521,7 +795,20 @@ def test_selection_artifacts_record_all_scores_and_full_selected_identity(
     assert json_path.read_bytes().endswith(b"\n")
 
 
-def test_checkpoint_score_rejects_non_finite_ranking_metrics(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("episode_reward", nan),
+        ("decision_latency_p99_ms", -1.0),
+        ("agent_failure_fallback_count", -1),
+        ("collision", 1),
+    ],
+)
+def test_checkpoint_score_rejects_malformed_metrics(
+    tmp_path: Path,
+    field_name: str,
+    value: object,
+) -> None:
     valid = score(
         tmp_path,
         digest="a" * 64,
@@ -533,21 +820,13 @@ def test_checkpoint_score_rejects_non_finite_ranking_metrics(tmp_path: Path) -> 
         route_completion=0.1,
     )
     first = valid.episodes[0]
-    nonfinite = EpisodeMetricRecord(
-        first.episode,
-        replace(first.metrics, episode_reward=nan),
-    )
+    object.__setattr__(first.metrics, field_name, value)
 
-    with pytest.raises(ValueError, match="finite"):
-        CheckpointScore(
-            candidate=valid.candidate,
-            training_timestep=valid.training_timestep,
-            validation_plan_sha256=valid.validation_plan_sha256,
-            episodes=(nonfinite, *valid.episodes[1:]),
-        )
+    with pytest.raises((TypeError, ValueError)):
+        replace(valid)
 
 
-@pytest.mark.parametrize("mismatch", ["plan", "matrix"])
+@pytest.mark.parametrize("mismatch", ["plan", "matrix", "physical"])
 def test_selection_artifacts_reject_cross_group_validation_mismatches(
     tmp_path: Path,
     mismatch: str,
@@ -576,8 +855,12 @@ def test_selection_artifacts_reject_cross_group_validation_mismatches(
     )
     if mismatch == "plan":
         second = replace(second, validation_plan_sha256="e" * 64)
+    elif mismatch == "physical":
+        second = with_physical_change(second, "sampled_scenario_parameters")
     output_dir = tmp_path / "cross-group"
     output_dir.mkdir()
 
     with pytest.raises(ValueError, match="validation plan|scenario/seed matrix"):
         write_selection_artifacts(output_dir, (first, second))
+    assert not (output_dir / "model_selection.csv").exists()
+    assert not (output_dir / "selected_checkpoints.json").exists()
