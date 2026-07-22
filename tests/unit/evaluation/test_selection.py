@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import csv
+import io
 import json
+import os
+import struct
 import zipfile
 from dataclasses import replace
 from math import nan
@@ -40,6 +43,115 @@ from mad_driving.training.metadata import (
     curriculum_state_artifact,
     write_run_metadata,
 )
+
+_TEST_MAX_SB3_DATA_BYTES = 16 * 1024 * 1024
+_TEST_MAX_SB3_ARCHIVE_MEMBERS = 128
+
+
+def _patch_data_member_headers(
+    checkpoint: Path,
+    *,
+    set_encrypted: bool = False,
+    compression: int | None = None,
+    compressed_size: int | None = None,
+    uncompressed_size: int | None = None,
+) -> None:
+    payload = bytearray(checkpoint.read_bytes())
+    patched = 0
+    for signature, name_length_offset, flag_offset, compression_offset, sizes_offset in (
+        (b"PK\x03\x04", 26, 6, 8, 18),
+        (b"PK\x01\x02", 28, 8, 10, 20),
+    ):
+        cursor = 0
+        while (cursor := payload.find(signature, cursor)) >= 0:
+            name_length = struct.unpack_from("<H", payload, cursor + name_length_offset)[0]
+            name_start = cursor + (30 if signature == b"PK\x03\x04" else 46)
+            name = bytes(payload[name_start : name_start + name_length])
+            if name == b"data":
+                if set_encrypted:
+                    flags = struct.unpack_from("<H", payload, cursor + flag_offset)[0]
+                    struct.pack_into("<H", payload, cursor + flag_offset, flags | 1)
+                if compression is not None:
+                    struct.pack_into("<H", payload, cursor + compression_offset, compression)
+                if compressed_size is not None:
+                    struct.pack_into("<I", payload, cursor + sizes_offset, compressed_size)
+                if uncompressed_size is not None:
+                    struct.pack_into("<I", payload, cursor + sizes_offset + 4, uncompressed_size)
+                patched += 1
+            cursor = name_start + name_length
+    assert patched == 2
+    checkpoint.write_bytes(payload)
+
+
+def _corrupt_data_member_payload(checkpoint: Path) -> None:
+    payload = bytearray(checkpoint.read_bytes())
+    cursor = payload.find(b"PK\x03\x04")
+    while cursor >= 0:
+        name_length, extra_length = struct.unpack_from("<HH", payload, cursor + 26)
+        name_start = cursor + 30
+        name = bytes(payload[name_start : name_start + name_length])
+        if name == b"data":
+            compressed_size = struct.unpack_from("<I", payload, cursor + 18)[0]
+            data_start = name_start + name_length + extra_length
+            payload[data_start + compressed_size // 2] ^= 0x01
+            checkpoint.write_bytes(payload)
+            return
+        cursor = payload.find(b"PK\x03\x04", name_start + name_length + extra_length)
+    raise AssertionError("data local header not found")
+
+
+def _write_test_sb3_checkpoint(
+    checkpoint: Path,
+    timestep: object,
+    *,
+    variant: str | None,
+    duplicate_data: bool,
+) -> None:
+    if variant == "malformed_zip":
+        checkpoint.write_bytes(b"not a ZIP")
+        return
+    data_name = "data/" if variant == "directory_data" else "data"
+    if variant == "unsupported_compression":
+        compression = zipfile.ZIP_BZIP2
+    elif variant in ("high_compression_ratio", "oversized_actual_data"):
+        compression = zipfile.ZIP_DEFLATED
+    else:
+        compression = zipfile.ZIP_STORED
+    if isinstance(timestep, bytes):
+        data = timestep
+    else:
+        content: dict[str, object] = {"num_timesteps": timestep}
+        if variant == "high_compression_ratio":
+            content["padding"] = "x" * (2 * 1024 * 1024)
+        if variant == "oversized_actual_data":
+            content["padding"] = "x" * _TEST_MAX_SB3_DATA_BYTES
+        data = json.dumps(content).encode("utf-8")
+    with zipfile.ZipFile(checkpoint, "w", compression=compression) as archive:
+        if timestep is not None:
+            archive.writestr(data_name, data)
+            if duplicate_data:
+                archive.writestr(data_name, data)
+        archive.writestr("_stable_baselines3_version", "2.6.0")
+        archive.writestr("system_info.txt", "python: test\n")
+        if variant == "excessive_members":
+            for index in range(_TEST_MAX_SB3_ARCHIVE_MEMBERS):
+                archive.writestr(f"extra-{index:03d}", b"")
+    if variant == "encrypted_data":
+        _patch_data_member_headers(checkpoint, set_encrypted=True)
+    elif variant == "malformed_compression":
+        _patch_data_member_headers(checkpoint, compression=99)
+    elif variant == "oversized_declared_data":
+        _patch_data_member_headers(
+            checkpoint,
+            uncompressed_size=_TEST_MAX_SB3_DATA_BYTES + 1,
+        )
+    elif variant == "oversized_declared_compressed_data":
+        _patch_data_member_headers(
+            checkpoint,
+            compressed_size=_TEST_MAX_SB3_DATA_BYTES + 1,
+        )
+    elif variant == "crc_error":
+        _corrupt_data_member_payload(checkpoint)
 
 
 def metrics(
@@ -450,6 +562,7 @@ def completed_training_run(
     checkpoint_data_payloads: dict[str, object] | None = None,
     malformed_checkpoints: frozenset[str] = frozenset(),
     duplicate_data_members: frozenset[str] = frozenset(),
+    checkpoint_variants: dict[str, str] | None = None,
 ) -> Path:
     run_dir = tmp_path / "run"
     checkpoints_dir = run_dir / "checkpoints"
@@ -486,22 +599,16 @@ def completed_training_run(
         checkpoints.append(("researcher_favorite.zip", state, 5_000))
     for name, checkpoint_state, default_timestep in checkpoints:
         checkpoint = checkpoints_dir / name
+        configured = (checkpoint_data_payloads or {}).get(name, default_timestep)
+        variant = (checkpoint_variants or {}).get(name)
         if name in malformed_checkpoints:
-            checkpoint.write_bytes(b"not a ZIP")
-        else:
-            configured = (checkpoint_data_payloads or {}).get(name, default_timestep)
-            with zipfile.ZipFile(checkpoint, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-                if configured is not None:
-                    data = (
-                        configured
-                        if isinstance(configured, bytes)
-                        else json.dumps({"num_timesteps": configured}).encode("utf-8")
-                    )
-                    archive.writestr("data", data)
-                    if name in duplicate_data_members:
-                        archive.writestr("data", data)
-                archive.writestr("_stable_baselines3_version", "2.6.0")
-                archive.writestr("system_info.txt", "python: test\n")
+            variant = "malformed_zip"
+        _write_test_sb3_checkpoint(
+            checkpoint,
+            configured,
+            variant=variant,
+            duplicate_data=name in duplicate_data_members,
+        )
         write_checkpoint_curriculum_state(checkpoint_state, checkpoint)
 
     seed_artifact = seeds_dir / "train-worker-000.jsonl"
@@ -701,6 +808,136 @@ def test_discovery_rejects_malformed_zip_and_duplicate_data_member(tmp_path: Pat
         discover_checkpoint_candidates(malformed)
     with pytest.raises(ValueError, match="data"):
         discover_checkpoint_candidates(duplicate)
+
+
+@pytest.mark.parametrize(
+    ("variant", "message"),
+    [
+        ("oversized_declared_data", "size|large|limit"),
+        ("oversized_declared_compressed_data", "compressed|size|large|limit"),
+        ("oversized_actual_data", "size|large|limit"),
+        ("high_compression_ratio", "ratio|compression"),
+        ("excessive_members", "member|entries"),
+        ("encrypted_data", "encrypted"),
+        ("directory_data", "directory|data"),
+        ("unsupported_compression", "compression"),
+        ("malformed_compression", "compression|malformed"),
+        ("crc_error", "CRC|decompression|malformed"),
+    ],
+)
+def test_discovery_rejects_resource_unsafe_sb3_archives(
+    tmp_path: Path,
+    variant: str,
+    message: str,
+) -> None:
+    run_dir = completed_training_run(
+        tmp_path,
+        checkpoint_variants={"best_model.zip": variant},
+    )
+
+    with pytest.raises(ValueError, match=message):
+        discover_checkpoint_candidates(run_dir)
+
+
+def test_discovery_caps_actual_streamed_sb3_data_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = completed_training_run(tmp_path)
+    original_open = zipfile.ZipFile.open
+
+    def oversized_open(
+        archive: zipfile.ZipFile,
+        name: str | zipfile.ZipInfo,
+        *args: object,
+        **kwargs: object,
+    ) -> object:
+        member_name = name.filename if isinstance(name, zipfile.ZipInfo) else name
+        if Path(archive.filename).name == "best_model.zip" and member_name == "data":
+            return io.BytesIO(b"x" * (_TEST_MAX_SB3_DATA_BYTES + 1))
+        return original_open(archive, name, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(zipfile.ZipFile, "open", oversized_open)
+
+    with pytest.raises(ValueError, match="streamed|actual|limit"):
+        discover_checkpoint_candidates(run_dir)
+
+
+def test_discovery_rejects_checkpoint_path_identity_change_after_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = completed_training_run(tmp_path)
+    target = (run_dir / "checkpoints" / "best_model.zip").absolute()
+    original_open = Path.open
+    original_lstat = Path.lstat
+    parser_opened = False
+
+    class ChangedIdentity:
+        def __init__(self, source: os.stat_result) -> None:
+            self._source = source
+
+        @property
+        def st_ino(self) -> int:
+            return int(self._source.st_ino) + 1
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._source, name)
+
+    def racing_open(path: Path, *args: object, **kwargs: object) -> object:
+        nonlocal parser_opened
+        source = original_open(path, *args, **kwargs)  # type: ignore[arg-type]
+        mode = args[0] if args else kwargs.get("mode", "r")
+        if path.absolute() == target and mode == "rb" and kwargs.get("buffering") == 0:
+            parser_opened = True
+        return source
+
+    def racing_lstat(path: Path) -> object:
+        metadata = original_lstat(path)
+        if parser_opened and path.absolute() == target:
+            return ChangedIdentity(metadata)
+        return metadata
+
+    monkeypatch.setattr(Path, "open", racing_open)
+    monkeypatch.setattr(Path, "lstat", racing_lstat)
+
+    with pytest.raises(ValueError, match="identity|replaced|changed"):
+        discover_checkpoint_candidates(run_dir)
+
+
+def test_discovery_hashes_the_same_opened_checkpoint_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = completed_training_run(tmp_path)
+    target = (run_dir / "checkpoints" / "best_model.zip").absolute()
+    original_open = Path.open
+    changed = False
+
+    def corrupting_open(path: Path, *args: object, **kwargs: object) -> object:
+        nonlocal changed
+        source = original_open(path, *args, **kwargs)  # type: ignore[arg-type]
+        mode = args[0] if args else kwargs.get("mode", "r")
+        if (
+            not changed
+            and path.absolute() == target
+            and mode == "rb"
+            and kwargs.get("buffering") == 0
+        ):
+            source.close()
+            with original_open(path, "r+b") as mutable:
+                first_byte = mutable.read(1)
+                mutable.seek(0)
+                mutable.write(bytes((first_byte[0] ^ 1,)))
+                mutable.flush()
+            source = original_open(path, *args, **kwargs)  # type: ignore[arg-type]
+            changed = True
+        return source
+
+    monkeypatch.setattr(Path, "open", corrupting_open)
+
+    with pytest.raises(ValueError, match="SHA-256 mismatch"):
+        discover_checkpoint_candidates(run_dir)
 
 
 def test_discovery_rejects_periodic_filename_timestep_mismatch(tmp_path: Path) -> None:

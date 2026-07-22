@@ -314,6 +314,170 @@ def test_episode_metrics_rejects_inconsistent_safety_flags(
 
 
 @pytest.mark.parametrize(
+    "changes",
+    [
+        {"near_miss": True},
+        {"decision_latency_p50_ms": 2.0, "decision_latency_p95_ms": 1.0},
+        {"decision_latency_p95_ms": 2.0, "decision_latency_p99_ms": 1.0},
+        {"unnecessary_stop_duration_s": 0.2},
+    ],
+)
+def test_episode_metrics_rejects_remaining_impossible_combinations(
+    changes: dict[str, object],
+) -> None:
+    metrics = reduce_episode((make_step(),), 0.1)
+
+    with pytest.raises(ValueError):
+        replace(metrics, **changes)
+
+
+def test_episode_metrics_accepts_legitimate_combination_boundaries() -> None:
+    metrics = reduce_episode((make_step(),), 0.1)
+
+    valid = replace(
+        metrics,
+        near_miss=True,
+        minimum_actual_ttc_s=0.0,
+        unnecessary_stop_duration_s=0.1,
+        decision_latency_p50_ms=1.0,
+        decision_latency_p95_ms=1.0,
+        decision_latency_p99_ms=1.0,
+        agent_disagreement_eligible_steps=1,
+        agent_disagreement_count=0,
+        agent_disagreement_rate=0.0,
+        critic_challenge_eligible_steps=1,
+        critic_challenge_count=0,
+        critic_challenge_rate=0.0,
+        critic_found_missed_danger_rate=None,
+        critic_false_challenge_rate=None,
+    )
+
+    assert valid.near_miss is True
+    assert valid.agent_disagreement_rate == 0.0
+    assert valid.critic_challenge_rate == 0.0
+    assert valid.critic_found_missed_danger_rate is None
+    assert valid.critic_false_challenge_rate is None
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"unnecessary_braking_event_count": 2},
+        {
+            "agent_disagreement_eligible_steps": 2,
+            "agent_disagreement_count": 0,
+            "agent_disagreement_rate": 0.0,
+        },
+        {
+            "agent_disagreement_eligible_steps": 2,
+            "agent_disagreement_count": 2,
+            "agent_disagreement_rate": 1.0,
+        },
+        {
+            "critic_challenge_eligible_steps": 2,
+            "critic_challenge_count": 0,
+            "critic_challenge_rate": 0.0,
+        },
+        {
+            "critic_challenge_eligible_steps": 2,
+            "critic_challenge_count": 2,
+            "critic_challenge_rate": 1.0,
+            "critic_found_missed_danger_rate": 0.0,
+            "critic_false_challenge_rate": 0.0,
+        },
+        {
+            "critic_challenge_eligible_steps": 2,
+            "critic_challenge_count": 2,
+            "critic_challenge_rate": 1.0,
+            "critic_found_missed_danger_count": 2,
+            "critic_found_missed_danger_rate": 1.0,
+            "critic_false_challenge_rate": 0.0,
+        },
+        {
+            "critic_challenge_eligible_steps": 2,
+            "critic_challenge_count": 2,
+            "critic_challenge_rate": 1.0,
+            "critic_found_missed_danger_rate": 0.0,
+            "critic_false_challenge_count": 2,
+            "critic_false_challenge_rate": 1.0,
+        },
+        {"agent_failure_fallback_count": 2},
+    ],
+)
+def test_episode_metric_record_rejects_counts_above_episode_step_count(
+    changes: dict[str, object],
+) -> None:
+    metrics = replace(reduce_episode((make_step(),), 0.1), **changes)
+
+    with pytest.raises(ValueError, match="step_count"):
+        EpisodeMetricRecord(make_episode(), metrics)
+
+
+def test_episode_metric_record_requires_jerk_presence_to_match_step_count() -> None:
+    one_step_metrics = reduce_episode((make_step(),), 0.1)
+    with pytest.raises(ValueError, match="jerk"):
+        EpisodeMetricRecord(
+            make_episode(),
+            replace(one_step_metrics, longitudinal_jerk_rms_mps3=0.0),
+        )
+
+    two_steps = (
+        make_step(0, terminated=False),
+        make_step(1),
+    )
+    two_step_metrics = reduce_episode(two_steps, 0.1)
+    two_step_episode = replace(
+        make_episode(),
+        step_count=2,
+        final_step_index=1,
+        simulated_duration_s=0.2,
+        cumulative_reward=2.0,
+    )
+    valid = EpisodeMetricRecord(two_step_episode, two_step_metrics)
+    assert valid.metrics.longitudinal_jerk_rms_mps3 == 0.0
+    with pytest.raises(ValueError, match="jerk"):
+        EpisodeMetricRecord(
+            two_step_episode,
+            replace(two_step_metrics, longitudinal_jerk_rms_mps3=None),
+        )
+
+
+def test_episode_metric_record_accepts_step_count_boundaries() -> None:
+    metrics = replace(
+        reduce_episode((make_step(),), 0.1),
+        unnecessary_braking_event_count=1,
+        agent_disagreement_eligible_steps=1,
+        agent_disagreement_count=1,
+        agent_disagreement_rate=1.0,
+        critic_challenge_eligible_steps=1,
+        critic_challenge_count=1,
+        critic_challenge_rate=1.0,
+        critic_found_missed_danger_count=1,
+        critic_found_missed_danger_rate=1.0,
+        critic_false_challenge_count=0,
+        critic_false_challenge_rate=0.0,
+        agent_failure_fallback_count=1,
+    )
+
+    paired = EpisodeMetricRecord(make_episode(), metrics)
+    alternate_subcount_boundary = EpisodeMetricRecord(
+        make_episode(),
+        replace(
+            metrics,
+            critic_found_missed_danger_count=0,
+            critic_found_missed_danger_rate=0.0,
+            critic_false_challenge_count=1,
+            critic_false_challenge_rate=1.0,
+        ),
+    )
+
+    assert paired.metrics.unnecessary_braking_event_count == paired.episode.step_count
+    assert paired.metrics.critic_false_challenge_rate == 0.0
+    assert alternate_subcount_boundary.metrics.critic_found_missed_danger_rate == 0.0
+    assert alternate_subcount_boundary.metrics.critic_false_challenge_count == 1
+
+
+@pytest.mark.parametrize(
     "inconsistency",
     [
         "collision",

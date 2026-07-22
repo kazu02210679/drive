@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
+import os
 import re
 import stat
 import zipfile
+import zlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,6 +24,14 @@ _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 _PERIODIC_PATTERN = re.compile(r"ppo_checkpoint_([0-9]+)_steps\.zip\Z")
 _LEVEL_BEST_PATTERN = re.compile(r"best_model_level_[0-3]\.zip\Z")
 _FILE_ATTRIBUTE_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+# SB3's `data` member contains JSON metadata, not tensor parameters. These limits leave
+# ample room for normal serialized spaces/schedules while bounding hostile ZIP metadata.
+_MAX_SB3_ARCHIVE_MEMBERS = 128
+_MAX_SB3_DATA_BYTES = 16 * 1024 * 1024
+_MAX_SB3_DATA_COMPRESSED_BYTES = 16 * 1024 * 1024
+_MAX_SB3_DATA_COMPRESSION_RATIO = 500.0
+_FILE_READ_CHUNK_BYTES = 1024 * 1024
+_DATA_READ_CHUNK_BYTES = 64 * 1024
 _MODEL_SELECTION_COLUMNS = (
     "method_id",
     "policy_seed",
@@ -273,15 +284,123 @@ def _strict_json_integer(value: object, name: str, *, minimum: int = 0) -> int:
     return value
 
 
-def _checkpoint_training_timestep(checkpoint: Path) -> int:
+def _file_stat_signature(metadata: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        int(metadata.st_dev),
+        int(metadata.st_ino),
+        int(metadata.st_size),
+        int(metadata.st_mtime_ns),
+        int(metadata.st_ctime_ns),
+    )
+
+
+def _path_regular_file_signature(path: Path) -> tuple[int, int, int, int, int]:
     try:
-        with zipfile.ZipFile(checkpoint, "r") as archive:
-            data_members = [member for member in archive.infolist() if member.filename == "data"]
-            if len(data_members) != 1:
-                raise ValueError("SB3 checkpoint must contain exactly one canonical data member")
-            payload = archive.read(data_members[0])
-    except (OSError, RuntimeError, zipfile.BadZipFile) as error:
-        raise ValueError(f"authenticated checkpoint is not a readable ZIP: {checkpoint}") from error
+        metadata = path.lstat()
+    except OSError as error:
+        raise ValueError(f"checkpoint path identity is unavailable: {path}") from error
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or getattr(metadata, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT
+        or not stat.S_ISREG(metadata.st_mode)
+    ):
+        raise ValueError(f"checkpoint path identity is not a stable regular file: {path}")
+    return _file_stat_signature(metadata)
+
+
+def _assert_checkpoint_unchanged(
+    checkpoint: Path,
+    descriptor: int,
+    expected_signature: tuple[int, int, int, int, int],
+) -> None:
+    try:
+        descriptor_signature = _file_stat_signature(os.fstat(descriptor))
+        path_signature = _path_regular_file_signature(checkpoint)
+    except OSError as error:
+        raise ValueError(
+            f"checkpoint changed or was replaced while reading: {checkpoint}"
+        ) from error
+    if descriptor_signature != expected_signature or path_signature != expected_signature:
+        raise ValueError(f"checkpoint changed or was replaced while reading: {checkpoint}")
+
+
+def _bounded_sb3_data(archive: zipfile.ZipFile) -> bytes:
+    members = archive.infolist()
+    if len(members) > _MAX_SB3_ARCHIVE_MEMBERS:
+        raise ValueError("SB3 checkpoint archive has too many members")
+    if any(member.is_dir() and member.filename.rstrip("/") == "data" for member in members):
+        raise ValueError("SB3 checkpoint data member cannot be a directory")
+    data_members = [member for member in members if member.filename == "data"]
+    if len(data_members) != 1:
+        raise ValueError("SB3 checkpoint must contain exactly one canonical data member")
+    member = data_members[0]
+    if member.is_dir():
+        raise ValueError("SB3 checkpoint data member cannot be a directory")
+    if member.flag_bits & (1 | 0x40):
+        raise ValueError("SB3 checkpoint data member cannot be encrypted")
+    if member.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+        raise ValueError("SB3 checkpoint data member uses unsupported compression")
+    if member.file_size < 0 or member.file_size > _MAX_SB3_DATA_BYTES:
+        raise ValueError("SB3 checkpoint data uncompressed size exceeds the limit")
+    if member.compress_size < 0 or member.compress_size > _MAX_SB3_DATA_COMPRESSED_BYTES:
+        raise ValueError("SB3 checkpoint data compressed size exceeds the limit")
+    if member.file_size and member.compress_size == 0:
+        raise ValueError("SB3 checkpoint data compression ratio exceeds the limit")
+    if (
+        member.compress_size
+        and member.file_size / member.compress_size > _MAX_SB3_DATA_COMPRESSION_RATIO
+    ):
+        raise ValueError("SB3 checkpoint data compression ratio exceeds the limit")
+
+    chunks: list[bytes] = []
+    actual_size = 0
+    with archive.open(member, "r") as data_source:
+        while True:
+            chunk = data_source.read(
+                min(_DATA_READ_CHUNK_BYTES, _MAX_SB3_DATA_BYTES + 1 - actual_size)
+            )
+            if not chunk:
+                break
+            actual_size += len(chunk)
+            if actual_size > _MAX_SB3_DATA_BYTES:
+                raise ValueError("SB3 checkpoint actual streamed data exceeds the limit")
+            chunks.append(chunk)
+    if actual_size != member.file_size:
+        raise ValueError("SB3 checkpoint actual data size does not match its declaration")
+    return b"".join(chunks)
+
+
+def _checkpoint_training_timestep(checkpoint: Path, expected_sha256: str) -> int:
+    if _SHA256_PATTERN.fullmatch(expected_sha256) is None:
+        raise ValueError("authenticated checkpoint SHA-256 is malformed")
+    try:
+        with checkpoint.open("rb", buffering=0) as source:
+            before = os.fstat(source.fileno())
+            if not stat.S_ISREG(before.st_mode):
+                raise ValueError("authenticated checkpoint descriptor is not a regular file")
+            signature = _file_stat_signature(before)
+            _assert_checkpoint_unchanged(checkpoint, source.fileno(), signature)
+            digest = hashlib.sha256()
+            while chunk := source.read(_FILE_READ_CHUNK_BYTES):
+                digest.update(chunk)
+            _assert_checkpoint_unchanged(checkpoint, source.fileno(), signature)
+            if digest.hexdigest() != expected_sha256:
+                raise ValueError(f"authenticated checkpoint SHA-256 mismatch: {checkpoint}")
+            source.seek(0)
+            with zipfile.ZipFile(source, "r") as archive:
+                payload = _bounded_sb3_data(archive)
+            _assert_checkpoint_unchanged(checkpoint, source.fileno(), signature)
+    except ValueError:
+        raise
+    except (
+        EOFError,
+        NotImplementedError,
+        OSError,
+        RuntimeError,
+        zipfile.BadZipFile,
+        zlib.error,
+    ) as error:
+        raise ValueError(f"SB3 checkpoint ZIP data is malformed: {checkpoint}") from error
     try:
         data = json.loads(
             payload.decode("utf-8"),
@@ -423,7 +542,10 @@ def discover_checkpoint_candidates(
     for artifact in metadata.checkpoint_curriculum_artifacts:
         relative_path = str(artifact["checkpoint_path"])
         name = Path(relative_path).name
-        training_timestep = _checkpoint_training_timestep(run_dir / Path(relative_path))
+        checkpoint_sha256 = str(artifact["checkpoint_sha256"])
+        training_timestep = _checkpoint_training_timestep(
+            run_dir / Path(relative_path), checkpoint_sha256
+        )
         kind: CheckpointKind
         if _LEVEL_BEST_PATTERN.fullmatch(name) is not None:
             kind = "level_best"
@@ -440,7 +562,7 @@ def discover_checkpoint_candidates(
         candidates.append(
             CheckpointCandidate(
                 path=run_dir / Path(relative_path),
-                sha256=str(artifact["checkpoint_sha256"]),
+                sha256=checkpoint_sha256,
                 method_id=metadata_method,
                 policy_seed=metadata_seed,
                 checkpoint_kind=kind,

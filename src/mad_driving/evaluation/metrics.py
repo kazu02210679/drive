@@ -192,6 +192,16 @@ class EpisodeMetrics:
             raise ValueError("crossing_actor_collision requires collision")
         if self.near_miss and self.collision:
             raise ValueError("near_miss excludes collision")
+        if self.near_miss and self.minimum_actual_ttc_s is None:
+            raise ValueError("near_miss requires minimum_actual_ttc_s")
+        if not (
+            self.decision_latency_p50_ms
+            <= self.decision_latency_p95_ms
+            <= self.decision_latency_p99_ms
+        ):
+            raise ValueError("decision latency percentiles must be ordered p50 <= p95 <= p99")
+        if self.unnecessary_stop_duration_s > self.simulated_travel_time_s:
+            raise ValueError("unnecessary_stop_duration_s cannot exceed simulated_travel_time_s")
         expected_negative_margin = (
             self.minimum_stopping_margin_m is not None and self.minimum_stopping_margin_m < 0.0
         )
@@ -224,6 +234,23 @@ class EpisodeMetricRecord:
             raise ValueError("episode cumulative reward is inconsistent with metrics")
         if self.episode.simulated_duration_s != self.metrics.simulated_travel_time_s:
             raise ValueError("episode simulated duration is inconsistent with metrics")
+        jerk = self.metrics.longitudinal_jerk_rms_mps3
+        if self.episode.step_count == 1 and jerk is not None:
+            raise ValueError("longitudinal jerk must be None for a one-step episode")
+        if self.episode.step_count >= 2 and jerk is None:
+            raise ValueError("longitudinal jerk must be present for a multi-step episode")
+        for name in (
+            "unnecessary_braking_event_count",
+            "agent_disagreement_eligible_steps",
+            "agent_disagreement_count",
+            "critic_challenge_eligible_steps",
+            "critic_challenge_count",
+            "critic_found_missed_danger_count",
+            "critic_false_challenge_count",
+            "agent_failure_fallback_count",
+        ):
+            if getattr(self.metrics, name) > self.episode.step_count:
+                raise ValueError(f"{name} cannot exceed episode step_count")
 
 
 def _positive_finite(name: str, value: float) -> float:
