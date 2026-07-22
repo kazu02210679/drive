@@ -31,12 +31,50 @@ class SeedRangeConfig(StrictTypedFrozenModel):
         return range(self.seed_start, self.seed_start + self.seed_count)
 
 
+class FloatRangeConfig(StrictTypedFrozenModel):
+    """One finite inclusive floating-point range."""
+
+    minimum: FiniteFloat
+    maximum: FiniteFloat
+
+    @model_validator(mode="after")
+    def validate_order(self) -> Self:
+        if self.minimum > self.maximum:
+            raise ValueError("minimum must not exceed maximum")
+        return self
+
+
+class CurriculumConfig(StrictTypedFrozenModel):
+    """Validated curriculum settings for Phase 5 scenarios."""
+
+    mode: Literal["fixed", "automatic"] = "fixed"
+    fixed_level: int = Field(default=0, ge=0, le=3)
+    initial_level: int = Field(default=0, ge=0, le=3)
+    success_rate_threshold: FiniteFloat = Field(default=0.80, ge=0.0, le=1.0)
+    collision_rate_threshold: FiniteFloat = Field(default=0.05, ge=0.0, le=1.0)
+    consecutive_evaluations: PositiveInt = 2
+
+
+class LeadBrakeScenarioConfig(StrictTypedFrozenModel):
+    """Validated parameter ranges for the Lead Brake scenario."""
+
+    initial_gap_m: FloatRangeConfig = FloatRangeConfig(minimum=35.0, maximum=55.0)
+    speed_fraction: FloatRangeConfig = FloatRangeConfig(minimum=0.80, maximum=1.00)
+    trigger_s: FloatRangeConfig = FloatRangeConfig(minimum=1.0, maximum=3.0)
+    mild_deceleration_mps2: FloatRangeConfig = FloatRangeConfig(minimum=2.0, maximum=4.0)
+    severe_deceleration_mps2: FloatRangeConfig = FloatRangeConfig(minimum=4.0, maximum=8.0)
+    survival_s: FiniteFloat = Field(default=4.0, gt=0.0)
+
+
 class ScenarioSplitsConfig(StrictTypedFrozenModel):
     """Disjoint scenario seed ranges for training and evaluation roles."""
 
     train: SeedRangeConfig = SeedRangeConfig(seed_start=0, seed_count=10_000)
     validation: SeedRangeConfig = SeedRangeConfig(seed_start=10_000, seed_count=1_000)
     test: SeedRangeConfig = SeedRangeConfig(seed_start=20_000, seed_count=1_000)
+    selection: Literal["nominal", "lead_brake", "cut_in", "occluded_crossing"] = "nominal"
+    curriculum: CurriculumConfig = CurriculumConfig()
+    lead_brake: LeadBrakeScenarioConfig = LeadBrakeScenarioConfig()
 
     @model_validator(mode="after")
     def validate_disjoint_ranges(self) -> Self:

@@ -1715,3 +1715,39 @@ def test_dependency_factory_failure_closes_owned_simulator_and_is_fatal() -> Non
     assert simulator.close_calls == 1
     with pytest.raises(RuntimeError, match="fatally closed"):
         harness.env.reset(seed=100)
+
+
+class DifficultyRecordingRuntimeFactory:
+    def __init__(self, runtime: RecordingRuntime) -> None:
+        self.runtime = runtime
+        self.levels: list[int] = []
+
+    def __call__(self, scenario_id: str) -> RecordingRuntime:
+        del scenario_id
+        return self.runtime
+
+    def set_difficulty_level(self, level: int) -> None:
+        self.levels.append(level)
+
+
+def test_difficulty_level_is_forwarded_to_the_scenario_factory() -> None:
+    runtime = RecordingRuntime()
+    factory = DifficultyRecordingRuntimeFactory(runtime)
+    harness = make_env(runtime=runtime, runtime_factory=factory)
+
+    harness.env.set_difficulty_level(2)
+
+    assert factory.levels == [2]
+
+
+def test_reset_and_step_info_include_scenario_metadata() -> None:
+    harness = make_env(runtime=RecordingRuntime())
+    _, reset_info = harness.env.reset(seed=42)
+    _, _, _, _, step_info = harness.env.step(int(DrivingAction.KEEP))
+
+    for info in (reset_info, step_info):
+        assert info["scenario_id"] == "unit_multi_agent_speed_env"
+        assert info["difficulty_level"] is None
+        assert info["scenario_parameters"] == {}
+        assert info["scenario_success"] is False
+        assert info["scenario_failure"] is False

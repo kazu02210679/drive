@@ -24,6 +24,17 @@ scenarios:
   test:
     seed_start: 20000
     seed_count: 1000
+  selection: nominal
+  curriculum:
+    mode: fixed
+    fixed_level: 0
+  lead_brake:
+    initial_gap_m: {minimum: 35.0, maximum: 55.0}
+    speed_fraction: {minimum: 0.80, maximum: 1.00}
+    trigger_s: {minimum: 1.0, maximum: 3.0}
+    mild_deceleration_mps2: {minimum: 2.0, maximum: 4.0}
+    severe_deceleration_mps2: {minimum: 4.0, maximum: 8.0}
+    survival_s: 4.0
 agents:
   nominal:
     horizon_s: 5.0

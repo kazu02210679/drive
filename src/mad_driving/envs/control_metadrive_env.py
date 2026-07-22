@@ -7,6 +7,15 @@ from typing import Any, cast
 from mad_driving.config.models import ControlConfig
 from mad_driving.control import LaneKeepingLongitudinalPolicy
 from mad_driving.envs.multi_agent_speed_env import DrivingEnvironment
+from mad_driving.scenarios import (
+    ActorCommand,
+    KinematicActorSpawn,
+    LaneVehicleSpawn,
+    RoadGeometry,
+    ScenarioActorManager,
+    ScenarioActorState,
+    StaticOccluderSpawn,
+)
 
 
 def create_control_metadrive_env(
@@ -67,5 +76,48 @@ def create_control_metadrive_env(
                 )
             info["metadrive_scenario_index"] = actual
             return observation, info
+
+        def setup_engine(self) -> None:
+            super().setup_engine()
+            self.engine.register_manager("scenario_actor_manager", ScenarioActorManager())
+
+        def scenario_road_geometry(self) -> RoadGeometry:
+            lane = self.vehicle.navigation.current_lane
+            longitudinal, lateral = lane.local_coordinates(self.vehicle.position)
+            lane_index = tuple(self.vehicle.lane_index)
+            if len(lane_index) != 3:
+                raise RuntimeError("ego lane index must contain three values")
+            return RoadGeometry(
+                ego_lane_index=(str(lane_index[0]), str(lane_index[1]), int(lane_index[2])),
+                ego_longitudinal_m=float(longitudinal),
+                ego_lateral_m=float(lateral),
+                ego_speed_mps=float(self.vehicle.speed),
+                decision_interval_s=float(self.config["physics_world_step_size"])
+                * int(self.config["decision_repeat"]),
+            )
+
+        def scenario_spawn_lane_vehicle(self, spawn: LaneVehicleSpawn) -> str:
+            return self._scenario_actor_manager().spawn_lane_vehicle(spawn)
+
+        def scenario_spawn_crossing_actor(self, spawn: KinematicActorSpawn) -> str:
+            return self._scenario_actor_manager().spawn_crossing_actor(spawn)
+
+        def scenario_spawn_occluder(self, spawn: StaticOccluderSpawn) -> str:
+            return self._scenario_actor_manager().spawn_occluder(spawn)
+
+        def scenario_command_actor(self, actor_id: str, command: ActorCommand) -> None:
+            self._scenario_actor_manager().command_actor(actor_id, command)
+
+        def scenario_actor_state(self, actor_id: str) -> ScenarioActorState:
+            return self._scenario_actor_manager().actor_state(actor_id)
+
+        def scenario_actor_ids(self) -> tuple[str, ...]:
+            return self._scenario_actor_manager().actor_ids()
+
+        def _scenario_actor_manager(self) -> ScenarioActorManager:
+            manager = self.engine.scenario_actor_manager
+            if not isinstance(manager, ScenarioActorManager):
+                raise RuntimeError("scenario Actor manager is not registered")
+            return manager
 
     return cast(DrivingEnvironment, ControlMetaDriveEnv(config))

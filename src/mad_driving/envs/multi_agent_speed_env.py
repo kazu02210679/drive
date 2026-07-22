@@ -40,14 +40,19 @@ from mad_driving.interfaces import (
 )
 from mad_driving.safety import SafetyShield
 from mad_driving.scenarios import (
+    ActorCommand,
     EnvironmentRole,
     EpisodeSeedAllocator,
     EpisodeSeeds,
-    NoOpScenarioRuntime,
+    KinematicActorSpawn,
+    LaneVehicleSpawn,
+    RoadGeometry,
+    ScenarioActorState,
     ScenarioObservationContext,
     ScenarioRuntime,
     ScenarioState,
     ScenarioStepResult,
+    StaticOccluderSpawn,
 )
 from mad_driving.scenarios.runtime import ScenarioTransition
 from mad_driving.world_model import SceneSnapshotBuilder
@@ -71,6 +76,20 @@ class DrivingEnvironment(Protocol):
     ) -> tuple[Any, float, bool, bool, dict[str, Any]]: ...
 
     def close(self) -> None: ...
+
+    def scenario_road_geometry(self) -> RoadGeometry: ...
+
+    def scenario_spawn_lane_vehicle(self, spawn: LaneVehicleSpawn) -> str: ...
+
+    def scenario_spawn_crossing_actor(self, spawn: KinematicActorSpawn) -> str: ...
+
+    def scenario_spawn_occluder(self, spawn: StaticOccluderSpawn) -> str: ...
+
+    def scenario_command_actor(self, actor_id: str, command: ActorCommand) -> None: ...
+
+    def scenario_actor_state(self, actor_id: str) -> ScenarioActorState: ...
+
+    def scenario_actor_ids(self) -> tuple[str, ...]: ...
 
 
 class EnvironmentFactory(Protocol):
@@ -198,7 +217,7 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
         *,
         role: EnvironmentRole,
         worker_index: int,
-        scenario_runtime_factory: ScenarioRuntimeFactory = NoOpScenarioRuntime,
+        scenario_runtime_factory: ScenarioRuntimeFactory | None = None,
         env_factory: ControlEnvironmentFactory = _create_control_environment,
         suite_factory: SuiteFactory = AgentSuite.from_config,
         shield_factory: ShieldFactory = SafetyShield,
@@ -223,6 +242,10 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
         self._config = config
         self._role = role
         self._worker_index = worker_index
+        if scenario_runtime_factory is None:
+            from mad_driving.scenarios import build_scenario_runtime_factory
+
+            scenario_runtime_factory = build_scenario_runtime_factory(config)
         self._scenario_runtime_factory = scenario_runtime_factory
         self._env_factory = env_factory
         self._suite_factory = suite_factory
@@ -246,6 +269,14 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
         self._gym_rng_initialized = False
         self._closed = False
         self._fatally_closed = False
+
+    def set_difficulty_level(self, level: int) -> None:
+        """Queue a Phase 5 difficulty level for application on the next reset."""
+
+        setter = getattr(self._scenario_runtime_factory, "set_difficulty_level", None)
+        if not callable(setter):
+            raise RuntimeError("scenario runtime factory does not support difficulty levels")
+        setter(level)
 
     def reset(
         self,
@@ -313,6 +344,7 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
             )
             info = reset_info
             info.update(self._episode_metadata(seeds, actual_scenario_index))
+            info.update(self._scenario_metadata(scenario_state, initial_result))
         except Exception as error:
             self._fatal_close(error)
             raise
@@ -471,6 +503,7 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
             )
             info = step_info
             info.update(self._episode_metadata(seeds, actual_scenario_index))
+            info.update(self._scenario_metadata(scenario_state, scenario_result))
             info.update(
                 {
                     "requested_action": int(requested),
@@ -597,6 +630,35 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
         }
 
     @staticmethod
+    def _scenario_metadata(
+        state: ScenarioState,
+        result: ScenarioStepResult,
+    ) -> dict[str, object]:
+        difficulty_level = state.parameters.get("difficulty_level")
+        if isinstance(difficulty_level, bool) or not isinstance(difficulty_level, int):
+            difficulty_level = None
+        return {
+            "scenario_id": state.scenario_id,
+            "difficulty_level": difficulty_level,
+            "scenario_parameters": MultiAgentSpeedEnv._json_safe_copy(state.parameters),
+            "scenario_success": result.success,
+            "scenario_failure": result.failure,
+        }
+
+    @staticmethod
+    def _json_safe_copy(value: object) -> object:
+        if value is None or isinstance(value, str | bool | int | float):
+            return value
+        if isinstance(value, Mapping):
+            return {
+                str(key): MultiAgentSpeedEnv._json_safe_copy(nested)
+                for key, nested in value.items()
+            }
+        if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+            return [MultiAgentSpeedEnv._json_safe_copy(item) for item in value]
+        raise ValueError("scenario parameters must be JSON-safe")
+
+    @staticmethod
     def _copy_info(raw_info: Mapping[str, object]) -> dict[str, object]:
         if not isinstance(raw_info, Mapping):
             raise TypeError("simulator info must be a mapping")
@@ -609,7 +671,7 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
     ) -> None:
         if state.seeds != expected_seeds:
             raise RuntimeError("ScenarioState seeds mismatch for current episode")
-        if state.scenario_id != self._config.scenario_id:
+        if self._config.scenario_id != "phase5" and state.scenario_id != self._config.scenario_id:
             raise RuntimeError(
                 "ScenarioState scenario_id mismatch: "
                 f"expected {self._config.scenario_id!r}, returned {state.scenario_id!r}"
@@ -677,7 +739,7 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
                 "observation context scenario_id mismatch: "
                 f"state {state.scenario_id!r}, returned {context.scenario_id!r}"
             )
-        if context.scenario_id != self._config.scenario_id:
+        if self._config.scenario_id != "phase5" and context.scenario_id != self._config.scenario_id:
             raise RuntimeError("observation context scenario_id does not match configured scenario")
         return context
 

@@ -1,0 +1,102 @@
+from __future__ import annotations
+
+import pytest
+
+from mad_driving.config.models import LeadBrakeScenarioConfig
+from mad_driving.scenarios import (
+    ActorCommand,
+    EpisodeSeeds,
+    LeadBrakeRuntime,
+    RoadGeometry,
+    ScenarioParameterSampler,
+    ScenarioStepResult,
+)
+
+
+class FakeEnvironment:
+    def __init__(self) -> None:
+        self.spawns: list[object] = []
+        self.commands: list[tuple[str, ActorCommand]] = []
+        self.actor_ids = {"lead-brake"}
+
+    def scenario_road_geometry(self) -> RoadGeometry:
+        return RoadGeometry((">", ">>", 0), 10.0, 0.0, 10.0, 0.1)
+
+    def scenario_spawn_lane_vehicle(self, spawn: object) -> str:
+        self.spawns.append(spawn)
+        return "lead-brake"
+
+    def scenario_command_actor(self, actor_id: str, command: ActorCommand) -> None:
+        if actor_id not in self.actor_ids:
+            raise RuntimeError(f"missing scenario Actor: {actor_id}")
+        self.commands.append((actor_id, command))
+
+    def scenario_actor_ids(self) -> tuple[str, ...]:
+        return tuple(sorted(self.actor_ids))
+
+    def remove(self, actor_id: str) -> None:
+        self.actor_ids.remove(actor_id)
+
+
+def no_collision_info() -> dict[str, object]:
+    return {"crash_vehicle": False}
+
+
+def reset_lead_brake(
+    *, trigger_s: float = 1.0, deceleration_mps2: float = 4.0, survival_s: float = 4.0
+) -> tuple[LeadBrakeRuntime, FakeEnvironment, object]:
+    config = LeadBrakeScenarioConfig(
+        trigger_s={"minimum": trigger_s, "maximum": trigger_s},
+        mild_deceleration_mps2={"minimum": deceleration_mps2, "maximum": deceleration_mps2},
+        survival_s=survival_s,
+    )
+    runtime = LeadBrakeRuntime(config, ScenarioParameterSampler(7), difficulty_level=1)
+    environment = FakeEnvironment()
+    state = runtime.reset(environment, seeds=EpisodeSeeds(1, 2, 3))
+    state = runtime.after_simulator_reset(environment, state)
+    return runtime, environment, state
+
+
+def test_lead_brake_spawns_ahead_in_the_ego_lane() -> None:
+    _, environment, state = reset_lead_brake()
+
+    spawn = environment.spawns[-1]
+    assert spawn.lane_index == (">", ">>", 0)
+    assert spawn.longitudinal_m == 10.0 + state.parameters["initial_gap_m"]
+
+
+def test_lead_brake_triggers_sampled_deceleration() -> None:
+    runtime, environment, state = reset_lead_brake(trigger_s=1.0, deceleration_mps2=4.0)
+    runtime.before_step(environment, state, step_index=10)
+
+    assert environment.commands[-1] == ("lead-brake", ActorCommand.longitudinal(-4.0))
+
+
+def test_lead_brake_succeeds_after_survival_window() -> None:
+    runtime, environment, state = reset_lead_brake(trigger_s=1.0, survival_s=4.0)
+    transition = runtime.after_step(
+        environment, state, step_index=50, raw_info=no_collision_info()
+    )
+
+    assert transition.outcome == ScenarioStepResult(success=True, failure=False)
+
+
+def test_lead_brake_fails_on_collision_with_present_actor() -> None:
+    runtime, environment, state = reset_lead_brake()
+
+    transition = runtime.after_step(
+        environment,
+        state,
+        step_index=1,
+        raw_info={"crash_vehicle": True},
+    )
+
+    assert transition.outcome == ScenarioStepResult(success=False, failure=True)
+
+
+def test_missing_spawned_actor_is_internal_error() -> None:
+    runtime, environment, state = reset_lead_brake()
+    environment.remove("lead-brake")
+
+    with pytest.raises(RuntimeError, match="missing scenario Actor"):
+        runtime.before_step(environment, state, step_index=1)

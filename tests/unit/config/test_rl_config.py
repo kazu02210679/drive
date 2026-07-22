@@ -3,7 +3,13 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from mad_driving.config.models import AppConfig, ObservationConfig, PPOConfig, RewardConfig
+from mad_driving.config.models import (
+    AppConfig,
+    FloatRangeConfig,
+    ObservationConfig,
+    PPOConfig,
+    RewardConfig,
+)
 
 
 def minimum_app_config() -> dict[str, Any]:
@@ -73,6 +79,11 @@ def test_scenario_seed_ranges_must_not_overlap() -> None:
 
     with pytest.raises(ValidationError, match="overlap"):
         AppConfig.model_validate(payload)
+
+
+def test_float_range_requires_ordered_finite_bounds() -> None:
+    with pytest.raises(ValidationError, match="minimum"):
+        FloatRangeConfig(minimum=2.0, maximum=1.0)
 
 
 def test_phase4_explicit_values_are_preserved_in_app_config() -> None:

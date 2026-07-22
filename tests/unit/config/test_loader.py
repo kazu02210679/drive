@@ -44,6 +44,43 @@ def test_loads_valid_config_and_exports_metadrive_values(tmp_path: Path) -> None
     }
 
 
+def test_phase5_defaults_are_strict() -> None:
+    config = load_config("configs/base.yaml")
+
+    assert config.scenarios.curriculum.mode == "fixed"
+    assert config.scenarios.curriculum.fixed_level == 0
+    assert config.scenarios.lead_brake.initial_gap_m.minimum == 35.0
+    assert config.scenarios.lead_brake.initial_gap_m.maximum == 55.0
+
+
+def test_overlay_selects_fixed_lead_brake() -> None:
+    config = load_config("configs/base.yaml", "configs/scenarios/lead_brake.yaml")
+
+    assert config.scenarios.curriculum.fixed_level == 1
+    assert config.scenarios.selection == "lead_brake"
+
+
+def test_overlay_rejects_mapping_scalar_conflict(tmp_path: Path) -> None:
+    overlay = tmp_path / "bad.yaml"
+    overlay.write_text("scenarios:\n  lead_brake: 4\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="mapping conflict"):
+        load_config("configs/base.yaml", overlay)
+
+
+def test_overlay_merges_nested_scenario_settings(tmp_path: Path) -> None:
+    overlay = tmp_path / "lead-gap.yaml"
+    overlay.write_text(
+        "scenarios:\n  lead_brake:\n    initial_gap_m:\n      minimum: 40.0\n",
+        encoding="utf-8",
+    )
+
+    config = load_config("configs/base.yaml", overlay)
+
+    assert config.scenarios.lead_brake.initial_gap_m.minimum == 40.0
+    assert config.scenarios.lead_brake.initial_gap_m.maximum == 55.0
+
+
 def test_missing_config_file_has_clear_error(tmp_path: Path) -> None:
     missing = tmp_path / "missing.yaml"
 
