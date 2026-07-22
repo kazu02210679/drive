@@ -10,6 +10,7 @@ from mad_driving.interfaces.scene_frame import (
     PrivilegedWorldState,
     RoadContext,
     SceneFrame,
+    stopping_margin_m,
 )
 from mad_driving.interfaces.scene_snapshot import EgoState, SceneObservation, SceneSnapshot
 from mad_driving.interfaces.shield_result import ShieldResult
@@ -28,4 +29,5 @@ __all__ = [
     "SceneObservation",
     "SceneSnapshot",
     "ShieldResult",
+    "stopping_margin_m",
 ]

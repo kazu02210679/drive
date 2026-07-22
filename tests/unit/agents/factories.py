@@ -157,6 +157,7 @@ def make_frame(
     scenario_success: bool = False,
     scenario_failure: bool = False,
     minimum_actual_ttc_s: float | None = None,
+    minimum_actual_stopping_margin_m: float | None = None,
     hard_rule_constraint: bool = False,
 ) -> SceneFrame:
     """Build a full frame for reward and environment tests."""
@@ -180,6 +181,7 @@ def make_frame(
             scenario_success=scenario_success,
             scenario_failure=scenario_failure,
             minimum_actual_ttc_s=minimum_actual_ttc_s,
+            minimum_actual_stopping_margin_m=minimum_actual_stopping_margin_m,
             hard_rule_constraint=hard_rule_constraint,
         ),
     )

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any, cast
 
 import gymnasium as gym
@@ -10,6 +10,7 @@ import pytest
 from numpy.typing import NDArray
 from stable_baselines3.common.vec_env import DummyVecEnv
 
+import mad_driving.envs.multi_agent_speed_env as multi_agent_speed_env_module
 from mad_driving.agents.critic import CriticAgent
 from mad_driving.agents.nominal import NominalMotionAgent
 from mad_driving.agents.noop_critic import NoOpCritic
@@ -745,7 +746,9 @@ def test_default_environment_composes_the_selected_method_profile(method_id: str
 def test_default_suite_routes_expected_failed_agents_to_the_shield(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def fail_nominal(self: NominalMotionAgent, observation: SceneObservation) -> tuple[RiskClaim, ...]:
+    def fail_nominal(
+        self: NominalMotionAgent, observation: SceneObservation
+    ) -> tuple[RiskClaim, ...]:
         del self, observation
         raise RuntimeError("injected nominal failure")
 
@@ -1709,6 +1712,115 @@ def test_per_agent_failure_result_remains_a_valid_mdp_step() -> None:
         assert truncated is False
     finally:
         harness.env.close()
+
+
+def test_trace_records_pre_step_analysis_and_shield_latency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock_values = iter((100, 2_000_100, 5_000_000, 5_500_000, 8_000_000, 11_000_000))
+    monkeypatch.setattr(
+        multi_agent_speed_env_module.time,
+        "perf_counter_ns",
+        lambda: next(clock_values),
+    )
+    harness = make_env()
+    try:
+        harness.env.reset(seed=89)
+        _, _, _, _, info = harness.env.step(DrivingAction.KEEP)
+        trace = info["decision_trace"]
+
+        assert trace.expected_agent_ids == ("nominal", "hazard", "rule")
+        assert trace.analysis_latency_ms == pytest.approx(2.0)
+        assert trace.shield_latency_ms == pytest.approx(0.5)
+        assert np.isfinite(trace.analysis_latency_ms)
+        assert np.isfinite(trace.shield_latency_ms)
+        assert trace.analysis_latency_ms >= 0.0
+        assert trace.shield_latency_ms >= 0.0
+    finally:
+        harness.env.close()
+
+
+def test_latency_differences_do_not_change_environment_scientific_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def run(clock_samples: tuple[int, ...]) -> tuple[np.ndarray, float, DecisionTrace]:
+        clock_values = iter(clock_samples)
+        monkeypatch.setattr(
+            multi_agent_speed_env_module.time,
+            "perf_counter_ns",
+            lambda: next(clock_values),
+        )
+        harness = make_env()
+        try:
+            harness.env.reset(seed=90)
+            observation, reward, _, _, info = harness.env.step(DrivingAction.KEEP)
+            return observation, reward, info["decision_trace"]  # type: ignore[return-value]
+        finally:
+            harness.env.close()
+
+    first = run((0, 1_000_000, 2_000_000, 3_000_000, 4_000_000, 5_000_000))
+    second = run((0, 9_000_000, 10_000_000, 12_000_000, 13_000_000, 16_000_000))
+
+    first_record = asdict(first[2])
+    second_record = asdict(second[2])
+    for record in (first_record, second_record):
+        record.pop("analysis_latency_ms")
+        record.pop("shield_latency_ms")
+
+    assert np.array_equal(first[0], second[0])
+    assert first[1] == second[1]
+    assert first_record == second_record
+    assert (
+        first[2].analysis_latency_ms,
+        first[2].shield_latency_ms,
+    ) != (
+        second[2].analysis_latency_ms,
+        second[2].shield_latency_ms,
+    )
+
+
+def test_default_oracle_ignores_claims_and_intentionally_disabled_specialists() -> None:
+    def reset_with_method(method_id: str) -> tuple[float | None, tuple[str, ...]]:
+        config_values = make_config_for_method(method_id).model_dump(mode="python")
+        config_values["agents"]["hazard"].update(  # type: ignore[index]
+            {"reaction_delay_s": 0.25, "ego_max_safe_deceleration_mps2": -5.0}
+        )
+        actor = FakeVehicle("hidden-lead", position=(12.0, 0.0))
+        actor.velocity = (5.0, 0.0)
+        actor.last_velocity = (5.0, 0.0)
+        runtime = RecordingRuntime(
+            context=ScenarioObservationContext(
+                scenario_id="unit_multi_agent_speed_env",
+                visible_actor_ids=frozenset(),
+            )
+        )
+        environment = MultiAgentSpeedEnv(
+            AppConfig.model_validate(config_values),
+            role="train",
+            worker_index=0,
+            scenario_runtime_factory=lambda scenario_id: runtime,
+            env_factory=RecordingEnvironmentFactory((FakeSimulator(actors=(actor,)),)),
+            reward_factory=lambda reward_config: RecordingRewardCalculator(),
+            observation_factory=lambda observation_config: RecordingObservationBuilder(),
+        )
+        try:
+            environment.reset(seed=91)
+            assert environment._frame is not None
+            assert environment._analysis is not None
+            assert environment._frame.observation.visible_actors == ()
+            return (
+                environment._frame.privileged.minimum_actual_stopping_margin_m,
+                environment._analysis.expected_agent_ids,
+            )
+        finally:
+            environment.close()
+
+    proposed_margin, proposed_agents = reset_with_method("proposed")
+    ablated_margin, ablated_agents = reset_with_method("proposed_no_hazard")
+
+    assert proposed_agents == ("nominal", "hazard", "rule")
+    assert ablated_agents == ("nominal", "rule")
+    assert proposed_margin == ablated_margin == pytest.approx(2.5)
 
 
 def test_suite_level_analysis_error_is_fatal() -> None:

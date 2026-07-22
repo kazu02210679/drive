@@ -14,6 +14,7 @@ from mad_driving.interfaces.scene_frame import (
     PrivilegedWorldState,
     RoadContext,
     SceneFrame,
+    stopping_margin_m,
 )
 from mad_driving.interfaces.scene_snapshot import EgoState, SceneObservation
 from mad_driving.scenarios import EpisodeSeeds
@@ -103,6 +104,7 @@ def make_frame(**overrides: Any) -> SceneFrame:
             scenario_success=False,
             scenario_failure=False,
             minimum_actual_ttc_s=None,
+            minimum_actual_stopping_margin_m=None,
             hard_rule_constraint=False,
         ),
     }
@@ -123,6 +125,60 @@ def test_agent_visible_observation_excludes_scenario_identity_and_seeds() -> Non
 def test_privileged_oracle_ttc_requires_a_non_negative_finite_value(value: float) -> None:
     with pytest.raises(ValueError, match="minimum_actual_ttc_s"):
         replace(make_frame().privileged, minimum_actual_ttc_s=value)
+
+
+@pytest.mark.parametrize(
+    (
+        "ego_speed_mps",
+        "minimum_actual_ttc_s",
+        "reaction_delay_s",
+        "safe_deceleration_mps2",
+        "expected",
+    ),
+    [
+        (8.0, None, 0.5, 6.0, None),
+        (0.0, 2.0, 0.5, 6.0, 0.0),
+        (8.0, 3.0, 0.5, 4.0, 12.0),
+        (10.0, 1.0, 0.5, 5.0, -5.0),
+    ],
+)
+def test_stopping_margin_oracle_uses_fixed_truth_formula(
+    ego_speed_mps: float,
+    minimum_actual_ttc_s: float | None,
+    reaction_delay_s: float,
+    safe_deceleration_mps2: float,
+    expected: float | None,
+) -> None:
+    result = stopping_margin_m(
+        ego_speed_mps=ego_speed_mps,
+        minimum_actual_ttc_s=minimum_actual_ttc_s,
+        reaction_delay_s=reaction_delay_s,
+        safe_deceleration_mps2=safe_deceleration_mps2,
+    )
+
+    if expected is None:
+        assert result is None
+    else:
+        assert result == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("safe_deceleration_mps2", [0.0, -1.0])
+def test_stopping_margin_oracle_requires_positive_safe_deceleration(
+    safe_deceleration_mps2: float,
+) -> None:
+    with pytest.raises(ValueError, match="safe_deceleration_mps2"):
+        stopping_margin_m(
+            ego_speed_mps=8.0,
+            minimum_actual_ttc_s=2.0,
+            reaction_delay_s=0.5,
+            safe_deceleration_mps2=safe_deceleration_mps2,
+        )
+
+
+@pytest.mark.parametrize("value", [math.inf, math.nan])
+def test_privileged_stopping_margin_requires_a_finite_value(value: float) -> None:
+    with pytest.raises(ValueError, match="minimum_actual_stopping_margin_m"):
+        replace(make_frame().privileged, minimum_actual_stopping_margin_m=value)
 
 
 def test_privileged_rule_constraint_requires_a_boolean() -> None:
@@ -178,6 +234,9 @@ def make_trace(**overrides: Any) -> DecisionTrace:
         "claims": (make_claim(),),
         "review": make_review(),
         "reward_components": {"progress": 0.1},
+        "expected_agent_ids": ("nominal", "hazard", "rule"),
+        "analysis_latency_ms": 0.0,
+        "shield_latency_ms": 0.0,
     }
     values.update(overrides)
     return DecisionTrace(**values)
@@ -229,6 +288,26 @@ def test_decision_trace_preserves_complete_phase5_episode_metadata() -> None:
     json.dumps(asdict(trace))
 
 
+def test_decision_trace_freezes_expected_agents_and_validates_timing() -> None:
+    trace = make_trace(
+        expected_agent_ids=["nominal", "rule"],
+        analysis_latency_ms=1.25,
+        shield_latency_ms=0.5,
+    )
+
+    assert trace.expected_agent_ids == ("nominal", "rule")
+    assert trace.analysis_latency_ms == 1.25
+    assert trace.shield_latency_ms == 0.5
+
+    for field, value in (
+        ("analysis_latency_ms", -0.1),
+        ("analysis_latency_ms", math.inf),
+        ("shield_latency_ms", math.nan),
+    ):
+        with pytest.raises(ValueError, match=field):
+            make_trace(**{field: value})
+
+
 def test_models_are_frozen_and_json_serializable() -> None:
     frame = make_frame()
     trace = DecisionTrace(
@@ -243,6 +322,9 @@ def test_models_are_frozen_and_json_serializable() -> None:
         claims=(make_claim(),),
         review=make_review(),
         reward_components={"progress": 0.1},
+        expected_agent_ids=("nominal", "hazard", "rule"),
+        analysis_latency_ms=0.0,
+        shield_latency_ms=0.0,
     )
 
     with pytest.raises(FrozenInstanceError):
@@ -261,6 +343,7 @@ def test_scene_frame_keeps_privileged_labels_out_of_observation() -> None:
             scenario_success=True,
             scenario_failure=False,
             minimum_actual_ttc_s=1.5,
+            minimum_actual_stopping_margin_m=-1.5,
             hard_rule_constraint=True,
         )
     )
@@ -314,6 +397,9 @@ def test_decision_trace_copies_reward_components() -> None:
         claims=(make_claim(),),
         review=make_review(),
         reward_components=components,
+        expected_agent_ids=("nominal", "hazard", "rule"),
+        analysis_latency_ms=0.0,
+        shield_latency_ms=0.0,
     )
 
     components["progress"] = 99.0
@@ -335,6 +421,9 @@ def test_decision_trace_preserves_monitor_mode_shield_requirement() -> None:
         claims=(make_claim(),),
         review=make_review(),
         reward_components={},
+        expected_agent_ids=("nominal", "hazard", "rule"),
+        analysis_latency_ms=0.0,
+        shield_latency_ms=0.0,
     )
 
     assert trace.required_action == 3
@@ -356,6 +445,9 @@ def test_decision_trace_rejects_inconsistent_shield_diagnostics() -> None:
             claims=(make_claim(),),
             review=make_review(),
             reward_components={},
+            expected_agent_ids=("nominal", "hazard", "rule"),
+            analysis_latency_ms=0.0,
+            shield_latency_ms=0.0,
         )
 
 
@@ -372,6 +464,9 @@ def test_decision_trace_preserves_low_level_control_fail_safe() -> None:
         claims=(make_claim(),),
         review=make_review(),
         reward_components={},
+        expected_agent_ids=("nominal", "hazard", "rule"),
+        analysis_latency_ms=0.0,
+        shield_latency_ms=0.0,
         control_fail_safe=True,
         control_fail_safe_reason="ValueError",
     )
@@ -392,6 +487,9 @@ def test_decision_trace_preserves_low_level_control_fail_safe() -> None:
             claims=(make_claim(),),
             review=make_review(),
             reward_components={},
+            expected_agent_ids=("nominal", "hazard", "rule"),
+            analysis_latency_ms=0.0,
+            shield_latency_ms=0.0,
             control_fail_safe=False,
             control_fail_safe_reason="ValueError",
         )
@@ -412,6 +510,9 @@ def test_decision_trace_freezes_and_validates_analysis_diagnostics() -> None:
         claims=[make_claim()],  # type: ignore[arg-type]
         review=make_review(),
         reward_components={"progress": 0.1},
+        expected_agent_ids=("nominal", "hazard", "rule"),
+        analysis_latency_ms=0.0,
+        shield_latency_ms=0.0,
         failed_agent_ids=failed_agent_ids,  # type: ignore[arg-type]
         errors=errors,  # type: ignore[arg-type]
     )
@@ -436,6 +537,9 @@ def test_decision_trace_freezes_and_validates_analysis_diagnostics() -> None:
             claims=(make_claim(),),
             review=make_review(),
             reward_components={},
+            expected_agent_ids=("nominal", "hazard", "rule"),
+            analysis_latency_ms=0.0,
+            shield_latency_ms=0.0,
             failed_agent_ids=("hazard",),
             errors=("rule:RuntimeError:failed",),
         )
@@ -468,6 +572,9 @@ def test_decision_trace_deeply_freezes_claim_and_review_sequences() -> None:
             reasons=reasons,
         ),
         reward_components={"progress": 0.1},
+        expected_agent_ids=("nominal", "hazard", "rule"),
+        analysis_latency_ms=0.0,
+        shield_latency_ms=0.0,
     )
 
     evidence.append("caller_mutation")
@@ -509,6 +616,9 @@ def test_decision_trace_rejects_invalid_nested_string_sequences(
             claims=(make_claim(**claim_overrides),),
             review=make_review(**review_overrides),
             reward_components={},
+            expected_agent_ids=("nominal", "hazard", "rule"),
+            analysis_latency_ms=0.0,
+            shield_latency_ms=0.0,
         )
 
 
@@ -600,6 +710,9 @@ def test_decision_trace_actions_are_discrete_four(field: str, value: int) -> Non
         "claims": (make_claim(),),
         "review": make_review(),
         "reward_components": {"progress": 0.1},
+        "expected_agent_ids": ("nominal", "hazard", "rule"),
+        "analysis_latency_ms": 0.0,
+        "shield_latency_ms": 0.0,
     }
     values[field] = value
 
@@ -621,6 +734,9 @@ def test_reward_components_must_be_finite() -> None:
             claims=(make_claim(),),
             review=make_review(),
             reward_components={"progress": math.nan},
+            expected_agent_ids=("nominal", "hazard", "rule"),
+            analysis_latency_ms=0.0,
+            shield_latency_ms=0.0,
         )
 
 

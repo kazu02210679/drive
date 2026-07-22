@@ -16,6 +16,7 @@ from mad_driving.interfaces import (
     SceneObservation,
 )
 from mad_driving.interfaces.actor_state import ActorType
+from mad_driving.interfaces.scene_frame import stopping_margin_m
 from mad_driving.scenarios.actor_ids import stable_actor_id
 from mad_driving.scenarios.seeding import EpisodeSeeds
 from mad_driving.world_model.validation import (
@@ -34,6 +35,21 @@ if TYPE_CHECKING:
 
 class SceneSnapshotBuilder:
     """Translate MetaDrive runtime objects into the project boundary model."""
+
+    def __init__(
+        self,
+        *,
+        reaction_delay_s: float = 0.5,
+        safe_deceleration_mps2: float = 6.0,
+    ) -> None:
+        self._reaction_delay_s = finite_float("reaction_delay_s", reaction_delay_s)
+        self._safe_deceleration_mps2 = finite_float(
+            "safe_deceleration_mps2", safe_deceleration_mps2
+        )
+        if self._reaction_delay_s < 0.0:
+            raise ValueError("reaction_delay_s must be non-negative")
+        if self._safe_deceleration_mps2 <= 0.0:
+            raise ValueError("safe_deceleration_mps2 must be positive")
 
     def build(
         self,
@@ -81,6 +97,13 @@ class SceneSnapshotBuilder:
             context.visible_actor_ids,
         )
         visible_actors = tuple(actor for actor in all_actors if actor.visible)
+        minimum_actual_ttc_s = self._minimum_actual_ttc_s(
+            ego_velocity=ego_velocity,
+            ego_heading=heading,
+            ego_length_m=self._positive_dimension("ego.length", ego_vehicle.LENGTH),
+            ego_width_m=self._positive_dimension("ego.width", ego_vehicle.WIDTH),
+            actors=all_actors,
+        )
         observation = SceneObservation(
             step_index=step_index,
             sim_time_s=step_index * interval_s,
@@ -103,12 +126,12 @@ class SceneSnapshotBuilder:
             arrived=bool(raw_info.get("arrive_dest", False)),
             scenario_success=scenario_result.success,
             scenario_failure=scenario_result.failure,
-            minimum_actual_ttc_s=self._minimum_actual_ttc_s(
-                ego_velocity=ego_velocity,
-                ego_heading=heading,
-                ego_length_m=self._positive_dimension("ego.length", ego_vehicle.LENGTH),
-                ego_width_m=self._positive_dimension("ego.width", ego_vehicle.WIDTH),
-                actors=all_actors,
+            minimum_actual_ttc_s=minimum_actual_ttc_s,
+            minimum_actual_stopping_margin_m=stopping_margin_m(
+                ego_speed_mps=ego.speed_mps,
+                minimum_actual_ttc_s=minimum_actual_ttc_s,
+                reaction_delay_s=self._reaction_delay_s,
+                safe_deceleration_mps2=self._safe_deceleration_mps2,
             ),
             hard_rule_constraint=(context.stop_required or context.intersection_entry_prohibited),
         )
