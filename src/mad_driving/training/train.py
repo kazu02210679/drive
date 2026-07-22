@@ -40,6 +40,7 @@ from mad_driving.training.episode_seeds import (
     summarize_episode_seed_artifacts,
 )
 from mad_driving.training.metadata import (
+    MethodProfileSnapshot,
     ResumeMetadata,
     RunMetadata,
     checkpoint_curriculum_artifact_inventory,
@@ -640,6 +641,7 @@ def run_training(
     if resume_path is not None and not resume_path.is_file():
         raise FileNotFoundError(f"Resume checkpoint not found: {resume_path}")
     resume_source = None if resume_path is None else resolve_resume_source(resume_path, config)
+    method_profile = MethodProfileSnapshot.from_method_id(config.method.id)
     curriculum_state = (
         _initial_curriculum_state(config)
         if resume_source is None
@@ -754,6 +756,7 @@ def run_training(
         write_run_metadata(
             RunMetadata(
                 resolved_config=config.model_dump(mode="json"),
+                method_profile=method_profile,
                 resume=resume_metadata,
                 curriculum_state=curriculum_state_artifact(
                     curriculum_state_path,
@@ -841,6 +844,7 @@ def run_training(
         write_run_metadata(
             RunMetadata(
                 resolved_config=config.model_dump(mode="json"),
+                method_profile=method_profile,
                 resume=resume_metadata,
                 curriculum_state=curriculum_state_artifact(
                     curriculum_state_path,

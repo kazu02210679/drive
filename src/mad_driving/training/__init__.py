@@ -8,6 +8,7 @@ from mad_driving.training.curriculum import (
     write_curriculum_state,
 )
 from mad_driving.training.metadata import (
+    MethodProfileSnapshot,
     ResumeMetadata,
     RunMetadata,
     sha256_file,
@@ -19,6 +20,7 @@ __all__ = [
     "CurriculumController",
     "CurriculumEvalCallback",
     "CurriculumState",
+    "MethodProfileSnapshot",
     "ResumeMetadata",
     "RewardComponentsCallback",
     "RunMetadata",

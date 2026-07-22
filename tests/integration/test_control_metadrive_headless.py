@@ -68,9 +68,10 @@ class EmergencyOnSecondAnalysisSuite:
         )
 
 
-def shield_mode_config(mode: str) -> AppConfig:
+def shield_mode_config(method_id: str) -> AppConfig:
     payload = load_config("configs/base.yaml").model_dump(mode="python")
-    payload["shield"]["mode"] = mode
+    payload["method"] = {"id": method_id}
+    payload["shield"]["mode"] = "monitor"
     return AppConfig.model_validate(payload)
 
 
@@ -165,18 +166,18 @@ def test_real_complete_control_pipeline_runs_100_steps_and_closes() -> None:
 
 @pytest.mark.integration
 @pytest.mark.parametrize(
-    ("mode", "expected_executed", "expected_intervened"),
+    ("method_id", "expected_executed", "expected_intervened"),
     [
-        ("enforce", DrivingAction.STOP, True),
-        ("monitor", DrivingAction.KEEP, False),
+        ("proposed", DrivingAction.STOP, True),
+        ("proposed_no_shield", DrivingAction.KEEP, False),
     ],
 )
-def test_shield_emergency_reaches_real_policy_only_when_enforced(
-    mode: str,
+def test_profile_shield_mode_reaches_the_real_policy(
+    method_id: str,
     expected_executed: DrivingAction,
     expected_intervened: bool,
 ) -> None:
-    config = shield_mode_config(mode)
+    config = shield_mode_config(method_id)
     created = []
 
     def factory(options: dict[str, object], control: Any):
@@ -203,10 +204,10 @@ def test_shield_emergency_reaches_real_policy_only_when_enforced(
         assert emergency_info["requested_action"] == int(DrivingAction.KEEP)
         assert emergency_info["executed_action"] == int(expected_executed)
         assert emergency_info["shield_intervened"] is expected_intervened
-        assert "hard_stop_required" in emergency_info["shield_reasons"]
         assert policy.action_info["requested_action"] == int(expected_executed)
 
-        if mode == "enforce":
+        if method_id == "proposed":
+            assert "hard_stop_required" in emergency_info["shield_reasons"]
             assert policy.action_info["target_speed_mps"] == 0.0
             assert policy.action_info["throttle_brake"] == -1.0
             assert policy._speed_pid.previous_error is None
@@ -215,6 +216,7 @@ def test_shield_emergency_reaches_real_policy_only_when_enforced(
                 == config.control.speed.emergency_deceleration_mps2
             )
         else:
+            assert emergency_info["shield_reasons"] == ()
             assert policy._speed_pid.previous_error is not None
     finally:
         env.close()

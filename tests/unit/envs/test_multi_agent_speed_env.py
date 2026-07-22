@@ -10,7 +10,10 @@ import pytest
 from numpy.typing import NDArray
 from stable_baselines3.common.vec_env import DummyVecEnv
 
-from mad_driving.agents.suite import AgentAnalysisResult
+from mad_driving.agents.critic import CriticAgent
+from mad_driving.agents.nominal import NominalMotionAgent
+from mad_driving.agents.noop_critic import NoOpCritic
+from mad_driving.agents.suite import AgentAnalysisResult, AgentSuite
 from mad_driving.config.models import AppConfig, ControlConfig
 from mad_driving.control import DrivingAction
 from mad_driving.envs import MultiAgentSpeedEnv
@@ -24,6 +27,7 @@ from mad_driving.interfaces import (
     SceneObservation,
     ShieldResult,
 )
+from mad_driving.methods import get_method_profile
 from mad_driving.safety import SafetyShield
 from mad_driving.scenarios import (
     EpisodeSeedAllocator,
@@ -615,6 +619,13 @@ def make_config_for_scenario(scenario_id: str) -> AppConfig:
     return AppConfig.model_validate(values)
 
 
+def make_config_for_method(method_id: str, *, shield_mode: str = "monitor") -> AppConfig:
+    values = make_config().model_dump(mode="python")
+    values["method"] = {"id": method_id}
+    values["shield"]["mode"] = shield_mode
+    return AppConfig.model_validate(values)
+
+
 @dataclass
 class EnvHarness:
     env: MultiAgentSpeedEnv
@@ -678,6 +689,80 @@ def make_env(
         observation=selected_observation,
         runtime=selected_runtime,
     )
+
+
+def make_default_composition_env(
+    config: AppConfig,
+    *,
+    shield_factory: Callable[..., Any] | None = None,
+) -> MultiAgentSpeedEnv:
+    simulator = FakeSimulator()
+    arguments: dict[str, Any] = {}
+    if shield_factory is not None:
+        arguments["shield_factory"] = shield_factory
+    return MultiAgentSpeedEnv(
+        config,
+        role="train",
+        worker_index=0,
+        scenario_runtime_factory=lambda scenario_id: RecordingRuntime(),
+        env_factory=RecordingEnvironmentFactory((simulator,)),
+        builder_factory=RecordingSnapshotBuilder,
+        reward_factory=lambda reward_config: RecordingRewardCalculator(),
+        observation_factory=lambda observation_config: RecordingObservationBuilder(),
+        **arguments,
+    )
+
+
+@pytest.mark.parametrize(
+    "method_id",
+    (
+        "b0_rule",
+        "b1_nominal",
+        "b2_multi_no_review",
+        "proposed",
+        "proposed_no_critic",
+        "proposed_no_shield",
+        "proposed_no_hazard",
+    ),
+)
+def test_default_environment_composes_the_selected_method_profile(method_id: str) -> None:
+    config = make_config_for_method(method_id)
+    profile = get_method_profile(config.method.id)
+    env = make_default_composition_env(config)
+    try:
+        env.reset(seed=17)
+
+        suite = cast(AgentSuite, env._suite)
+        shield = cast(SafetyShield, env._shield)
+        assert suite.expected_agent_ids == profile.specialist_ids
+        assert isinstance(suite.critic, CriticAgent) is profile.critic_enabled
+        assert isinstance(suite.critic, NoOpCritic) is not profile.critic_enabled
+        assert shield._config.mode == profile.default_shield_mode
+    finally:
+        env.close()
+
+
+def test_default_suite_routes_expected_failed_agents_to_the_shield(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_nominal(self: NominalMotionAgent, observation: SceneObservation) -> tuple[RiskClaim, ...]:
+        del self, observation
+        raise RuntimeError("injected nominal failure")
+
+    monkeypatch.setattr(NominalMotionAgent, "analyze", fail_nominal)
+    shield = RecordingShield()
+    env = make_default_composition_env(
+        make_config_for_method("proposed_no_hazard"),
+        shield_factory=lambda shield_config: shield,
+    )
+    try:
+        env.reset(seed=18)
+        env.step(DrivingAction.KEEP)
+
+        assert shield.calls[0][3] == ("nominal", "rule")
+        assert shield.calls[0][4] == ("nominal",)
+    finally:
+        env.close()
 
 
 def expected_seeds(

@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from mad_driving.methods import get_method_profile
 from mad_driving.training import ResumeMetadata, RunMetadata, sha256_file
 from mad_driving.training import metadata as metadata_module
 
@@ -21,6 +22,17 @@ def curriculum_summary(**overrides: object) -> dict[str, object]:
     }
     values.update(overrides)
     return values
+
+
+def profile_snapshot(method_id: str) -> object:
+    profile = get_method_profile(method_id)  # type: ignore[arg-type]
+    return metadata_module.MethodProfileSnapshot(
+        method_id=profile.method_id,
+        policy_kind=profile.policy_kind,
+        specialist_ids=profile.specialist_ids,
+        critic_enabled=profile.critic_enabled,
+        shield_mode=profile.default_shield_mode,
+    )
 
 
 def test_sha256_file_returns_lowercase_digest_without_mutating_source(tmp_path: Path) -> None:
@@ -53,7 +65,7 @@ def test_metadata_models_are_frozen_and_json_serializable(tmp_path: Path) -> Non
         curriculum_state=curriculum_summary(),
     )
 
-    assert metadata.research_contract_version == 6
+    assert metadata.research_contract_version == 7
     assert metadata.observation_schema_version == 1
     assert metadata.observation_shape == (24,)
     assert metadata.observation_dtype == "float32"
@@ -131,6 +143,7 @@ def test_frozen_json_objects_reject_attribute_and_storage_reassignment() -> None
     ("overrides", "message"),
     [
         ({"research_contract_version": True}, "research_contract_version"),
+        ({"research_contract_version": 6}, "research_contract_version"),
         ({"research_contract_version": 4}, "research_contract_version"),
         ({"research_contract_version": 3}, "research_contract_version"),
         ({"research_contract_version": 2}, "research_contract_version"),
@@ -294,23 +307,47 @@ def test_metadata_writer_rejects_non_finite_nested_value_without_destination(
     assert list(tmp_path.iterdir()) == []
 
 
-def test_contract_6_metadata_without_seed_artifacts_remains_loadable(tmp_path: Path) -> None:
+def test_metadata_records_the_complete_immutable_method_profile_snapshot() -> None:
+    metadata = RunMetadata(
+        resolved_config={"method": {"id": "proposed_no_shield"}},
+        method_profile=profile_snapshot("proposed_no_shield"),
+        curriculum_state=curriculum_summary(),
+    )
+
+    assert metadata.method_profile.method_id == "proposed_no_shield"
+    assert metadata.method_profile.policy_kind == "ppo"
+    assert metadata.method_profile.specialist_ids == ("nominal", "hazard", "rule")
+    assert metadata.method_profile.critic_enabled is True
+    assert metadata.method_profile.shield_mode == "off"
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        metadata.method_profile.shield_mode = "enforce"  # type: ignore[misc]
+
+
+def test_metadata_rejects_a_method_profile_inconsistent_with_resolved_config() -> None:
+    with pytest.raises(ValueError, match="method_profile"):
+        RunMetadata(
+            resolved_config={"method": {"id": "b1_nominal"}},
+            method_profile=profile_snapshot("proposed"),
+            curriculum_state=curriculum_summary(),
+        )
+
+
+def test_phase_6_metadata_is_rejected_when_loading(tmp_path: Path) -> None:
     destination = tmp_path / "run_metadata.json"
     metadata_module.write_run_metadata(
         RunMetadata(
-            resolved_config={"seed": 42},
+            resolved_config={"method": {"id": "proposed"}},
+            method_profile=profile_snapshot("proposed"),
             curriculum_state=curriculum_summary(),
         ),
         destination,
     )
     payload = json.loads(destination.read_text(encoding="utf-8"))
-    payload.pop("episode_seed_artifacts")
+    payload["research_contract_version"] = 6
     destination.write_text(json.dumps(payload), encoding="utf-8")
 
-    loaded = metadata_module._load_run_metadata(destination)
-
-    assert loaded.research_contract_version == 6
-    assert loaded.episode_seed_artifacts == ()
+    with pytest.raises(ValueError, match="research_contract_version"):
+        metadata_module._load_run_metadata(destination)
 
 
 def test_metadata_writes_curriculum_state_values_and_sha256(tmp_path: Path) -> None:
@@ -340,8 +377,8 @@ def test_run_metadata_json_rejects_duplicate_keys(tmp_path: Path) -> None:
     )
     text = destination.read_text(encoding="utf-8")
     text = text.replace(
-        '  "research_contract_version": 6,',
-        '  "research_contract_version": 6,\n  "research_contract_version": 6,',
+        '  "research_contract_version": 7,',
+        '  "research_contract_version": 7,\n  "research_contract_version": 7,',
         1,
     )
     destination.write_text(text, encoding="utf-8")

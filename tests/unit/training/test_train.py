@@ -19,6 +19,7 @@ from gymnasium import spaces
 from stable_baselines3.common.utils import ConstantSchedule, FloatSchedule
 
 from mad_driving.config.models import AppConfig
+from mad_driving.methods import get_method_profile
 from mad_driving.scenarios import EnvironmentRole
 from mad_driving.training import RunMetadata, sha256_file
 from mad_driving.training import metadata as metadata_module
@@ -1204,6 +1205,13 @@ def test_fresh_run_writes_complete_research_contract_metadata(tmp_path: Path) ->
         "action_schema_version": 1,
         "action_count": 4,
         "action_order": ["KEEP", "SLOW", "PREPARE_STOP", "STOP"],
+        "method_profile": {
+            "method_id": get_method_profile(config.method.id).method_id,
+            "policy_kind": get_method_profile(config.method.id).policy_kind,
+            "specialist_ids": list(get_method_profile(config.method.id).specialist_ids),
+            "critic_enabled": get_method_profile(config.method.id).critic_enabled,
+            "shield_mode": get_method_profile(config.method.id).default_shield_mode,
+        },
         "resolved_config": config.model_dump(mode="json"),
         "resume": None,
     }

@@ -38,6 +38,7 @@ from mad_driving.interfaces import (
     SceneObservation,
     ShieldResult,
 )
+from mad_driving.methods import get_method_profile
 from mad_driving.safety import SafetyShield
 from mad_driving.scenarios import (
     EnvironmentRole,
@@ -227,7 +228,7 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
         worker_index: int,
         scenario_runtime_factory: ScenarioRuntimeFactory | None = None,
         env_factory: ControlEnvironmentFactory = _create_control_environment,
-        suite_factory: SuiteFactory = AgentSuite.from_config,
+        suite_factory: SuiteFactory | None = None,
         shield_factory: ShieldFactory = SafetyShield,
         builder_factory: FrameBuilderFactory = SceneSnapshotBuilder,
         reward_factory: RewardFactory = RewardCalculator,
@@ -248,6 +249,10 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
             dtype=np.float32,
         )
         self._config = config
+        self._method_profile = get_method_profile(config.method.id)
+        self._shield_config = config.shield.model_copy(
+            update={"mode": self._method_profile.default_shield_mode}
+        )
         self._role = role
         self._worker_index = worker_index
         if scenario_runtime_factory is None:
@@ -316,8 +321,8 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
                 environment = self._new_environment()
             self._environment = environment
 
-            suite = self._suite_factory(self._config.agents)
-            shield = self._shield_factory(self._config.shield)
+            suite = self._new_suite()
+            shield = self._shield_factory(self._shield_config)
             builder = self._builder_factory()
             reward = self._reward_factory(self._config.reward)
             reward.reset()
@@ -381,6 +386,14 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
         self._actual_scenario_index = actual_scenario_index
         self._episode_active = True
         return observation, info
+
+    def _new_suite(self) -> AnalysisSuite:
+        if self._suite_factory is not None:
+            return self._suite_factory(self._config.agents)
+        return AgentSuite.from_config(
+            self._config.agents,
+            method_id=self._method_profile.method_id,
+        )
 
     def step(
         self,
