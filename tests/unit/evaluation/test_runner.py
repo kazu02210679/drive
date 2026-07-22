@@ -68,10 +68,12 @@ def ppo_spec(*, track: str, method_id: str, shield_mode: str) -> EvaluationRunSp
 class FixedPpoModel:
     def __init__(self) -> None:
         self.predict_calls = 0
+        self.observation_shapes: list[tuple[int, ...]] = []
 
     def predict(self, observation: np.ndarray, **kwargs: object) -> tuple[np.ndarray, None]:
-        del observation, kwargs
+        del kwargs
         self.predict_calls += 1
+        self.observation_shapes.append(observation.shape)
         return np.array([0]), None
 
 
@@ -267,7 +269,11 @@ def test_runner_installs_plan_logs_each_step_and_derives_terminal_episode(
     assert environment.actions == [int(DrivingAction.KEEP), int(DrivingAction.KEEP)]
     assert environment.close_calls == 1
     assert [record.step_index for record in result.step_records] == [0, 1]
+    assert {record.episode_index for record in result.step_records} == {0}
+    assert {record.is_formal for record in result.step_records} == {False}
     assert [record.ego_speed_limit_mps for record in result.step_records] == [15.0, 14.0]
+    assert result.episode_record.episode_index == 0
+    assert result.episode_record.is_formal is False
     assert result.episode_record.step_count == 2
     assert result.episode_record.cumulative_reward == 2.0
     assert getattr(result.episode_record, terminal_field) is True
@@ -342,6 +348,32 @@ def test_runner_installs_the_fixed_track_shield_mode_before_reset(
 
     assert environment.shield_modes == [shield_mode]
     assert environment.reset_calls
+
+
+def test_runner_preserves_24d_ppo_observation_and_explicit_provenance(tmp_path: Path) -> None:
+    selected_config = config("proposed")
+    model = FixedPpoModel()
+    policy = ppo_policy("proposed", selected_config, model)
+    selected_spec = replace(
+        ppo_spec(track="system", method_id="proposed", shield_mode="enforce"),
+        episode_index=4,
+        is_formal=True,
+    )
+
+    result = run_evaluation_episode(
+        selected_spec,
+        environment=FakeEvaluationEnv(expected_agent_ids=("nominal", "hazard", "rule")),
+        policy=policy,
+        config=selected_config,
+        destination=tmp_path / "evaluation",
+        checkpoint_sha256="a" * 64,
+    )
+
+    assert model.observation_shapes == [(24,), (24,)]
+    assert {(record.episode_index, record.is_formal) for record in result.step_records} == {
+        (4, True)
+    }
+    assert (result.episode_record.episode_index, result.episode_record.is_formal) == (4, True)
 
 
 class CountingRulePolicy(VisibleTtcRulePolicy):

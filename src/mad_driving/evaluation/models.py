@@ -264,6 +264,8 @@ class EvaluationStepRecord:
     method_profile: MethodProfileSnapshot
     checkpoint_path: str | None
     checkpoint_sha256: str | None
+    episode_index: int
+    is_formal: bool
     step_index: int
     simulation_time_s: float
     decision_interval_s: float
@@ -320,6 +322,8 @@ class EvaluationStepRecord:
         _validate_checkpoint_identity(
             episode_key.method_id, self.checkpoint_path, self.checkpoint_sha256
         )
+        _require_int("episode_index", self.episode_index, minimum=0)
+        _validate_boolean_fields(self, ("is_formal",))
         _require_int("step_index", self.step_index, minimum=0)
         _require_non_negative("simulation_time_s", self.simulation_time_s)
         _require_positive("decision_interval_s", self.decision_interval_s)
@@ -378,6 +382,7 @@ class EvaluationStepRecord:
             "ego_speed_mps": self.ego_speed_mps,
             "ego_speed_limit_mps": self.ego_speed_limit_mps,
             "episode_key": self.episode_key.to_dict(),
+            "episode_index": self.episode_index,
             "episode_rng_seed": self.episode_rng_seed,
             "errors": list(self.errors),
             "executed_action": self.executed_action,
@@ -385,6 +390,7 @@ class EvaluationStepRecord:
             "failed_agent_ids": list(self.failed_agent_ids),
             "frame_path": self.frame_path,
             "lane_offset_m": self.lane_offset_m,
+            "is_formal": self.is_formal,
             "metadrive_scenario_index": self.metadrive_scenario_index,
             "method_profile": _profile_to_dict(self.method_profile),
             "minimum_actual_stopping_margin_m": self.minimum_actual_stopping_margin_m,
@@ -457,6 +463,8 @@ class EvaluationEpisodeRecord:
     method_profile: MethodProfileSnapshot
     checkpoint_path: str | None
     checkpoint_sha256: str | None
+    episode_index: int
+    is_formal: bool
     episode_rng_seed: int
     metadrive_scenario_index: int
     scenario_selection_seed: int
@@ -486,6 +494,8 @@ class EvaluationEpisodeRecord:
         _validate_checkpoint_identity(
             episode_key.method_id, self.checkpoint_path, self.checkpoint_sha256
         )
+        _require_int("episode_index", self.episode_index, minimum=0)
+        _validate_boolean_fields(self, ("is_formal",))
         _validate_episode_seed_and_case_identity(self, episode_key)
         parameters = _freeze_json_object(
             self.sampled_scenario_parameters, "sampled_scenario_parameters"
@@ -531,10 +541,12 @@ class EvaluationEpisodeRecord:
             "cumulative_reward": self.cumulative_reward,
             "difficulty_level": self.difficulty_level,
             "episode_key": self.episode_key.to_dict(),
+            "episode_index": self.episode_index,
             "episode_rng_seed": self.episode_rng_seed,
             "final_step_index": self.final_step_index,
             "metadrive_scenario_index": self.metadrive_scenario_index,
             "method_profile": _profile_to_dict(self.method_profile),
+            "is_formal": self.is_formal,
             "off_road": self.off_road,
             "record_schema_version": self.record_schema_version,
             "research_contract_version": self.research_contract_version,

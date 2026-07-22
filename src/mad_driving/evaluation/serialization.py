@@ -130,6 +130,12 @@ def _validate_step_stream(records: tuple[EvaluationStepRecord, ...]) -> None:
     episode_key = records[0].episode_key
     if any(record.episode_key != episode_key for record in records[1:]):
         raise ValueError("step JSONL file contains more than one episode key")
+    episode_index = records[0].episode_index
+    if any(record.episode_index != episode_index for record in records[1:]):
+        raise ValueError("step JSONL file contains more than one episode_index")
+    is_formal = records[0].is_formal
+    if any(record.is_formal is not is_formal for record in records[1:]):
+        raise ValueError("step JSONL file contains more than one is_formal value")
     if any(record.step_index != expected for expected, record in enumerate(records)):
         raise ValueError("step indices must be contiguous and zero-based")
 

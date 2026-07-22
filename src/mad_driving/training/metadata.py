@@ -16,7 +16,6 @@ from typing import Any, Final, cast
 import numpy as np
 import yaml
 from gymnasium import spaces
-from stable_baselines3.common.utils import ConstantSchedule, FloatSchedule
 
 from mad_driving.config.models import AppConfig
 from mad_driving.config.parsing import load_unique_yaml
@@ -940,6 +939,8 @@ def _require_constant_schedule(
     schedule: object,
     expected: float,
 ) -> None:
+    from stable_baselines3.common.utils import ConstantSchedule, FloatSchedule
+
     canonical = FloatSchedule(expected)
     if type(schedule) is not type(canonical) or vars(schedule).keys() != vars(canonical).keys():
         raise ValueError(

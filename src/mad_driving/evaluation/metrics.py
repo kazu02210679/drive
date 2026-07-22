@@ -276,6 +276,8 @@ def _validated_records(
     episode_contract = (
         first.checkpoint_path,
         first.checkpoint_sha256,
+        first.episode_index,
+        first.is_formal,
         first.method_profile,
         first.episode_key,
         first.episode_rng_seed,
@@ -290,6 +292,8 @@ def _validated_records(
         (
             record.checkpoint_path,
             record.checkpoint_sha256,
+            record.episode_index,
+            record.is_formal,
             record.method_profile,
             record.episode_key,
             record.episode_rng_seed,

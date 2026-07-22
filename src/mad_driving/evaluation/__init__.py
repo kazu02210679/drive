@@ -1,5 +1,12 @@
 """Strict, simulator-independent Phase 6 evaluation contracts."""
 
+from mad_driving.evaluation.compare import (
+    ComparisonRow,
+    build_comparison_rows,
+    validate_matched_episodes,
+    write_comparison_csv,
+    write_eval_metrics_csv,
+)
 from mad_driving.evaluation.metrics import (
     EpisodeMetricRecord,
     EpisodeMetrics,
@@ -38,6 +45,11 @@ from mad_driving.evaluation.serialization import (
     read_jsonl_strict,
     write_jsonl_strict,
 )
+from mad_driving.evaluation.training_metrics import (
+    TrainingMetricPoint,
+    extract_training_metrics,
+    write_training_metrics_csv,
+)
 from mad_driving.evaluation.workspace import EvaluationWorkspace
 
 __all__ = [
@@ -45,6 +57,7 @@ __all__ = [
     "REWARD_COMPONENT_KEYS",
     "CheckpointCandidate",
     "CheckpointScore",
+    "ComparisonRow",
     "EpisodeMetricRecord",
     "EpisodeMetrics",
     "EvaluationCase",
@@ -60,16 +73,23 @@ __all__ = [
     "PpoPolicyAdapter",
     "PpoRunBinding",
     "ScenarioCellId",
+    "TrainingMetricPoint",
     "ValidationPhysicalIdentity",
     "VisibleTtcRulePolicy",
+    "build_comparison_rows",
     "build_formal_plan",
     "build_smoke_plan",
     "discover_checkpoint_candidates",
+    "extract_training_metrics",
     "load_evaluation_plan",
     "read_jsonl_strict",
     "reduce_episode",
     "run_evaluation_episode",
     "select_checkpoint",
+    "validate_matched_episodes",
+    "write_comparison_csv",
+    "write_eval_metrics_csv",
     "write_jsonl_strict",
     "write_selection_artifacts",
+    "write_training_metrics_csv",
 ]

@@ -32,6 +32,8 @@ def make_step(step_index: int = 0, **overrides: Any) -> EvaluationStepRecord:
         "method_profile": MethodProfileSnapshot.from_method_id("b0_rule"),
         "checkpoint_path": None,
         "checkpoint_sha256": None,
+        "episode_index": 2,
+        "is_formal": False,
         "step_index": step_index,
         "simulation_time_s": step_index * 0.1,
         "decision_interval_s": 0.1,
@@ -148,6 +150,23 @@ def test_step_reader_rejects_empty_and_mixed_episode_files(tmp_path: Path) -> No
     )
     with pytest.raises(ValueError, match="episode key"):
         read_jsonl_strict(mixed, EvaluationStepRecord)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("episode_index", 3), ("is_formal", True)],
+)
+def test_step_reader_rejects_mixed_explicit_evaluation_provenance(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    destination = tmp_path / f"mixed-{field}.jsonl"
+    write_jsonl_strict(
+        destination,
+        (make_step(0).to_dict(), make_step(1, **{field: value}).to_dict()),
+    )
+
+    with pytest.raises(ValueError, match=field):
+        read_jsonl_strict(destination, EvaluationStepRecord)
 
 
 def test_jsonl_reader_rejects_duplicate_keys_at_every_nesting_level(tmp_path: Path) -> None:

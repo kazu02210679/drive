@@ -286,6 +286,8 @@ def _build_step_record(
         method_profile=profile,
         checkpoint_path=spec.checkpoint_path,
         checkpoint_sha256=checkpoint_sha256,
+        episode_index=spec.episode_index,
+        is_formal=spec.is_formal,
         step_index=step_index,
         simulation_time_s=cast(float, info["simulation_time_s"]),
         decision_interval_s=cast(float, info["decision_interval_s"]),
@@ -370,6 +372,10 @@ def _build_episode_record(
     steps: tuple[EvaluationStepRecord, ...],
 ) -> EvaluationEpisodeRecord:
     final = steps[-1]
+    if any(step.episode_index != spec.episode_index for step in steps):
+        raise ValueError("evaluation steps and summary episode_index disagree")
+    if any(step.is_formal is not spec.is_formal for step in steps):
+        raise ValueError("evaluation steps and summary is_formal disagree")
     parameters = reset_info.get("scenario_parameters")
     if not isinstance(parameters, Mapping):
         raise ValueError("evaluation reset scenario_parameters must be a mapping")
@@ -382,6 +388,8 @@ def _build_episode_record(
         method_profile=profile,
         checkpoint_path=spec.checkpoint_path,
         checkpoint_sha256=checkpoint_sha256,
+        episode_index=spec.episode_index,
+        is_formal=spec.is_formal,
         episode_rng_seed=final.episode_rng_seed,
         metadrive_scenario_index=final.metadrive_scenario_index,
         scenario_selection_seed=final.scenario_selection_seed,

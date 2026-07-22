@@ -56,6 +56,8 @@ def make_step(**overrides: Any) -> EvaluationStepRecord:
         "method_profile": MethodProfileSnapshot.from_method_id("b1_nominal"),
         "checkpoint_path": "runs/b1/seed-42/best_model.zip",
         "checkpoint_sha256": "a" * 64,
+        "episode_index": 3,
+        "is_formal": True,
         "step_index": 0,
         "simulation_time_s": 0.0,
         "decision_interval_s": 0.1,
@@ -124,6 +126,8 @@ def make_episode(**overrides: Any) -> EvaluationEpisodeRecord:
         "method_profile": MethodProfileSnapshot.from_method_id("b1_nominal"),
         "checkpoint_path": "runs/b1/seed-42/best_model.zip",
         "checkpoint_sha256": "b" * 64,
+        "episode_index": 3,
+        "is_formal": True,
         "episode_rng_seed": 20_001,
         "metadrive_scenario_index": 17,
         "scenario_selection_seed": 31,
@@ -154,6 +158,8 @@ def test_step_record_is_frozen_and_round_trips_all_required_fields() -> None:
     record = make_step()
 
     assert EvaluationStepRecord.from_dict(record.to_dict()) == record
+    assert record.to_dict()["episode_index"] == 3
+    assert record.to_dict()["is_formal"] is True
     assert tuple(record.reward_components) == REWARD_COMPONENT_KEYS
     with pytest.raises(FrozenInstanceError):
         record.step_index = 3  # type: ignore[misc]
@@ -166,6 +172,8 @@ def test_step_record_is_frozen_and_round_trips_all_required_fields() -> None:
     [
         ("record_schema_version", 2),
         ("research_contract_version", 6),
+        ("episode_index", -1),
+        ("is_formal", 1),
         ("step_index", -1),
         ("simulation_time_s", -0.1),
         ("decision_interval_s", 0.0),
