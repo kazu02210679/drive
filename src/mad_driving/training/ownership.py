@@ -95,12 +95,19 @@ class RunDirectoryOwnership:
     published: bool = False
 
     @classmethod
-    def acquire(cls, path: Path) -> RunDirectoryOwnership:
+    def acquire(
+        cls,
+        path: Path,
+        *,
+        require_absent: bool = False,
+    ) -> RunDirectoryOwnership:
         """Claim a preflighted absent/empty destination before training side effects."""
 
         path.parent.mkdir(parents=True, exist_ok=True)
         existed = path.exists()
         if existed:
+            if require_absent:
+                raise FileExistsError(f"Run directory already exists before ownership: {path}")
             if not path.is_dir():
                 raise NotADirectoryError(f"Run directory is not a directory: {path}")
             if any(path.iterdir()):

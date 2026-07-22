@@ -266,16 +266,18 @@ def _stop_processes(
     deadline = started_at + _GRACEFUL_PROCESS_JOIN_TIMEOUT_SECONDS
 
     def join_for(candidates: list[object], phase_seconds: float) -> None:
-        if not candidates:
+        joinable = [
+            (process, join)
+            for process in candidates
+            if callable(join := getattr(process, "join", None))
+        ]
+        if not joinable:
             return
         phase_deadline = min(deadline, _monotonic() + phase_seconds)
-        fair_timeout = max(0.0, phase_deadline - _monotonic()) / len(candidates)
-        for process in candidates:
-            join = getattr(process, "join", None)
-            if not callable(join):
-                continue
+        for index, (_process, join) in enumerate(joinable):
             phase_remaining = max(0.0, phase_deadline - _monotonic())
-            timeout = min(fair_timeout, phase_remaining)
+            remaining_candidates = len(joinable) - index
+            timeout = phase_remaining / remaining_candidates
             if error := _attempt_process_operation(join, timeout):
                 operation_errors.append(error)
 
@@ -625,6 +627,7 @@ def run_training(
     smoke: bool,
     run_dir: str | Path,
     resume_from: str | Path | None = None,
+    require_absent_run_dir: bool = False,
     env_factory: EnvironmentFactory = _default_env_factory,
     ppo_factory: GenericFactory[Any] = PPO,
     dummy_vec_env_factory: VecEnvFactory = DummyVecEnv,
@@ -660,7 +663,10 @@ def run_training(
                 f"Resume destination must be separate from the source run: {destination}"
             )
 
-    ownership = RunDirectoryOwnership.acquire(destination)
+    ownership = RunDirectoryOwnership.acquire(
+        destination,
+        require_absent=require_absent_run_dir,
+    )
     workspace = ownership.workspace
     curriculum_state_path = workspace / CURRICULUM_STATE_FILENAME
     checkpoints_dir = workspace / "checkpoints"

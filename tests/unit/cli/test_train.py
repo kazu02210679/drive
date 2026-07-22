@@ -113,6 +113,7 @@ def test_smoke_and_resume_are_forwarded_and_success_is_json(
         smoke: bool,
         run_dir: Path,
         resume_from: Path | None,
+        require_absent_run_dir: bool,
     ) -> TrainingResult:
         calls.append(
             {
@@ -120,6 +121,7 @@ def test_smoke_and_resume_are_forwarded_and_success_is_json(
                 "smoke": smoke,
                 "run_dir": run_dir,
                 "resume_from": resume_from,
+                "require_absent_run_dir": require_absent_run_dir,
             }
         )
         return TrainingResult(
@@ -150,6 +152,7 @@ def test_smoke_and_resume_are_forwarded_and_success_is_json(
             "smoke": True,
             "run_dir": run_dir,
             "resume_from": resume_path,
+            "require_absent_run_dir": False,
         }
     ]
     output = json.loads(capsys.readouterr().out)
@@ -179,10 +182,13 @@ def test_omitted_run_dir_allocates_fresh_directory_under_configured_root(
         smoke: bool,
         run_dir: Path,
         resume_from: Path | None,
+        require_absent_run_dir: bool,
     ) -> TrainingResult:
         assert received_config is config
         assert smoke is True
         assert resume_from is None
+        assert require_absent_run_dir is True
+        assert not run_dir.exists()
         calls.append(run_dir)
         return TrainingResult(
             run_dir=run_dir,
@@ -197,7 +203,7 @@ def test_omitted_run_dir_allocates_fresh_directory_under_configured_root(
 
     assert len(calls) == 1
     assert calls[0].parent == run_root
-    assert calls[0].is_dir()
+    assert not calls[0].exists()
     output = json.loads(capsys.readouterr().out)
     assert Path(output["run_dir"]) == calls[0]
 
@@ -220,12 +226,12 @@ def test_implicit_run_directory_skips_existing_name_collision(
 
     allocated = train_module._fresh_run_directory(run_root, smoke=True)
 
-    assert allocated.path == run_root / "fresh"
-    assert allocated.path.is_dir()
+    assert allocated == run_root / "fresh"
+    assert not allocated.exists()
     assert marker.read_text(encoding="utf-8") == "keep"
 
 
-def test_implicit_run_directory_failure_removes_unchanged_empty_reservation(
+def test_implicit_preownership_failure_never_precreates_destination(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -240,11 +246,15 @@ def test_implicit_run_directory_failure_removes_unchanged_empty_reservation(
         lambda path: make_config(run_root=str(run_root)),
     )
     monkeypatch.setattr(train_module, "_run_directory_name", lambda *, smoke: "reserved")
-    monkeypatch.setattr(
-        train_module,
-        "run_training",
-        lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("malformed resume")),
-    )
+    def fail_before_ownership(*args: object, **kwargs: object) -> None:
+        del args
+        assert kwargs["require_absent_run_dir"] is True
+        run_dir = kwargs["run_dir"]
+        assert isinstance(run_dir, Path)
+        assert not run_dir.exists()
+        raise ValueError("malformed resume")
+
+    monkeypatch.setattr(train_module, "run_training", fail_before_ownership)
 
     assert main(["--config", str(config_path), "--smoke"]) == 2
 
@@ -252,7 +262,7 @@ def test_implicit_run_directory_failure_removes_unchanged_empty_reservation(
     assert "malformed resume" in capsys.readouterr().err
 
 
-def test_malformed_resume_before_training_ownership_cleans_implicit_reservation(
+def test_malformed_resume_before_training_ownership_leaves_candidate_absent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -286,45 +296,6 @@ def test_malformed_resume_before_training_ownership_cleans_implicit_reservation(
     )
 
     assert not reserved.exists()
-
-
-def test_implicit_failure_preserves_replaced_or_nonempty_reservation(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text("seed: 42\n", encoding="utf-8")
-    run_root = tmp_path / "runs"
-    monkeypatch.setattr(
-        train_module,
-        "load_config",
-        lambda path: make_config(run_root=str(run_root)),
-    )
-    names = iter(["identity-changed", "became-nonempty"])
-    monkeypatch.setattr(train_module, "_run_directory_name", lambda *, smoke: next(names))
-    calls = 0
-
-    def fail_after_changing_reservation(*args: object, **kwargs: object) -> None:
-        del args
-        nonlocal calls
-        run_dir = kwargs["run_dir"]
-        assert isinstance(run_dir, Path)
-        if calls == 0:
-            run_dir.rmdir()
-            run_dir.mkdir()
-        else:
-            (run_dir / "foreign.txt").write_text("preserve", encoding="utf-8")
-        calls += 1
-        raise RuntimeError("pre-ownership failure")
-
-    monkeypatch.setattr(train_module, "run_training", fail_after_changing_reservation)
-
-    assert main(["--config", str(config_path), "--smoke"]) == 2
-    assert main(["--config", str(config_path), "--smoke"]) == 2
-
-    assert (run_root / "identity-changed").is_dir()
-    assert list((run_root / "identity-changed").iterdir()) == []
-    assert (run_root / "became-nonempty" / "foreign.txt").read_text(encoding="utf-8") == "preserve"
 
 
 def test_explicit_empty_run_directory_is_not_cleaned_after_failure(

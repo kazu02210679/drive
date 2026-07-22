@@ -338,25 +338,40 @@ def read_checkpoint_curriculum_state(
     return state
 
 
-def read_curriculum_state(source: Path) -> CurriculumState:
-    """Strictly parse one persisted curriculum snapshot."""
+def read_curriculum_state_artifact(
+    source: str | Path,
+    *,
+    expected_sha256: str | None = None,
+) -> tuple[CurriculumState, str]:
+    """Read, authenticate, and parse one stable curriculum byte snapshot."""
 
     source_path = Path(source)
     try:
-        data, _digest = read_stable_artifact_bytes(source_path)
+        data, digest = read_stable_artifact_bytes(
+            source_path,
+            expected_sha256=expected_sha256,
+        )
         payload = load_unique_yaml(data.decode("utf-8"))
     except (OSError, UnicodeError, yaml.YAMLError) as error:
         raise ValueError(f"Curriculum state is malformed: {source_path}: {error}") from error
     if not isinstance(payload, dict) or set(payload) != _CURRICULUM_STATE_FIELDS:
         raise ValueError(f"Curriculum state fields are malformed: {source_path}")
     try:
-        return CurriculumState(
+        state = CurriculumState(
             level=payload["level"],
             consecutive_passes=payload["consecutive_passes"],
             evaluations=payload["evaluations"],
         )
     except (TypeError, ValueError) as error:
         raise ValueError(f"Curriculum state values are malformed: {source_path}") from error
+    return state, digest
+
+
+def read_curriculum_state(source: Path) -> CurriculumState:
+    """Strictly parse one persisted curriculum snapshot."""
+
+    state, _digest = read_curriculum_state_artifact(source)
+    return state
 
 
 __all__ = [
@@ -369,6 +384,7 @@ __all__ = [
     "read_checkpoint_curriculum_artifact",
     "read_checkpoint_curriculum_state",
     "read_curriculum_state",
+    "read_curriculum_state_artifact",
     "read_stable_artifact_bytes",
     "write_checkpoint_curriculum_state",
     "write_curriculum_state",

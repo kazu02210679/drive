@@ -466,3 +466,117 @@ Second-remediation files changed:
 - `tests/unit/training/test_curriculum.py`
 - `tests/unit/training/test_episode_seeds.py`
 - `tests/unit/training/test_train.py`
+
+## Third independent-review remediation
+
+This remediation started from `849f67373c08af7cc66186f2473d312df2244d29` and keeps
+the checkpoint-bound sidecar design intact: the run-final curriculum artifact is an
+additional integrity requirement, while the selected periodic/best/final checkpoint's
+sidecar remains the state restored by resume.
+
+### Contract-v5 final curriculum integrity and scalar-exact config identity
+
+The first combined RED run reported 16 failures. Thirteen were the intended failures:
+contract-v5 metadata accepted a null curriculum summary, and periodic/final resumes ignored
+missing, null, hash-mismatched, malformed, value-mismatched, or parent-unreachable final
+curriculum state. Three cases exposed an invalid float-field test fixture; that fixture was
+corrected before its evidence was used.
+
+```text
+.venv\Scripts\python.exe -m pytest tests/unit/training/test_metadata.py::test_contract_5_run_metadata_requires_non_null_curriculum_state tests/unit/training/test_train.py::test_resume_rejects_invalid_run_final_curriculum_artifact_before_destination tests/unit/training/test_train.py::test_resume_validates_run_final_curriculum_reachability_against_parent_config tests/unit/training/test_train.py::test_resume_rejects_type_changed_metadata_resolved_config_scalars -q
+16 failed (13 intended product failures; 3 invalid fixture failures corrected immediately)
+```
+
+GREEN makes `RunMetadata.curriculum_state` required and non-null. Resume stable-reads
+`curriculum_state.yaml` once, authenticates and parses that same immutable byte snapshot,
+matches all state values, and validates reachability against the validated parent config.
+Only after that integrity gate does it authenticate the selected checkpoint and its sidecar.
+
+Type-exact equality received a separate clean regression proof by temporarily restoring
+Python's permissive scalar comparison: `false -> 0`, `1.0 -> true`, and `1.0 -> 1` all
+resumed when they should not (`3 failed`). Restoring the recursive exact-type guard made
+the same command pass (`3 passed`). The exact comparator is used both for
+metadata-versus-YAML identity and resume diff detection.
+
+```text
+final focused contract/type command: 16 passed, 14 warnings
+```
+
+### Implicit destination ownership without cleanup races
+
+CLI RED showed the generated destination existed before training, the old reservation
+object was returned, the absence/ownership flag was not forwarded, and training had no way
+to reject a competing empty directory (`5 failed, 1 passed`).
+
+GREEN generates a 128-bit high-entropy absent candidate without creating the run root or
+destination. `RunDirectoryOwnership.acquire(..., require_absent=True)` is the only operation
+that may claim an implicit destination; a competing empty directory is preserved and
+rejected before environment construction. All pathname-identity cleanup and `rmdir` logic
+was removed. Explicit `--run-dir` continues to accept an existing empty directory.
+
+```text
+focused CLI/ownership GREEN: 6 passed, 14 warnings
+```
+
+### Fair shutdown phase redistribution
+
+Three deterministic-clock RED tests proved that the old static equal shares stranded time
+after a fast first worker in the graceful, post-terminate, and post-kill phases (`3 failed`).
+GREEN recomputes each join timeout as remaining phase time divided by remaining joinable
+workers. The one absolute five-second budget and bounded 3/1/1-second phases remain; fast
+workers now transfer unused time to slower workers without worker-count multiplication.
+Positive post-terminate reaping and integral exit-code audit requirements remain covered.
+
+```text
+focused redistribution GREEN: 3 passed, 14 warnings
+consolidated curriculum/callback/seed/metadata/train/CLI units: 323 passed, 20 warnings
+```
+
+### Third-remediation verification
+
+```text
+.venv\Scripts\python.exe -m pytest tests/integration/test_phase5_metadrive_headless.py tests/integration/test_rl_metadrive_headless.py tests/integration/test_ppo_checkpoint.py -q -m integration
+22 passed, 27 warnings in 60.25s
+
+.venv\Scripts\python.exe -m mad_driving.cli.train --help
+Exit 0; all expected options listed and --run-dir remains optional
+
+.venv\Scripts\python.exe -m mad_driving.cli.train --config configs/base.yaml --smoke
+Exit 0; source-backed run, 6,144 timesteps, fresh 128-bit implicit destination,
+best/final checkpoints published
+
+.venv\Scripts\python.exe -m ruff check src tests
+All checks passed
+
+.venv\Scripts\python.exe -m mypy --strict src
+Success: no issues found in 65 source files
+
+.venv\Scripts\python.exe -m pytest --cov=mad_driving --cov-report=term-missing -q
+932 passed, 33 warnings in 105.77s; total branch coverage 90.11%
+```
+
+The 22-test real integration command includes complete bounded Level 0--3 replay, both
+seeded Level-2 branches, byte-for-byte repeated canonical records, hazard activation and
+outcomes, finite best/final PPO tensors, deterministic 24D predictions, and exact
+per-checkpoint curriculum restoration. Warning categories are unchanged Matplotlib/PyParsing
+deprecations and SB3 evaluation/VecEnv notices.
+
+The Windows venv initially imported a stale copied package for the exact CLI command.
+After confirming the import path, the local editable `.pth` was changed to an ASCII relative
+`../../../src` entry to avoid Hatchling's Unicode-path mojibake. The source-backed command
+was rerun successfully; both generated diagnostic/smoke run directories were inspected and
+removed. This was a local ignored-vendor environment adjustment, not a repository change.
+
+Third-remediation files changed:
+
+- `.superpowers/sdd/task-4-report.md`
+- `src/mad_driving/cli/train.py`
+- `src/mad_driving/training/curriculum.py`
+- `src/mad_driving/training/metadata.py`
+- `src/mad_driving/training/ownership.py`
+- `src/mad_driving/training/train.py`
+- `tests/unit/cli/test_train.py`
+- `tests/unit/training/test_metadata.py`
+- `tests/unit/training/test_train.py`
+
+No Phase 6 scope was added. The 24D observation and four-action contracts are unchanged.

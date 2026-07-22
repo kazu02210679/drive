@@ -66,6 +66,11 @@ def test_metadata_models_are_frozen_and_json_serializable(tmp_path: Path) -> Non
         metadata.action_count = 5  # type: ignore[misc]
 
 
+def test_contract_5_run_metadata_requires_non_null_curriculum_state() -> None:
+    with pytest.raises(ValueError, match="curriculum_state"):
+        RunMetadata(resolved_config={"seed": 42}, curriculum_state=None)
+
+
 def test_metadata_recursively_detaches_and_freezes_caller_owned_values(tmp_path: Path) -> None:
     resolved_config: dict[str, Any] = {
         "training": {"seed": 42, "layers": [24, 16]},
@@ -82,7 +87,11 @@ def test_metadata_recursively_detaches_and_freezes_caller_owned_values(tmp_path:
         config_diff=config_diff,
         start_num_timesteps=12_500,
     )
-    metadata = RunMetadata(resolved_config=resolved_config, resume=resume)
+    metadata = RunMetadata(
+        resolved_config=resolved_config,
+        curriculum_state=curriculum_summary(),
+        resume=resume,
+    )
 
     resolved_config["training"]["seed"] = 999
     resolved_config["training"]["layers"].append(8)
@@ -101,7 +110,10 @@ def test_metadata_recursively_detaches_and_freezes_caller_owned_values(tmp_path:
 
 
 def test_frozen_json_objects_reject_attribute_and_storage_reassignment() -> None:
-    metadata = RunMetadata(resolved_config={"nested": {"value": 7}})
+    metadata = RunMetadata(
+        resolved_config={"nested": {"value": 7}},
+        curriculum_state=curriculum_summary(),
+    )
     root = metadata.resolved_config
     nested = root["nested"]
 
@@ -143,7 +155,11 @@ def test_run_metadata_rejects_invalid_public_constructor_fields(
     overrides: dict[str, object],
     message: str,
 ) -> None:
-    values: dict[str, object] = {"resolved_config": {"seed": 42}, **overrides}
+    values: dict[str, object] = {
+        "resolved_config": {"seed": 42},
+        "curriculum_state": curriculum_summary(),
+        **overrides,
+    }
 
     with pytest.raises(ValueError, match=message):
         RunMetadata(**values)  # type: ignore[arg-type]
@@ -234,7 +250,10 @@ def test_metadata_write_failure_preserves_primary_error_and_cleans_sibling_temp(
     failure: str,
 ) -> None:
     destination = tmp_path / "run_metadata.json"
-    metadata = RunMetadata(resolved_config={"seed": 42})
+    metadata = RunMetadata(
+        resolved_config={"seed": 42},
+        curriculum_state=curriculum_summary(),
+    )
     expected_error: type[Exception] = TypeError
     expected_message = "not JSON serializable"
     if failure == "serialize":
@@ -262,7 +281,10 @@ def test_metadata_writer_rejects_non_finite_nested_value_without_destination(
     tmp_path: Path,
 ) -> None:
     destination = tmp_path / "run_metadata.json"
-    valid = RunMetadata(resolved_config={"seed": 42})
+    valid = RunMetadata(
+        resolved_config={"seed": 42},
+        curriculum_state=curriculum_summary(),
+    )
     object.__setattr__(valid, "resolved_config", {"nested": [float("nan")]})
 
     with pytest.raises(ValueError, match="finite"):
@@ -275,7 +297,10 @@ def test_metadata_writer_rejects_non_finite_nested_value_without_destination(
 def test_contract_5_metadata_without_seed_artifacts_remains_loadable(tmp_path: Path) -> None:
     destination = tmp_path / "run_metadata.json"
     metadata_module.write_run_metadata(
-        RunMetadata(resolved_config={"seed": 42}),
+        RunMetadata(
+            resolved_config={"seed": 42},
+            curriculum_state=curriculum_summary(),
+        ),
         destination,
     )
     payload = json.loads(destination.read_text(encoding="utf-8"))
@@ -381,5 +406,6 @@ def test_metadata_rejects_malformed_episode_seed_artifact_summary(
     with pytest.raises(ValueError, match="episode_seed_artifacts"):
         RunMetadata(
             resolved_config={"seed": 42},
+            curriculum_state=curriculum_summary(),
             episode_seed_artifacts=(summary,),
         )

@@ -4,12 +4,9 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import secrets
-import stat
 import sys
 from collections.abc import Sequence
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -43,72 +40,29 @@ def _require_file(path: Path, description: str) -> None:
 def _run_directory_name(*, smoke: bool) -> str:
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S.%fZ")
     purpose = "smoke" if smoke else "train"
-    return f"phase5-{purpose}-{timestamp}-{secrets.token_hex(4)}"
-
-
-@dataclass(frozen=True)
-class _ImplicitRunDirectoryReservation:
-    path: Path
-    device: int
-    inode: int
-    created_ns: int
+    return f"phase5-{purpose}-{timestamp}-{secrets.token_hex(16)}"
 
 
 def _fresh_run_directory(
     run_root: Path,
     *,
     smoke: bool,
-) -> _ImplicitRunDirectoryReservation:
-    """Atomically reserve a collision-free directory beneath the configured root."""
+) -> Path:
+    """Choose an absent high-entropy path without claiming or creating it."""
 
     root = Path(run_root)
-    root.mkdir(parents=True, exist_ok=True)
-    while True:
+    for _attempt in range(128):
         candidate = root / _run_directory_name(smoke=smoke)
-        try:
-            candidate.mkdir()
-        except FileExistsError:
+        if candidate.exists():
             continue
-        identity = candidate.stat()
-        return _ImplicitRunDirectoryReservation(
-            path=candidate,
-            device=int(identity.st_dev),
-            inode=int(identity.st_ino),
-            created_ns=int(identity.st_ctime_ns),
-        )
-
-
-def _cleanup_implicit_run_directory(
-    reservation: _ImplicitRunDirectoryReservation,
-) -> bool:
-    """Remove only the unchanged, still-empty directory reserved by this process."""
-
-    try:
-        current = reservation.path.stat()
-        if (
-            not stat.S_ISDIR(current.st_mode)
-            or int(current.st_dev) != reservation.device
-            or int(current.st_ino) != reservation.inode
-            or int(current.st_ctime_ns) != reservation.created_ns
-            or any(reservation.path.iterdir())
-        ):
-            return False
-        confirmed = reservation.path.stat()
-        if not os.path.samestat(current, confirmed):
-            return False
-        reservation.path.rmdir()
-    except (FileNotFoundError, NotADirectoryError):
-        return False
-    except OSError:
-        return False
-    return True
+        return candidate
+    raise FileExistsError(f"Could not choose a fresh run directory under: {root}")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     """CLI entry point with concise, traceback-free operational errors."""
 
     args = _parser().parse_args(argv)
-    implicit_reservation: _ImplicitRunDirectoryReservation | None = None
     try:
         config_path = Path(args.config)
         _require_file(config_path, "Configuration file")
@@ -122,12 +76,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         config = load_config(config_path, *overlay_paths)
         if args.run_dir is not None:
             run_dir = Path(args.run_dir)
+            require_absent_run_dir = False
         else:
-            implicit_reservation = _fresh_run_directory(
+            run_dir = _fresh_run_directory(
                 Path(config.training.run_root),
                 smoke=args.smoke,
             )
-            run_dir = implicit_reservation.path
+            require_absent_run_dir = True
         require_empty_run_directory(run_dir)
 
         result = run_training(
@@ -135,6 +90,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             smoke=args.smoke,
             run_dir=run_dir,
             resume_from=resume_from,
+            require_absent_run_dir=require_absent_run_dir,
         )
         output = {
             "run_dir": str(result.run_dir),
@@ -143,8 +99,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             "timesteps": result.timesteps,
         }
     except Exception as exc:
-        if implicit_reservation is not None:
-            _cleanup_implicit_run_directory(implicit_reservation)
         print(f"training failed: {exc}", file=sys.stderr)
         return 2
     print(json.dumps(output, ensure_ascii=False, sort_keys=True))

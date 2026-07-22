@@ -27,6 +27,7 @@ from mad_driving.training.curriculum import (
     CurriculumState,
     checkpoint_curriculum_sidecar_path,
     read_checkpoint_curriculum_artifact,
+    read_curriculum_state_artifact,
     read_stable_artifact_bytes,
 )
 
@@ -98,6 +99,8 @@ def _json_equal(left: object, right: object) -> bool:
             _json_equal(left_item, right_item)
             for left_item, right_item in zip(left, right, strict=True)
         )
+    if type(left) is not type(right):
+        return False
     return bool(left == right)
 
 
@@ -212,6 +215,7 @@ class RunMetadata:
     """Complete versioned identity of one fresh or continuation run."""
 
     resolved_config: Mapping[str, Any]
+    curriculum_state: Mapping[str, Any]
     resume: ResumeMetadata | None = None
     research_contract_version: int = RESEARCH_CONTRACT_VERSION
     observation_schema_version: int = OBSERVATION_SCHEMA_VERSION
@@ -220,7 +224,6 @@ class RunMetadata:
     action_schema_version: int = ACTION_SCHEMA_VERSION
     action_count: int = len(ACTION_ORDER)
     action_order: tuple[str, ...] = ACTION_ORDER
-    curriculum_state: Mapping[str, Any] | None = None
     checkpoint_curriculum_artifacts: tuple[Mapping[str, Any], ...] = ()
     episode_seed_artifacts: tuple[Mapping[str, Any], ...] = ()
 
@@ -308,9 +311,7 @@ class RunMetadata:
 
 def _validated_curriculum_state_artifact(
     value: object,
-) -> Mapping[str, Any] | None:
-    if value is None:
-        return None
+) -> Mapping[str, Any]:
     required = {
         "path",
         "sha256",
@@ -555,17 +556,14 @@ def curriculum_state_artifact(
         raise ValueError(
             f"curriculum state path must be named {CURRICULUM_STATE_FILENAME}"
         )
-    return cast(
-        Mapping[str, Any],
-        _validated_curriculum_state_artifact(
-            {
-                "path": CURRICULUM_STATE_FILENAME,
-                "sha256": sha256_file(state_path),
-                "level": state.level,
-                "consecutive_passes": state.consecutive_passes,
-                "evaluations": state.evaluations,
-            }
-        ),
+    return _validated_curriculum_state_artifact(
+        {
+            "path": CURRICULUM_STATE_FILENAME,
+            "sha256": sha256_file(state_path),
+            "level": state.level,
+            "consecutive_passes": state.consecutive_passes,
+            "evaluations": state.evaluations,
+        }
     )
 
 
@@ -779,7 +777,9 @@ def _allowed_config_diff(
     changed = sorted(
         path
         for path in parent_values.keys() | current_values.keys()
-        if parent_values.get(path) != current_values.get(path)
+        if path not in parent_values
+        or path not in current_values
+        or not _json_equal(parent_values[path], current_values[path])
     )
     incompatible = [path for path in changed if path not in _ALLOWED_CONFIG_DIFFS]
     if incompatible:
@@ -813,14 +813,32 @@ def resolve_resume_source(checkpoint: str | Path, current_config: AppConfig) -> 
     except (OSError, UnicodeError, ValueError, yaml.YAMLError) as exc:
         raise ValueError(f"Resume source resolved config is malformed: {config_path}") from exc
     parent_config = _require_dict(parent_payload, "resolved config")
-    if parent_config != metadata.resolved_config:
+    if not _json_equal(parent_config, metadata.resolved_config):
         raise ValueError("Resume metadata resolved config does not match config_resolved.yaml")
     try:
-        AppConfig.model_validate(parent_config)
+        parent_app_config = AppConfig.model_validate(parent_config)
     except Exception as exc:
         raise ValueError(f"Resume source resolved config is malformed: {config_path}") from exc
     current_payload = current_config.model_dump(mode="json")
     config_diff = _allowed_config_diff(parent_config, current_payload)
+    final_curriculum_summary = metadata.curriculum_state
+    final_curriculum_path = run_dir / cast(str, final_curriculum_summary["path"])
+    expected_final_digest = cast(str, final_curriculum_summary["sha256"])
+    final_curriculum_state, _final_digest = read_curriculum_state_artifact(
+        final_curriculum_path,
+        expected_sha256=expected_final_digest,
+    )
+    expected_final_state = CurriculumState(
+        level=final_curriculum_summary["level"],
+        consecutive_passes=final_curriculum_summary["consecutive_passes"],
+        evaluations=final_curriculum_summary["evaluations"],
+    )
+    if final_curriculum_state != expected_final_state:
+        raise ValueError("Resume final curriculum state does not match run metadata")
+    CurriculumController(
+        parent_app_config.scenarios.curriculum,
+        final_curriculum_state,
+    )
     checkpoint_relative_path = checkpoint_path.relative_to(run_dir).as_posix()
     matching_artifacts = [
         artifact
@@ -939,11 +957,7 @@ def write_run_metadata(metadata: RunMetadata, destination: Path) -> None:
         "action_schema_version": validated.action_schema_version,
         "action_count": validated.action_count,
         "action_order": list(validated.action_order),
-        "curriculum_state": (
-            None
-            if validated.curriculum_state is None
-            else _thaw_json(validated.curriculum_state, "curriculum_state")
-        ),
+        "curriculum_state": _thaw_json(validated.curriculum_state, "curriculum_state"),
         "checkpoint_curriculum_artifacts": _thaw_json(
             validated.checkpoint_curriculum_artifacts,
             "checkpoint_curriculum_artifacts",

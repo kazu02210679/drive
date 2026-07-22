@@ -547,6 +547,27 @@ def seed_compatible_source_run(
     return CompatibleSourceRun(run_dir=run_dir, checkpoint=checkpoint)
 
 
+def add_periodic_checkpoint(
+    source: CompatibleSourceRun,
+    *,
+    state: CurriculumState | None = None,
+) -> Path:
+    """Publish a second valid source checkpoint and refresh its metadata inventory."""
+
+    selected_state = state or CurriculumState(level=0, consecutive_passes=0, evaluations=0)
+    checkpoint = source.run_dir / "checkpoints" / "ppo_checkpoint_8_steps.zip"
+    FakePPO.write_checkpoint(checkpoint, "periodic-resume-source")
+    write_checkpoint_curriculum_state(selected_state, checkpoint)
+    metadata_path = source.run_dir / "run_metadata.json"
+    payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    payload["checkpoint_curriculum_artifacts"] = [
+        dict(summary)
+        for summary in checkpoint_curriculum_artifact_inventory(checkpoint.parent)
+    ]
+    metadata_path.write_text(json.dumps(payload), encoding="utf-8")
+    return checkpoint
+
+
 def run_with_fakes(
     config: AppConfig,
     run_dir: Path,
@@ -602,6 +623,34 @@ def test_nonempty_run_directory_is_rejected_before_any_side_effect(tmp_path: Pat
     assert str(raised.value) == f"Run directory is non-empty: {run_dir}"
     assert marker.read_bytes() == b"original\x00bytes"
     assert list(run_dir.iterdir()) == [marker]
+    assert environments.calls == []
+    assert FakePPO.instances == []
+
+
+def test_implicit_run_directory_race_is_rejected_without_deleting_competitor(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "implicit-race"
+    run_dir.mkdir()
+    environments = EnvFactory()
+
+    with pytest.raises(FileExistsError, match="already exists|ownership"):
+        run_training(
+            make_config(),
+            smoke=True,
+            run_dir=run_dir,
+            require_absent_run_dir=True,
+            env_factory=environments,
+            ppo_factory=FakePPO,
+            dummy_vec_env_factory=VecFactory(),
+            subproc_vec_env_factory=VecFactory(),
+            checkpoint_callback_factory=CheckpointCallbackFactory(),
+            eval_callback_factory=EvalCallbackFactory(),
+            reward_callback_factory=RewardCallbackFactory(),
+        )
+
+    assert run_dir.is_dir()
+    assert list(run_dir.iterdir()) == []
     assert environments.calls == []
     assert FakePPO.instances == []
 
@@ -1950,6 +1999,94 @@ class PostTerminateJoinProcess(FakeProcess):
             self.exitcode = -15
 
 
+class PlannedJoinProcess(FakeProcess):
+    def __init__(
+        self,
+        clock: list[float],
+        join_plan: list[tuple[bool, bool]],
+    ) -> None:
+        super().__init__(exits_on_terminate=False, exits_on_kill=False)
+        self.clock = clock
+        self.join_plan = list(join_plan)
+
+    def join(self, timeout: float | None = None) -> None:
+        self.join_calls.append(timeout)
+        assert timeout is not None
+        consume_timeout, exit_after_join = self.join_plan.pop(0)
+        if consume_timeout:
+            self.clock[0] += timeout
+        if exit_after_join:
+            self.alive = False
+            self.exitcode = -9 if self.kill_calls else (-15 if self.terminate_calls else 0)
+
+
+def test_graceful_shutdown_redistributes_fast_first_worker_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [10.0]
+    fast = PlannedJoinProcess(clock, [(False, True)])
+    slow = PlannedJoinProcess(clock, [(True, True)])
+    monkeypatch.setattr(train_module, "_monotonic", lambda: clock[0], raising=False)
+
+    workers_alive, escalated, operation_errors = train_module._stop_processes(
+        [fast, slow],
+        graceful_join=True,
+    )
+
+    assert fast.join_calls == [pytest.approx(1.5)]
+    assert slow.join_calls == [pytest.approx(3.0)]
+    assert clock[0] == pytest.approx(13.0)
+    assert workers_alive is False
+    assert escalated is False
+    assert operation_errors == ()
+
+
+def test_terminate_shutdown_redistributes_fast_first_worker_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [20.0]
+    fast = PlannedJoinProcess(clock, [(False, True)])
+    slow = PlannedJoinProcess(clock, [(True, True)])
+    monkeypatch.setattr(train_module, "_monotonic", lambda: clock[0], raising=False)
+
+    workers_alive, escalated, operation_errors = train_module._stop_processes(
+        [fast, slow],
+        graceful_join=False,
+    )
+
+    assert fast.join_calls == [pytest.approx(0.5)]
+    assert slow.join_calls == [pytest.approx(1.0)]
+    assert clock[0] == pytest.approx(21.0)
+    assert all(process.terminate_calls == 1 for process in (fast, slow))
+    assert all(process.kill_calls == 0 for process in (fast, slow))
+    assert workers_alive is False
+    assert escalated is True
+    assert operation_errors == ()
+
+
+def test_kill_shutdown_redistributes_fast_first_worker_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [30.0]
+    fast = PlannedJoinProcess(clock, [(True, False), (False, True)])
+    slow = PlannedJoinProcess(clock, [(True, False), (True, True)])
+    monkeypatch.setattr(train_module, "_monotonic", lambda: clock[0], raising=False)
+
+    workers_alive, escalated, operation_errors = train_module._stop_processes(
+        [fast, slow],
+        graceful_join=False,
+    )
+
+    assert fast.join_calls == [pytest.approx(0.5), pytest.approx(0.5)]
+    assert slow.join_calls == [pytest.approx(0.5), pytest.approx(1.0)]
+    assert clock[0] == pytest.approx(32.0)
+    assert all(process.terminate_calls == 1 for process in (fast, slow))
+    assert all(process.kill_calls == 1 for process in (fast, slow))
+    assert workers_alive is False
+    assert escalated is True
+    assert operation_errors == ()
+
+
 def test_multiworker_shutdown_uses_one_shared_five_second_deadline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2110,7 +2247,7 @@ def test_subprocess_cleanup_confirms_workers_dead_before_reporting_construction_
     assert terminated.join_calls == [pytest.approx(0.5)]
     assert killed.terminate_calls == 1
     assert killed.kill_calls == 1
-    assert killed.join_calls == [pytest.approx(0.5), pytest.approx(1.0)]
+    assert killed.join_calls == [pytest.approx(1.0), pytest.approx(1.0)]
     assert already_dead.terminate_calls == 0
     assert already_dead.kill_calls == 0
     assert already_dead.join_calls == []
@@ -2728,6 +2865,94 @@ def test_resume_restores_exact_automatic_curriculum_state_without_regression(
     assert all(environment.difficulty_levels == [2] for environment in environments.created)
 
 
+@pytest.mark.parametrize("checkpoint_kind", ["periodic", "final"])
+@pytest.mark.parametrize(
+    "corruption",
+    ["missing", "null-metadata", "hash-mismatch", "malformed", "metadata-values"],
+)
+def test_resume_rejects_invalid_run_final_curriculum_artifact_before_destination(
+    tmp_path: Path,
+    checkpoint_kind: str,
+    corruption: str,
+) -> None:
+    source = seed_compatible_source_run(tmp_path)
+    selected_checkpoint = (
+        add_periodic_checkpoint(source)
+        if checkpoint_kind == "periodic"
+        else source.checkpoint
+    )
+    state_path = source.run_dir / "curriculum_state.yaml"
+    metadata_path = source.run_dir / "run_metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    if corruption == "missing":
+        state_path.unlink()
+    elif corruption == "null-metadata":
+        metadata["curriculum_state"] = None
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    elif corruption == "hash-mismatch":
+        state_path.write_text(
+            "level: 0\nconsecutive_passes: 0\nevaluations: 1\n",
+            encoding="utf-8",
+        )
+    elif corruption == "malformed":
+        state_path.write_text("level: [", encoding="utf-8")
+        metadata["curriculum_state"]["sha256"] = sha256_file(state_path)
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    else:
+        metadata["curriculum_state"]["evaluations"] = 1
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    destination = tmp_path / f"rejected-final-state-{checkpoint_kind}-{corruption}"
+    environments = EnvFactory()
+
+    with pytest.raises(ValueError, match="curriculum|Curriculum|Artifact"):
+        run_with_fakes(
+            make_config(),
+            destination,
+            resume_from=selected_checkpoint,
+            env_factory=environments,
+        )
+
+    assert not destination.exists()
+    assert environments.calls == []
+    assert FakePPO.load_calls == []
+
+
+@pytest.mark.parametrize("checkpoint_kind", ["periodic", "final"])
+def test_resume_validates_run_final_curriculum_reachability_against_parent_config(
+    tmp_path: Path,
+    checkpoint_kind: str,
+) -> None:
+    source = seed_compatible_source_run(tmp_path)
+    selected_checkpoint = (
+        add_periodic_checkpoint(source)
+        if checkpoint_kind == "periodic"
+        else source.checkpoint
+    )
+    unreachable = CurriculumState(level=1, consecutive_passes=0, evaluations=1)
+    state_path = source.run_dir / "curriculum_state.yaml"
+    write_curriculum_state(unreachable, state_path)
+    metadata_path = source.run_dir / "run_metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["curriculum_state"].update(
+        {
+            "sha256": sha256_file(state_path),
+            "level": unreachable.level,
+            "consecutive_passes": unreachable.consecutive_passes,
+            "evaluations": unreachable.evaluations,
+        }
+    )
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="fixed curriculum.*level"):
+        run_with_fakes(
+            make_config(),
+            tmp_path / f"unreachable-final-state-{checkpoint_kind}",
+            resume_from=selected_checkpoint,
+        )
+
+    assert FakePPO.load_calls == []
+
+
 @pytest.mark.parametrize(
     "corruption",
     ["missing", "hash-mismatch", "malformed", "level-out-of-range", "metadata-mismatch"],
@@ -3092,6 +3317,41 @@ def test_resume_rejects_invalid_resolved_source_config_before_destination(
         run_with_fakes(make_config(), destination, resume_from=source.checkpoint)
 
     assert not destination.exists()
+    assert FakePPO.load_calls == []
+
+
+@pytest.mark.parametrize(
+    ("path", "replacement"),
+    [
+        (("metadrive", "use_render"), 0),
+        (("shield", "imminent_ttc_s"), True),
+        (("shield", "imminent_ttc_s"), 1),
+    ],
+)
+def test_resume_rejects_type_changed_metadata_resolved_config_scalars(
+    tmp_path: Path,
+    path: tuple[str, str],
+    replacement: object,
+) -> None:
+    config = make_config()
+    source = seed_compatible_source_run(tmp_path, config=config)
+    metadata_path = source.run_dir / "run_metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["resolved_config"][path[0]][path[1]] = replacement
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    destination = tmp_path / f"type-changed-{path[1]}-{type(replacement).__name__}"
+    environments = EnvFactory()
+
+    with pytest.raises(ValueError, match="does not match"):
+        run_with_fakes(
+            config,
+            destination,
+            resume_from=source.checkpoint,
+            env_factory=environments,
+        )
+
+    assert not destination.exists()
+    assert environments.calls == []
     assert FakePPO.load_calls == []
 
 
