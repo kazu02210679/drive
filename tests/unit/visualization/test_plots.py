@@ -114,7 +114,14 @@ def test_plots_emit_actual_fixed_legend_and_tick_label_order(
     )
 
     assert legends == [
-        ("proposed",),
+        (
+            "b1_nominal",
+            "b2_multi_no_review",
+            "proposed",
+            "proposed_no_critic",
+            "proposed_no_shield",
+            "proposed_no_hazard",
+        ),
         ("scenario_success", "final_route_completion"),
         ("unnecessary_braking_event_count", "unnecessary_stop_duration_s"),
         (
@@ -125,8 +132,16 @@ def test_plots_emit_actual_fixed_legend_and_tick_label_order(
     ]
     expected = (
         "decision\nb1_nominal",
+        "decision\nb2_multi_no_review",
+        "decision\nproposed",
         "system\nb0_rule",
+        "system\nb1_nominal",
+        "system\nb2_multi_no_review",
+        "system\nproposed",
         "ablation\nproposed",
+        "ablation\nproposed_no_critic",
+        "ablation\nproposed_no_shield",
+        "ablation\nproposed_no_hazard",
     )
     assert tick_labels == [expected] * 5
 

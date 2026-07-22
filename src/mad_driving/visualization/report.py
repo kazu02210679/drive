@@ -11,6 +11,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, fields
 from pathlib import Path
+from statistics import fmean, stdev
 from typing import Final, cast
 
 from mad_driving.config.models import MethodId
@@ -153,6 +154,12 @@ _EXPECTED_COMPARISON_IDENTITIES: Final = tuple(
     for case in EVALUATION_CASES
     for method_id in _METHODS_BY_TRACK[track]
     for metric in _METRIC_NAMES
+)
+_EXPECTED_COMPARISON_GROUPS: Final = tuple(
+    (track, case.case_id, method_id)
+    for track in _TRACK_ORDER
+    for case in EVALUATION_CASES
+    for method_id in _METHODS_BY_TRACK[track]
 )
 
 
@@ -304,6 +311,39 @@ def _parse_train_metrics_csv(payload: bytes) -> tuple[_TrainCsvRow, ...]:
             )
         )
     _require_one_formality([row.is_formal for row in rows], "train_metrics.csv")
+    grouped: dict[tuple[str, str, int], list[_TrainCsvRow]] = {}
+    for row in rows:
+        grouped.setdefault((row.run_id, row.method_id, row.policy_seed), []).append(row)
+    required = frozenset(_TRAIN_METRICS)
+    for run_identity, run_rows in grouped.items():
+        by_metric = {
+            metric: [row for row in run_rows if row.metric == metric] for metric in required
+        }
+        missing = sorted(metric for metric, points in by_metric.items() if not points)
+        if missing:
+            mode = "formal" if run_rows[0].is_formal else "smoke"
+            raise ValueError(
+                f"{mode} training run {run_identity!r} is missing required series: "
+                + ", ".join(missing)
+            )
+        for metric, points in by_metric.items():
+            unavailable = [point for point in points if point.value is None]
+            if unavailable and (
+                run_rows[0].is_formal or len(points) != 1 or points[0].timestep != 0
+            ):
+                raise ValueError(
+                    f"training series {metric} must be wholly available or one explicit "
+                    "smoke unavailable row at timestep 0"
+                )
+        entropy = {row.timestep: row.value for row in by_metric["train/entropy_loss"]}
+        derived = {row.timestep: row.value for row in by_metric["policy_entropy"]}
+        expected_derived = {
+            timestep: None if value is None else -value for timestep, value in entropy.items()
+        }
+        if derived != expected_derived:
+            raise ValueError(
+                "policy_entropy must exactly equal the negated train/entropy_loss series"
+            )
     return tuple(rows)
 
 
@@ -585,6 +625,118 @@ def _validate_checkpoint_provenance(
         used_selected.add(key)
     if not smoke and used_selected != set(selected):
         raise ValueError("formal selected checkpoint inventory does not match evaluation")
+    if smoke and not set(selected) <= set(observed):
+        raise ValueError("smoke selected checkpoints must belong to evaluated PPO identities")
+
+
+def _evaluation_physical_key(row: _EvalCsvRow) -> tuple[str, int, int]:
+    return (row.case_id, row.episode_index, row.test_seed)
+
+
+def _evaluation_physical_identity(row: _EvalCsvRow) -> tuple[str, ...]:
+    return (
+        row.cells["metadrive_scenario_index"],
+        row.cells["scenario_selection_seed"],
+        row.cells["scenario_parameter_seed"],
+        row.cells["scenario_id"],
+        row.cells["difficulty_level"],
+    )
+
+
+def _validate_matched_eval_rows(eval_rows: Sequence[_EvalCsvRow]) -> None:
+    actual_groups = {(row.track, row.case_id, row.method_id) for row in eval_rows}
+    if actual_groups != set(_EXPECTED_COMPARISON_GROUPS):
+        raise ValueError("comparison groups are not exactly backed by eval_metrics.csv episodes")
+    for track in _TRACK_ORDER:
+        track_rows = [row for row in eval_rows if row.track == track]
+        seed_sets = {
+            method_id: {row.policy_seed for row in track_rows if row.method_id == method_id}
+            for method_id in _METHODS_BY_TRACK[track]
+            if method_id != "b0_rule"
+        }
+        if len({frozenset(seeds) for seeds in seed_sets.values()}) != 1:
+            raise ValueError(f"eval_metrics.csv track {track} has unmatched PPO policy seeds")
+        ppo_seeds = next(iter(seed_sets.values()))
+        physical_sets: list[frozenset[tuple[str, int, int]]] = []
+        for method_id in _METHODS_BY_TRACK[track]:
+            seeds = {None} if method_id == "b0_rule" else ppo_seeds
+            for policy_seed in seeds:
+                physical_sets.append(
+                    frozenset(
+                        _evaluation_physical_key(row)
+                        for row in track_rows
+                        if row.method_id == method_id and row.policy_seed == policy_seed
+                    )
+                )
+        if len(set(physical_sets)) != 1:
+            raise ValueError(f"eval_metrics.csv track {track} has unmatched physical episodes")
+        by_physical: dict[tuple[str, int, int], list[_EvalCsvRow]] = {}
+        for row in track_rows:
+            by_physical.setdefault(_evaluation_physical_key(row), []).append(row)
+        for physical_key, matched in by_physical.items():
+            identities = {_evaluation_physical_identity(row) for row in matched}
+            if len(identities) != 1:
+                raise ValueError(
+                    f"eval_metrics.csv matched episode {physical_key!r} has differing provenance"
+                )
+
+
+def _validate_comparison_derivation(
+    eval_rows: Sequence[_EvalCsvRow],
+    comparison_rows: Sequence[_ComparisonCsvRow],
+) -> None:
+    _validate_matched_eval_rows(eval_rows)
+    by_group: dict[tuple[str, str, str], dict[int | None, list[_EvalCsvRow]]] = {}
+    for row in eval_rows:
+        policies = by_group.setdefault((row.track, row.case_id, row.method_id), {})
+        policies.setdefault(row.policy_seed, []).append(row)
+    aggregates = {
+        (row.track, row.case_id, row.method_id, row.metric): row for row in comparison_rows
+    }
+    for group in _EXPECTED_COMPARISON_GROUPS:
+        by_policy = by_group[group]
+        physical_counts = {len(rows) for rows in by_policy.values()}
+        if len(physical_counts) != 1:
+            raise ValueError(f"eval_metrics.csv group {group!r} has unequal physical counts")
+        physical_count = next(iter(physical_counts))
+        replicate_count = len(by_policy)
+        for metric in _METRIC_NAMES:
+            replicate_means: list[float] = []
+            for policy_rows in by_policy.values():
+                available = [
+                    float(value)
+                    for row in policy_rows
+                    if (value := getattr(row.metrics, metric)) is not None
+                ]
+                if available:
+                    replicate_means.append(fmean(available))
+            expected_mean = fmean(replicate_means) if replicate_means else None
+            expected_stdev = stdev(replicate_means) if len(replicate_means) >= 2 else None
+            aggregate = aggregates[(*group, metric)]
+            if aggregate.physical_episode_count != physical_count:
+                raise ValueError("comparison physical episode count does not match eval rows")
+            if aggregate.policy_replicate_count != replicate_count:
+                raise ValueError("comparison policy replicate count does not match eval rows")
+            if aggregate.mean != expected_mean:
+                raise ValueError("comparison mean is not derived from eval rows")
+            if aggregate.policy_seed_stdev != expected_stdev:
+                raise ValueError("comparison policy-seed stdev is not derived from eval rows")
+
+
+def _validate_training_provenance(
+    training_rows: Sequence[_TrainCsvRow],
+    eval_rows: Sequence[_EvalCsvRow],
+    *,
+    smoke: bool,
+) -> None:
+    evaluated = {
+        (row.method_id, row.policy_seed) for row in eval_rows if row.policy_seed is not None
+    }
+    trained = {(row.method_id, row.policy_seed) for row in training_rows}
+    if not trained <= evaluated:
+        raise ValueError("training provenance contains a method/seed absent from evaluation")
+    if not smoke and trained != evaluated:
+        raise ValueError("formal evaluation requires training provenance for every PPO method/seed")
 
 
 def _markdown_cell(value: object) -> str:
@@ -673,6 +825,8 @@ def write_markdown_report(bundle_dir: Path, output_md: Path) -> None:
     if len(formalities) != 1:
         raise ValueError("canonical metrics disagree on smoke/formal provenance")
     smoke = formalities == {False}
+    _validate_comparison_derivation(eval_rows, comparison_rows)
+    _validate_training_provenance(training_rows, eval_rows, smoke=smoke)
     _validate_checkpoint_provenance(eval_rows, checkpoints, smoke=smoke)
 
     def link(relative: str) -> str:

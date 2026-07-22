@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import io
 import json
 import subprocess
 import sys
@@ -9,7 +10,11 @@ from pathlib import Path
 
 import pytest
 
-from mad_driving.visualization.report import write_markdown_report
+from mad_driving.evaluation.training_metrics import (
+    REQUIRED_TENSORBOARD_TAGS,
+    TRAIN_METRICS_CSV_COLUMNS,
+)
+from mad_driving.visualization.report import _parse_train_metrics_csv, write_markdown_report
 
 
 def _read_csv_rows(path: Path) -> tuple[list[str], list[dict[str, str]]]:
@@ -17,6 +22,40 @@ def _read_csv_rows(path: Path) -> tuple[list[str], list[dict[str, str]]]:
         reader = csv.DictReader(source)
         assert reader.fieldnames is not None
         return reader.fieldnames, list(reader)
+
+
+def _train_csv_bytes(
+    *,
+    smoke: bool,
+    omitted: frozenset[str] = frozenset(),
+    unavailable: frozenset[str] = frozenset(),
+    entropy: str = "-0.75",
+    policy_entropy: str = "0.75",
+) -> bytes:
+    output = io.StringIO(newline="")
+    writer = csv.DictWriter(output, fieldnames=TRAIN_METRICS_CSV_COLUMNS, lineterminator="\n")
+    writer.writeheader()
+    metrics = (*REQUIRED_TENSORBOARD_TAGS, "policy_entropy")
+    for metric in metrics:
+        if metric in omitted:
+            continue
+        value = "" if metric in unavailable else "1.0"
+        if metric == "train/entropy_loss" and metric not in unavailable:
+            value = entropy
+        if metric == "policy_entropy" and metric not in unavailable:
+            value = policy_entropy
+        writer.writerow(
+            {
+                "result_label": "SMOKE - NOT A RESEARCH RESULT" if smoke else "",
+                "run_id": "proposed-42",
+                "method_id": "proposed",
+                "policy_seed": "42",
+                "timestep": "0",
+                "metric": metric,
+                "value": value,
+            }
+        )
+    return output.getvalue().encode("utf-8")
 
 
 def _rewrite_csv_and_manifest(
@@ -71,22 +110,6 @@ def _make_formal(bundle: Path) -> None:
     _rewrite_csv_and_manifest(bundle, "metrics/train_metrics.csv", train)
     _rewrite_csv_and_manifest(bundle, "metrics/eval_metrics.csv", evaluated)
     _rewrite_csv_and_manifest(bundle, "metrics/comparison.csv", evaluated)
-
-    def checkpoints(payload: dict[str, object]) -> None:
-        selected = payload["selected_checkpoints"]
-        assert isinstance(selected, list)
-        selected.insert(
-            0,
-            {
-                "checkpoint_path": "runs/b1_nominal/42.zip",
-                "checkpoint_sha256": "a" * 64,
-                "method_id": "b1_nominal",
-                "policy_seed": 42,
-                "validation_plan_sha256": "b" * 64,
-            },
-        )
-
-    _rewrite_json_and_manifest(bundle, "selected_checkpoints.json", checkpoints)
 
 
 @pytest.mark.parametrize("existing", [False, True])
@@ -352,6 +375,32 @@ def test_plots_reject_duplicate_canonical_train_and_eval_row_identities(
         )
 
 
+def test_formal_training_requires_every_exported_series() -> None:
+    payload = _train_csv_bytes(smoke=False, omitted=frozenset({"reward/jerk_penalty"}))
+
+    with pytest.raises(ValueError, match="formal.*missing|required.*series|jerk_penalty"):
+        _parse_train_metrics_csv(payload)
+
+
+def test_smoke_training_requires_explicit_unavailable_rows_for_absent_series() -> None:
+    omitted = frozenset(REQUIRED_TENSORBOARD_TAGS) - {"rollout/ep_rew_mean"}
+    payload = _train_csv_bytes(smoke=True, omitted=omitted | {"policy_entropy"})
+
+    with pytest.raises(ValueError, match="smoke.*unavailable|missing.*series|required.*series"):
+        _parse_train_metrics_csv(payload)
+
+    unavailable = omitted | {"policy_entropy"}
+    rows = _parse_train_metrics_csv(_train_csv_bytes(smoke=True, unavailable=unavailable))
+    assert {row.metric for row in rows if row.value is None} == unavailable
+
+
+def test_training_policy_entropy_must_be_exactly_derived_from_entropy_loss() -> None:
+    payload = _train_csv_bytes(smoke=False, entropy="-0.75", policy_entropy="0.5")
+
+    with pytest.raises(ValueError, match="policy_entropy|entropy.*derived|negat"):
+        _parse_train_metrics_csv(payload)
+
+
 @pytest.mark.parametrize(
     ("relative", "column", "value", "message"),
     (
@@ -405,6 +454,119 @@ def test_report_rejects_one_missing_expected_comparison_matrix_row(
 
     with pytest.raises(ValueError, match="comparison.*matrix|missing.*comparison|required.*row"):
         write_markdown_report(bundle, tmp_path / "missing-comparison.md")
+
+
+def test_report_rejects_comparison_group_not_backed_by_eval_rows(
+    bundle_factory: Callable[[], Path], tmp_path: Path
+) -> None:
+    bundle = bundle_factory()
+    _rewrite_csv_and_manifest(
+        bundle,
+        "metrics/eval_metrics.csv",
+        lambda rows: rows.pop(),
+    )
+
+    with pytest.raises(ValueError, match="comparison.*eval|aggregate.*episode|group.*backed"):
+        write_markdown_report(bundle, tmp_path / "unbacked-comparison.md")
+
+
+@pytest.mark.parametrize(
+    ("column", "value", "message"),
+    (
+        ("physical_episode_count", "2", "physical.*count|comparison.*eval"),
+        ("policy_replicate_count", "2", "replicate.*count|comparison.*eval"),
+        ("mean", "0.25", "mean|aggregate|comparison.*eval"),
+    ),
+)
+def test_report_rejects_comparison_values_not_derived_from_eval_rows(
+    bundle_factory: Callable[[], Path],
+    tmp_path: Path,
+    column: str,
+    value: str,
+    message: str,
+) -> None:
+    bundle = bundle_factory()
+
+    def mismatch(rows: list[dict[str, str]]) -> None:
+        rows[0][column] = value
+
+    _rewrite_csv_and_manifest(bundle, "metrics/comparison.csv", mismatch)
+    with pytest.raises(ValueError, match=message):
+        write_markdown_report(bundle, tmp_path / f"mismatched-{column}.md")
+
+
+def test_formal_report_requires_training_provenance_for_every_evaluated_ppo(
+    bundle_factory: Callable[[], Path], tmp_path: Path
+) -> None:
+    bundle = bundle_factory()
+    _make_formal(bundle)
+
+    def remove_one_run(rows: list[dict[str, str]]) -> None:
+        rows[:] = [row for row in rows if row["method_id"] != "proposed_no_hazard"]
+
+    _rewrite_csv_and_manifest(bundle, "metrics/train_metrics.csv", remove_one_run)
+    with pytest.raises(ValueError, match="formal.*training|training.*provenance|method.*seed"):
+        write_markdown_report(bundle, tmp_path / "missing-training-provenance.md")
+
+
+def test_formal_report_accepts_exact_eval_training_and_selection_provenance(
+    bundle_factory: Callable[[], Path], tmp_path: Path
+) -> None:
+    bundle = bundle_factory()
+    _make_formal(bundle)
+
+    output = tmp_path / "matched-formal.md"
+    write_markdown_report(bundle, output)
+    report = output.read_text(encoding="utf-8")
+    assert "SMOKE - NOT A RESEARCH RESULT" not in report
+    assert "proposed_no_hazard" in report
+
+
+def test_smoke_report_allows_explicitly_partial_training_provenance_and_no_b0_run(
+    bundle_factory: Callable[[], Path], tmp_path: Path
+) -> None:
+    bundle = bundle_factory()
+
+    def remove_one_run(rows: list[dict[str, str]]) -> None:
+        assert all(row["method_id"] != "b0_rule" and row["policy_seed"] for row in rows)
+        rows[:] = [row for row in rows if row["method_id"] != "proposed_no_hazard"]
+
+    _rewrite_csv_and_manifest(bundle, "metrics/train_metrics.csv", remove_one_run)
+    output = tmp_path / "partial-smoke-training.md"
+    write_markdown_report(bundle, output)
+    assert "SMOKE - NOT A RESEARCH RESULT" in output.read_text(encoding="utf-8")
+
+
+def test_smoke_report_validates_two_stage_policy_replicate_aggregation(
+    bundle_factory: Callable[[], Path], tmp_path: Path
+) -> None:
+    bundle = bundle_factory()
+
+    def add_second_policy(rows: list[dict[str, str]]) -> None:
+        second_policy: list[dict[str, str]] = []
+        for row in rows:
+            if row["method_id"] == "b0_rule":
+                continue
+            duplicate = dict(row)
+            duplicate["policy_seed"] = "43"
+            duplicate["checkpoint_path"] = f"runs/{row['method_id']}/43.zip"
+            duplicate["checkpoint_sha256"] = "9" * 64
+            second_policy.append(duplicate)
+        rows.extend(second_policy)
+
+    def aggregate_two_policies(rows: list[dict[str, str]]) -> None:
+        for row in rows:
+            if row["method_id"] == "b0_rule":
+                continue
+            row["policy_replicate_count"] = "2"
+            if row["mean"] != "":
+                row["policy_seed_stdev"] = "0.0"
+
+    _rewrite_csv_and_manifest(bundle, "metrics/eval_metrics.csv", add_second_policy)
+    _rewrite_csv_and_manifest(bundle, "metrics/comparison.csv", aggregate_two_policies)
+    output = tmp_path / "two-stage-smoke.md"
+    write_markdown_report(bundle, output)
+    assert "SMOKE - NOT A RESEARCH RESULT" in output.read_text(encoding="utf-8")
 
 
 def test_smoke_report_explicitly_allows_unselected_ppo_checkpoints(

@@ -11,7 +11,11 @@ from mad_driving.evaluation.models import (
     EvaluationEpisodeKey,
     EvaluationStepRecord,
 )
-from mad_driving.evaluation.serialization import read_jsonl_strict, write_jsonl_strict
+from mad_driving.evaluation.serialization import (
+    parse_jsonl_bytes_strict,
+    read_jsonl_strict,
+    write_jsonl_strict,
+)
 from mad_driving.interfaces import CriticReview
 from mad_driving.training import MethodProfileSnapshot
 
@@ -118,6 +122,79 @@ def test_jsonl_reader_round_trips_steps_and_enforces_contiguous_indices(tmp_path
     write_jsonl_strict(bad, (make_step(0).to_dict(), make_step(2).to_dict()))
     with pytest.raises(ValueError, match="contiguous"):
         read_jsonl_strict(bad, EvaluationStepRecord)
+
+
+def test_jsonl_bytes_parser_round_trips_the_same_strict_step_stream() -> None:
+    records = (make_step(0), make_step(1))
+    payload = b"".join(
+        (json.dumps(record.to_dict(), sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+        for record in records
+    )
+
+    assert parse_jsonl_bytes_strict(payload, EvaluationStepRecord) == records
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    (
+        (b"\xff\n", "UTF-8|unreadable"),
+        (b"{}", "trailing newline"),
+        (b"{}\n\n", "blank"),
+        (b'{"value":NaN}\n', "non-finite"),
+        (b'{"value":1,"value":2}\n', "duplicate"),
+    ),
+)
+def test_jsonl_bytes_parser_rejects_encoding_framing_and_json_contract_violations(
+    payload: bytes, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        parse_jsonl_bytes_strict(payload, EvaluationStepRecord)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    (
+        ({"episode_index": 3}, "episode_index"),
+        ({"is_formal": True}, "is_formal"),
+        ({"shield_mode": "off"}, "shield_mode"),
+        ({"step_index": 2}, "contiguous"),
+    ),
+)
+def test_jsonl_bytes_parser_enforces_one_step_stream_contract(
+    overrides: dict[str, object], message: str
+) -> None:
+    second = make_step(1).to_dict()
+    second.update(overrides)
+    records = (make_step(0).to_dict(), second)
+    payload = b"".join(
+        (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+        for record in records
+    )
+
+    with pytest.raises(ValueError, match=message):
+        parse_jsonl_bytes_strict(payload, EvaluationStepRecord)
+
+
+def test_path_jsonl_reader_is_a_thin_wrapper_over_the_bytes_parser(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import mad_driving.evaluation.serialization as serialization
+
+    destination = tmp_path / "steps.jsonl"
+    payload = b"{}\n"
+    destination.write_bytes(payload)
+    seen: list[bytes] = []
+
+    def parse(
+        encoded: bytes, model: type[EvaluationStepRecord]
+    ) -> tuple[EvaluationStepRecord, ...]:
+        seen.append(encoded)
+        assert model is EvaluationStepRecord
+        return ()
+
+    monkeypatch.setattr(serialization, "parse_jsonl_bytes_strict", parse)
+    assert serialization.read_jsonl_strict(destination, EvaluationStepRecord) == ()
+    assert seen == [payload]
 
 
 def test_step_reader_rejects_empty_and_mixed_episode_files(tmp_path: Path) -> None:

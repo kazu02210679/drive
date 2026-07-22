@@ -70,14 +70,25 @@ def write_jsonl_strict(path: Path, rows: Iterable[Mapping[str, object]]) -> None
 
 
 def read_jsonl_strict(path: Path, model: type[T]) -> tuple[T, ...]:
-    """Read strict records while rejecting malformed JSON and duplicate fields."""
+    """Read a path once and parse it through the shared strict bytes boundary."""
 
     source = Path(path)
     try:
         payload = source.read_bytes()
-        text = payload.decode("utf-8")
-    except (OSError, UnicodeError) as error:
+    except OSError as error:
         raise ValueError(f"JSONL file is unreadable: {source}") from error
+    return parse_jsonl_bytes_strict(payload, model)
+
+
+def parse_jsonl_bytes_strict(payload: bytes, model: type[T]) -> tuple[T, ...]:
+    """Parse strict UTF-8/LF JSONL records from caller-supplied immutable bytes."""
+
+    if not isinstance(payload, bytes):
+        raise TypeError("JSONL payload must be bytes")
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeError as error:
+        raise ValueError("JSONL bytes are not valid UTF-8") from error
     if payload and not payload.endswith(b"\n"):
         raise ValueError("JSONL file must end with a trailing newline")
     if not payload:
@@ -143,4 +154,9 @@ def _validate_step_stream(records: tuple[EvaluationStepRecord, ...]) -> None:
         raise ValueError("step indices must be contiguous and zero-based")
 
 
-__all__ = ["load_evaluation_plan", "read_jsonl_strict", "write_jsonl_strict"]
+__all__ = [
+    "load_evaluation_plan",
+    "parse_jsonl_bytes_strict",
+    "read_jsonl_strict",
+    "write_jsonl_strict",
+]

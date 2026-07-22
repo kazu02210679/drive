@@ -20,14 +20,36 @@ from mad_driving.evaluation.models import (
     REWARD_COMPONENT_KEYS,
     EvaluationEpisodeKey,
     EvaluationStepRecord,
+    expected_runtime_shield_mode,
 )
 from mad_driving.evaluation.serialization import write_jsonl_strict
-from mad_driving.evaluation.training_metrics import TRAIN_METRICS_CSV_COLUMNS
+from mad_driving.evaluation.training_metrics import (
+    REQUIRED_TENSORBOARD_TAGS,
+    TRAIN_METRICS_CSV_COLUMNS,
+)
 from mad_driving.evaluation.workspace import EvaluationWorkspace
 from mad_driving.interfaces import CriticReview, RiskClaim
 from mad_driving.methods import MethodProfileSnapshot
 
 SMOKE = "SMOKE - NOT A RESEARCH RESULT"
+_METHODS_BY_TRACK = {
+    "decision": ("b1_nominal", "b2_multi_no_review", "proposed"),
+    "system": ("b0_rule", "b1_nominal", "b2_multi_no_review", "proposed"),
+    "ablation": (
+        "proposed",
+        "proposed_no_critic",
+        "proposed_no_shield",
+        "proposed_no_hazard",
+    ),
+}
+_CHECKPOINT_HASHES = {
+    "b1_nominal": "b" * 64,
+    "b2_multi_no_review": "c" * 64,
+    "proposed": "a" * 64,
+    "proposed_no_critic": "d" * 64,
+    "proposed_no_shield": "e" * 64,
+    "proposed_no_hazard": "f" * 64,
+}
 
 
 def _write_csv(path: Path, columns: tuple[str, ...], rows: list[dict[str, object]]) -> None:
@@ -145,8 +167,14 @@ def finalize_manifest(bundle: Path) -> None:
     EvaluationWorkspace(destination=bundle, path=bundle).write_manifest()
 
 
-def _eval_row(method_id: str, track: str, seed: str, *, disagreement: str) -> dict[str, object]:
+def _eval_row(
+    method_id: str,
+    track: str,
+    *,
+    case_index: int,
+) -> dict[str, object]:
     profile = MethodProfileSnapshot.from_method_id(method_id)
+    case = EVALUATION_CASES[case_index]
     multi_agent = len(profile.specialist_ids) > 1
     critic = profile.critic_enabled
     row: dict[str, object] = {column: "" for column in EVAL_METRICS_CSV_COLUMNS}
@@ -158,21 +186,21 @@ def _eval_row(method_id: str, track: str, seed: str, *, disagreement: str) -> di
             "research_contract_version": 7,
             "track": track,
             "method_id": method_id,
-            "policy_seed": seed,
-            "case_id": "level1_lead_brake",
+            "policy_seed": "" if method_id == "b0_rule" else 42,
+            "case_id": case.case_id,
             "episode_index": 0,
-            "test_seed": 20_001,
+            "test_seed": 20_000 + case_index,
             "checkpoint_path": "" if method_id == "b0_rule" else f"runs/{method_id}/42.zip",
-            "checkpoint_sha256": "" if method_id == "b0_rule" else "a" * 64,
+            "checkpoint_sha256": ("" if method_id == "b0_rule" else _CHECKPOINT_HASHES[method_id]),
             "policy_kind": profile.policy_kind,
             "specialist_ids": ";".join(profile.specialist_ids),
             "critic_enabled": profile.critic_enabled,
-            "shield_mode": "monitor" if track == "decision" else "enforce",
-            "metadrive_scenario_index": 1,
-            "scenario_selection_seed": 31,
-            "scenario_parameter_seed": 37,
-            "scenario_id": "lead_brake",
-            "difficulty_level": 1,
+            "shield_mode": expected_runtime_shield_mode(track, method_id),  # type: ignore[arg-type]
+            "metadrive_scenario_index": case_index,
+            "scenario_selection_seed": 31 + case_index,
+            "scenario_parameter_seed": 37 + case_index,
+            "scenario_id": case.scenario_id,
+            "difficulty_level": case.difficulty_level,
             "collision": False,
             "crossing_actor_collision": False,
             "near_miss": True,
@@ -194,7 +222,7 @@ def _eval_row(method_id: str, track: str, seed: str, *, disagreement: str) -> di
             "longitudinal_jerk_rms_mps3": 0.4,
             "agent_disagreement_eligible_steps": 2 if multi_agent else 0,
             "agent_disagreement_count": 1 if multi_agent else 0,
-            "agent_disagreement_rate": disagreement if multi_agent else "",
+            "agent_disagreement_rate": 0.5 if multi_agent else "",
             "critic_challenge_eligible_steps": 2 if critic else 0,
             "critic_challenge_count": 1 if critic else 0,
             "critic_challenge_rate": 0.5 if critic else "",
@@ -212,27 +240,27 @@ def _eval_row(method_id: str, track: str, seed: str, *, disagreement: str) -> di
     return row
 
 
-def _comparison_rows() -> list[dict[str, object]]:
+def _eval_rows() -> list[dict[str, object]]:
+    return [
+        _eval_row(method, track, case_index=case_index)
+        for track, methods in _METHODS_BY_TRACK.items()
+        for case_index, _case in enumerate(EVALUATION_CASES)
+        for method in methods
+    ]
+
+
+def _comparison_rows(eval_rows: list[dict[str, object]]) -> list[dict[str, object]]:
     metrics = tuple(field.name for field in fields(EpisodeMetrics))
     rows: list[dict[str, object]] = []
-    methods_by_track = {
-        "decision": ("b1_nominal", "b2_multi_no_review", "proposed"),
-        "system": ("b0_rule", "b1_nominal", "b2_multi_no_review", "proposed"),
-        "ablation": (
-            "proposed",
-            "proposed_no_critic",
-            "proposed_no_shield",
-            "proposed_no_hazard",
-        ),
+    by_group = {
+        (str(row["track"]), str(row["case_id"]), str(row["method_id"])): row for row in eval_rows
     }
-    for track, methods in methods_by_track.items():
+    for track, methods in _METHODS_BY_TRACK.items():
         for case in EVALUATION_CASES:
             for method in methods:
-                profile = MethodProfileSnapshot.from_method_id(method)
+                evaluated = by_group[(track, case.case_id, method)]
                 for metric in metrics:
-                    unavailable = (
-                        metric == "agent_disagreement_rate" and len(profile.specialist_ids) < 2
-                    ) or (metric.startswith("critic_") and not profile.critic_enabled)
+                    value = evaluated[metric]
                     rows.append(
                         {
                             "result_label": SMOKE,
@@ -243,10 +271,33 @@ def _comparison_rows() -> list[dict[str, object]]:
                             "metric": metric,
                             "physical_episode_count": 1,
                             "policy_replicate_count": 1,
-                            "mean": "" if unavailable else 0.5,
+                            "mean": "" if value == "" else float(value),
                             "policy_seed_stdev": "",
                         }
                     )
+    return rows
+
+
+def _training_rows() -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for method_id in _CHECKPOINT_HASHES:
+        for metric in (*REQUIRED_TENSORBOARD_TAGS, "policy_entropy"):
+            value = 1.0
+            if metric == "train/entropy_loss":
+                value = -0.75
+            elif metric == "policy_entropy":
+                value = 0.75
+            rows.append(
+                {
+                    "result_label": SMOKE,
+                    "run_id": f"{method_id}-42",
+                    "method_id": method_id,
+                    "policy_seed": 42,
+                    "timestep": 0,
+                    "metric": metric,
+                    "value": value,
+                }
+            )
     return rows
 
 
@@ -267,7 +318,11 @@ def bundle_factory(tmp_path: Path) -> Callable[[], Path]:
             "plan_kind: phase6_smoke\nevaluation_id: fixture\n", encoding="utf-8"
         )
         bundle.joinpath("model_selection.csv").write_text(
-            "method_id,policy_seed,checkpoint_sha256\nproposed,42," + "a" * 64 + "\n",
+            "method_id,policy_seed,checkpoint_sha256\n"
+            + "".join(
+                f"{method_id},42,{checkpoint_hash}\n"
+                for method_id, checkpoint_hash in _CHECKPOINT_HASHES.items()
+            ),
             encoding="utf-8",
         )
         bundle.joinpath("selected_checkpoints.json").write_text(
@@ -276,12 +331,13 @@ def bundle_factory(tmp_path: Path) -> Callable[[], Path]:
                     "schema_version": 1,
                     "selected_checkpoints": [
                         {
-                            "checkpoint_path": "runs/proposed/42.zip",
-                            "checkpoint_sha256": "a" * 64,
-                            "method_id": "proposed",
+                            "checkpoint_path": f"runs/{method_id}/42.zip",
+                            "checkpoint_sha256": checkpoint_hash,
+                            "method_id": method_id,
                             "policy_seed": 42,
                             "validation_plan_sha256": "b" * 64,
                         }
+                        for method_id, checkpoint_hash in _CHECKPOINT_HASHES.items()
                     ],
                 },
                 sort_keys=True,
@@ -293,36 +349,18 @@ def bundle_factory(tmp_path: Path) -> Callable[[], Path]:
         _write_csv(
             bundle / "metrics" / "train_metrics.csv",
             TRAIN_METRICS_CSV_COLUMNS,
-            [
-                {
-                    "result_label": SMOKE,
-                    "run_id": "proposed-42",
-                    "method_id": "proposed",
-                    "policy_seed": 42,
-                    "timestep": timestep,
-                    "metric": metric,
-                    "value": value,
-                }
-                for timestep, metric, value in (
-                    (10, "rollout/ep_rew_mean", 1.0),
-                    (20, "rollout/ep_rew_mean", 2.0),
-                    (0, "train/value_loss", ""),
-                )
-            ],
+            _training_rows(),
         )
+        eval_rows = _eval_rows()
         _write_csv(
             bundle / "metrics" / "eval_metrics.csv",
             EVAL_METRICS_CSV_COLUMNS,
-            [
-                _eval_row("b0_rule", "system", "", disagreement=""),
-                _eval_row("b1_nominal", "decision", "42", disagreement="0.5"),
-                _eval_row("proposed", "ablation", "42", disagreement="0.5"),
-            ],
+            eval_rows,
         )
         _write_csv(
             bundle / "metrics" / "comparison.csv",
             COMPARISON_CSV_COLUMNS,
-            _comparison_rows(),
+            _comparison_rows(eval_rows),
         )
 
         trace = (

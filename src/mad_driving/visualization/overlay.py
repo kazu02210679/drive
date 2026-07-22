@@ -3,26 +3,24 @@
 from __future__ import annotations
 
 import io
-import json
 import math
 import os
 import tempfile
 from collections import defaultdict
-from collections.abc import Mapping
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Final, cast
+from typing import Final
 
 from PIL import Image, ImageDraw, ImageFont
 
 from mad_driving.atomic import rename_no_replace
 from mad_driving.control.actions import DrivingAction
 from mad_driving.evaluation.models import EvaluationStepRecord
+from mad_driving.evaluation.serialization import parse_jsonl_bytes_strict
 from mad_driving.visualization import (
     SMOKE_RESULT_LABEL,
     _find_and_verify_bundle,
     _reject_output_in_source_bundle,
     _require_regular_directory,
-    _unique_json_object,
 )
 
 _FRAME_DURATION_MS: Final = 100
@@ -163,53 +161,6 @@ def _write_gif(frames: tuple[Image.Image, ...], destination: Path) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _reject_json_constant(value: str) -> object:
-    raise ValueError(f"non-finite JSON number: {value}")
-
-
-def _read_step_records(payload: bytes) -> tuple[EvaluationStepRecord, ...]:
-    try:
-        text = payload.decode("utf-8")
-    except UnicodeDecodeError as error:
-        raise ValueError("step JSONL file is not UTF-8") from error
-    if not payload or not payload.endswith(b"\n"):
-        raise ValueError("step JSONL file must be non-empty and end with a trailing newline")
-    lines = text.splitlines()
-    if any(not line for line in lines):
-        raise ValueError("step JSONL file contains a blank record")
-    records: list[EvaluationStepRecord] = []
-    for line_number, line in enumerate(lines, start=1):
-        try:
-            raw = json.loads(
-                line,
-                object_pairs_hook=_unique_json_object,
-                parse_constant=_reject_json_constant,
-            )
-        except (json.JSONDecodeError, ValueError) as error:
-            raise ValueError(f"step JSONL record is malformed at line {line_number}") from error
-        if not isinstance(raw, Mapping):
-            raise ValueError(f"step JSONL record must be an object at line {line_number}")
-        try:
-            records.append(EvaluationStepRecord.from_dict(cast(Mapping[str, object], raw)))
-        except (TypeError, ValueError) as error:
-            raise ValueError(
-                f"step JSONL record is invalid at line {line_number}: {error}"
-            ) from error
-    result = tuple(records)
-    first = result[0]
-    if any(record.episode_key != first.episode_key for record in result[1:]):
-        raise ValueError("step JSONL file contains more than one episode key")
-    if any(record.episode_index != first.episode_index for record in result[1:]):
-        raise ValueError("step JSONL file contains more than one episode_index")
-    if any(record.is_formal is not first.is_formal for record in result[1:]):
-        raise ValueError("step JSONL file contains more than one is_formal value")
-    if any(record.shield_mode != first.shield_mode for record in result[1:]):
-        raise ValueError("step JSONL file contains more than one shield_mode")
-    if any(record.step_index != expected for expected, record in enumerate(result)):
-        raise ValueError("step indices must be contiguous and zero-based")
-    return result
-
-
 def write_episode_gif(step_jsonl: Path, frames_dir: Path, output_gif: Path) -> None:
     """Render a GIF without importing or rerunning a simulator or policy."""
 
@@ -227,7 +178,7 @@ def write_episode_gif(step_jsonl: Path, frames_dir: Path, output_gif: Path) -> N
     except ValueError as error:
         raise ValueError("frames_dir is outside the verified bundle") from error
 
-    records = _read_step_records(bundle.read_bytes(trace))
+    records = parse_jsonl_bytes_strict(bundle.read_bytes(trace), EvaluationStepRecord)
     frames_relative = absolute_frames.relative_to(bundle.root).as_posix()
     expected_frames = tuple(f"{frames_relative}/{record.step_index:06d}.png" for record in records)
     declared_frames = tuple(

@@ -42,6 +42,7 @@ from mad_driving.evaluation.selection import (
 )
 from mad_driving.evaluation.serialization import (
     load_evaluation_plan,
+    parse_jsonl_bytes_strict,
     read_jsonl_strict,
     write_jsonl_strict,
 )
@@ -82,6 +83,7 @@ __all__ = [
     "discover_checkpoint_candidates",
     "extract_training_metrics",
     "load_evaluation_plan",
+    "parse_jsonl_bytes_strict",
     "read_jsonl_strict",
     "reduce_episode",
     "run_evaluation_episode",

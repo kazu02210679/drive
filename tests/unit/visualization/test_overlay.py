@@ -88,6 +88,27 @@ def test_writes_gif_from_verified_lossless_frames_without_rerunning(
     assert any(frame.min() < 20 for frame in rendered)
 
 
+def test_gif_feeds_handle_verified_bytes_to_shared_strict_parser(
+    step_bundle: tuple[Path, Path, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, trace, frames = step_bundle
+    import mad_driving.visualization.overlay as overlay
+
+    expected = trace.read_bytes()
+    seen: list[bytes] = []
+    original = overlay.parse_jsonl_bytes_strict
+
+    def capture(payload: bytes, model: type[object]) -> tuple[object, ...]:
+        seen.append(payload)
+        return original(payload, model)
+
+    monkeypatch.setattr(overlay, "parse_jsonl_bytes_strict", capture)
+    write_episode_gif(trace, frames, tmp_path / "shared-parser.gif")
+    assert seen == [expected]
+
+
 def test_gif_is_repeatable_and_preserves_persisted_frame_identity_order(
     bundle_factory: Callable[[], Path], tmp_path: Path
 ) -> None:
