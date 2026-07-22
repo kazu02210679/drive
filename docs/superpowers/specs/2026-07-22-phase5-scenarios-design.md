@@ -1,8 +1,8 @@
 # Phase 5 Scenarios and Curriculum Design
 
-**Date:** 2026-07-22  
+**Date:** 2026-07-22
 **Status:** Approved
-**Parent:** Phase 4 branch `feat/phase4-rl-environment`, PR #4  
+**Parent:** Phase 4 branch `feat/phase4-rl-environment`, PR #4
 **Implementation branch:** `feat/phase5-scenarios`
 
 ## 1. Purpose
