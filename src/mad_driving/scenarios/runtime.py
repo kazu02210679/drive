@@ -44,6 +44,7 @@ def typed_collision_flags(raw_info: Mapping[str, object]) -> frozenset[TypedColl
             active.add(flag)
     return frozenset(active)
 
+
 def _freeze_parameter(value: object) -> object:
     """Copy JSON-like scenario parameters into recursively immutable containers."""
 

@@ -130,10 +130,7 @@ def _validated_json_value(value: object, name: str) -> object:
             result[key] = _validated_json_value(nested, f"{name}.{key}")
         return result
     if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
-        return [
-            _validated_json_value(nested, f"{name}[]")
-            for nested in value
-        ]
+        return [_validated_json_value(nested, f"{name}[]") for nested in value]
     if value is None or type(value) in (bool, int, str):
         return value
     if type(value) is float and math.isfinite(value):

@@ -104,10 +104,16 @@ class CurriculumOutcomeEnv(gym.Env[NDArray[np.float32], int]):
         action: int,
     ) -> tuple[NDArray[np.float32], float, bool, bool, dict[str, object]]:
         assert self.action_space.contains(action)
-        return np.zeros(4, dtype=np.float32), 0.0, True, False, {
-            "scenario_success": self.scenario_success,
-            "collision_occurred": self.collision_occurred,
-        }
+        return (
+            np.zeros(4, dtype=np.float32),
+            0.0,
+            True,
+            False,
+            {
+                "scenario_success": self.scenario_success,
+                "collision_occurred": self.collision_occurred,
+            },
+        )
 
     def set_difficulty_level(self, level: int) -> None:
         self.levels.append(level)
@@ -126,10 +132,16 @@ class SequencedCurriculumOutcomeEnv(CurriculumOutcomeEnv):
         assert self.action_space.contains(action)
         scenario_success, collision_occurred = self.outcomes[self.outcome_index]
         self.outcome_index += 1
-        return np.zeros(4, dtype=np.float32), 0.0, True, False, {
-            "scenario_success": scenario_success,
-            "collision_occurred": collision_occurred,
-        }
+        return (
+            np.zeros(4, dtype=np.float32),
+            0.0,
+            True,
+            False,
+            {
+                "scenario_success": scenario_success,
+                "collision_occurred": collision_occurred,
+            },
+        )
 
 
 class RecordingCurriculumController(CurriculumController):
@@ -378,16 +390,14 @@ def run_curriculum_evaluation(
 def test_curriculum_callback_persists_and_broadcasts_changed_level_after_eval(
     tmp_path: Path,
 ) -> None:
-    callback, training_environment, evaluation_environment, state_path = (
-        run_curriculum_evaluation(
-            tmp_path,
-            scenario_success=True,
-            collision_occurred=False,
-            config=CurriculumConfig(
-                mode="automatic",
-                consecutive_evaluations=1,
-            ),
-        )
+    callback, training_environment, evaluation_environment, state_path = run_curriculum_evaluation(
+        tmp_path,
+        scenario_success=True,
+        collision_occurred=False,
+        config=CurriculumConfig(
+            mode="automatic",
+            consecutive_evaluations=1,
+        ),
     )
 
     expected = CurriculumState(level=1, consecutive_passes=0, evaluations=1)
@@ -401,13 +411,11 @@ def test_curriculum_callback_persists_and_broadcasts_changed_level_after_eval(
 def test_curriculum_callback_persists_without_broadcast_when_level_is_unchanged(
     tmp_path: Path,
 ) -> None:
-    callback, training_environment, evaluation_environment, state_path = (
-        run_curriculum_evaluation(
-            tmp_path,
-            scenario_success=False,
-            collision_occurred=False,
-            config=CurriculumConfig(mode="automatic"),
-        )
+    callback, training_environment, evaluation_environment, state_path = run_curriculum_evaluation(
+        tmp_path,
+        scenario_success=False,
+        collision_occurred=False,
+        config=CurriculumConfig(mode="automatic"),
     )
 
     expected = CurriculumState(level=0, consecutive_passes=0, evaluations=1)

@@ -115,9 +115,7 @@ class FakeEngine:
         if actor_ids is None:
             return dict(self.objects)
         return {
-            actor_id: self.objects[actor_id]
-            for actor_id in actor_ids
-            if actor_id in self.objects
+            actor_id: self.objects[actor_id] for actor_id in actor_ids if actor_id in self.objects
         }
 
 
@@ -127,9 +125,7 @@ def manager_with_fake_engine() -> ScenarioActorManager:
 
 def test_actor_manager_owns_and_clears_spawned_actor() -> None:
     manager = manager_with_fake_engine()
-    actor_id = manager.spawn_lane_vehicle(
-        LaneVehicleSpawn("lead", (">", ">>", 0), 40.0, 0.0, 8.0)
-    )
+    actor_id = manager.spawn_lane_vehicle(LaneVehicleSpawn("lead", (">", ">>", 0), 40.0, 0.0, 8.0))
 
     assert actor_id == "lead"
     assert manager.actor_ids() == ("lead",)

@@ -108,8 +108,7 @@ def assert_phase5_training_artifacts(
         assert summary["schema_version"] == 3
         artifact = run_dir / summary["path"]
         records = [
-            json.loads(line)
-            for line in artifact.read_text(encoding="utf-8").splitlines()[1:]
+            json.loads(line) for line in artifact.read_text(encoding="utf-8").splitlines()[1:]
         ]
         assert summary["record_count"] == len(records)
         for record in records:

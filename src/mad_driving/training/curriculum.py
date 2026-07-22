@@ -87,9 +87,8 @@ class CurriculumController:
             )
         if config.mode == "automatic":
             minimum_evaluations = (
-                (state.level - config.initial_level) * config.consecutive_evaluations
-                + state.consecutive_passes
-            )
+                state.level - config.initial_level
+            ) * config.consecutive_evaluations + state.consecutive_passes
             if state.evaluations < minimum_evaluations:
                 raise ValueError(
                     "automatic curriculum evaluations are insufficient for the stored "

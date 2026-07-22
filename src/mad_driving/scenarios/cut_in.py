@@ -87,8 +87,8 @@ class CutInRuntime:
         source_lateral_m = (
             source_lane_index[2] - geometry.ego_lane_index[2]
         ) * geometry.lane_width_m
-        initial_longitudinal_m = (
-            geometry.ego_longitudinal_m + self._parameter_float(state, "initial_gap_m")
+        initial_longitudinal_m = geometry.ego_longitudinal_m + self._parameter_float(
+            state, "initial_gap_m"
         )
         speed_mps = geometry.ego_speed_mps * self._parameter_float(state, "speed_fraction")
         actor_id = self._parameter_str(state, "actor_id")
@@ -103,8 +103,10 @@ class CutInRuntime:
         merge_steps = ceil(
             self._parameter_float(state, "merge_duration_s") / geometry.decision_interval_s
         )
-        success_step = trigger_step + merge_steps + ceil(
-            self._parameter_float(state, "survival_s") / geometry.decision_interval_s
+        success_step = (
+            trigger_step
+            + merge_steps
+            + ceil(self._parameter_float(state, "survival_s") / geometry.decision_interval_s)
         )
         return replace(
             state,

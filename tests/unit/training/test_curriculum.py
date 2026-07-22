@@ -72,12 +72,8 @@ def test_automatic_curriculum_advances_after_two_passing_validations() -> None:
 def test_automatic_curriculum_requires_both_thresholds_and_resets_failed_streak() -> None:
     controller = CurriculumController(automatic_config(), CurriculumState(1, 1, 4))
 
-    collision_failure = controller.observe(
-        "validation", successes=5, collisions=1, episodes=5
-    )
-    success_failure = controller.observe(
-        "validation", successes=3, collisions=0, episodes=5
-    )
+    collision_failure = controller.observe("validation", successes=5, collisions=1, episodes=5)
+    success_failure = controller.observe("validation", successes=3, collisions=0, episodes=5)
 
     assert collision_failure == CurriculumState(1, 0, 5)
     assert success_failure == CurriculumState(1, 0, 6)

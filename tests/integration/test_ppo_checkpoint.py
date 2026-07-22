@@ -69,10 +69,16 @@ class TinyDeterministicEnv(gym.Env[NDArray[np.float32], int]):
         self.steps += 1
         observation = np.full(24, self.steps / 4.0, dtype=np.float32)
         reward = float(action == self.steps % 4)
-        return observation, reward, self.steps == 4, False, {
-            "scenario_success": self.steps == 4,
-            "collision_occurred": False,
-        }
+        return (
+            observation,
+            reward,
+            self.steps == 4,
+            False,
+            {
+                "scenario_success": self.steps == 4,
+                "collision_occurred": False,
+            },
+        )
 
     def close(self) -> None:
         self.closed = True
@@ -117,10 +123,16 @@ class SeedAwareTinyEnv(gym.Env[NDArray[np.float32], int]):
         action: int,
     ) -> tuple[NDArray[np.float32], float, bool, bool, dict[str, Any]]:
         assert self.action_space.contains(action)
-        return np.zeros(24, dtype=np.float32), 0.0, True, False, {
-            "scenario_success": True,
-            "collision_occurred": False,
-        }
+        return (
+            np.zeros(24, dtype=np.float32),
+            0.0,
+            True,
+            False,
+            {
+                "scenario_success": True,
+                "collision_occurred": False,
+            },
+        )
 
 
 class ContinuationTinyEnv(TinyDeterministicEnv):

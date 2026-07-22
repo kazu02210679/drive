@@ -52,9 +52,7 @@ class _AbsoluteTimestepSchedule:
 
     def initialize(self, current_timestep: int) -> None:
         current = self._validated_timestep(current_timestep)
-        self._next_deadline = (
-            current // self.interval_timesteps + 1
-        ) * self.interval_timesteps
+        self._next_deadline = (current // self.interval_timesteps + 1) * self.interval_timesteps
 
     def consume_if_due(self, current_timestep: int) -> bool:
         current = self._validated_timestep(current_timestep)

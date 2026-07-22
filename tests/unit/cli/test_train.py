@@ -246,6 +246,7 @@ def test_implicit_preownership_failure_never_precreates_destination(
         lambda path: make_config(run_root=str(run_root)),
     )
     monkeypatch.setattr(train_module, "_run_directory_name", lambda *, smoke: "reserved")
+
     def fail_before_ownership(*args: object, **kwargs: object) -> None:
         del args
         assert kwargs["require_absent_run_dir"] is True

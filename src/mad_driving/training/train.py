@@ -795,9 +795,7 @@ def run_training(
         )
         model.save(staged_final_checkpoint)
         if not staged_final_checkpoint.is_file():
-            raise FileNotFoundError(
-                f"Final checkpoint was not produced: {staged_final_checkpoint}"
-            )
+            raise FileNotFoundError(f"Final checkpoint was not produced: {staged_final_checkpoint}")
         write_checkpoint_curriculum_state(
             curriculum_controller.state,
             staged_final_checkpoint,
@@ -819,9 +817,7 @@ def run_training(
         model_logger_closed = True
         _close_model_logger(model)
         _promote_checkpoint_artifacts(staging_dir, checkpoints_dir)
-        checkpoint_curriculum_artifacts = checkpoint_curriculum_artifact_inventory(
-            checkpoints_dir
-        )
+        checkpoint_curriculum_artifacts = checkpoint_curriculum_artifact_inventory(checkpoints_dir)
         try:
             _cleanup_checkpoint_staging(staging_dir, checkpoints_dir)
         except Exception as exc:

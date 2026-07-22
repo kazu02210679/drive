@@ -148,16 +148,16 @@ def test_real_fixed_levels_select_only_allowed_scenarios_and_replay_byte_for_byt
     trajectory = payload["trajectory"]
     assert trajectory
     assert all(
-        item["trace_metadata"]["scenario_id"] == payload["scenario_id"]
-        for item in trajectory
+        item["trace_metadata"]["scenario_id"] == payload["scenario_id"] for item in trajectory
     )
-    assert all(
-        item["trace_metadata"]["difficulty_level"] == level for item in trajectory
-    )
+    assert all(item["trace_metadata"]["difficulty_level"] == level for item in trajectory)
     final = trajectory[-1]
-    assert final["terminated"] or final["truncated"] or final["scenario_success"] or final[
-        "scenario_failure"
-    ]
+    assert (
+        final["terminated"]
+        or final["truncated"]
+        or final["scenario_success"]
+        or final["scenario_failure"]
+    )
     if expected_scenario == "nominal":
         assert all(not item["actors"] for item in trajectory)
         assert final["scenario_success"] is True
@@ -166,9 +166,7 @@ def test_real_fixed_levels_select_only_allowed_scenarios_and_replay_byte_for_byt
         trigger_step = payload["scenario_parameters"]["trigger_step"]
         post_trigger_speeds = speeds[trigger_step - 1 :]
         assert len(post_trigger_speeds) >= 3
-        assert sum(
-            later < earlier for earlier, later in pairwise(post_trigger_speeds)
-        ) >= 2
+        assert sum(later < earlier for earlier, later in pairwise(post_trigger_speeds)) >= 2
         assert final["scenario_success"] is True
     elif expected_scenario == "cut_in":
         laterals = [item["actors"]["cut-in"]["ego_lane_lateral_m"] for item in trajectory]
@@ -176,12 +174,8 @@ def test_real_fixed_levels_select_only_allowed_scenarios_and_replay_byte_for_byt
         assert min(abs(value) for value in laterals) <= 0.1
         assert final["scenario_success"] is True
     else:
-        cyclist_speeds = [
-            item["actors"]["crossing-cyclist"]["speed_mps"] for item in trajectory
-        ]
-        cyclist_visible = [
-            "crossing-cyclist" in item["visible_actor_ids"] for item in trajectory
-        ]
+        cyclist_speeds = [item["actors"]["crossing-cyclist"]["speed_mps"] for item in trajectory]
+        cyclist_visible = ["crossing-cyclist" in item["visible_actor_ids"] for item in trajectory]
         assert cyclist_visible[0] is False
         assert any(cyclist_visible)
         assert max(cyclist_speeds) > 0.1
@@ -215,9 +209,7 @@ def run_prefix() -> tuple[np.ndarray, tuple[float, ...], tuple[float, ...]]:
             if step_index >= trigger_step:
                 braking_speeds.append(manager.actor_state("lead-brake").velocity_xy_mps[0])
         assert len(braking_speeds) >= 4
-        assert sum(
-            later < earlier for earlier, later in pairwise(braking_speeds)
-        ) >= 2
+        assert sum(later < earlier for earlier, later in pairwise(braking_speeds)) >= 2
         return observation.copy(), tuple(rewards), tuple(braking_speeds)
     finally:
         environment.close()
@@ -271,9 +263,7 @@ def test_real_lead_brake_frame_reports_braking_acceleration_to_nominal_agent() -
         frame = environment._frame
         assert frame is not None
         lead = next(
-            actor
-            for actor in frame.observation.visible_actors
-            if actor.actor_id == "lead-brake"
+            actor for actor in frame.observation.visible_actors if actor.actor_id == "lead-brake"
         )
         longitudinal_acceleration, _ = project_vector(
             lead.acceleration_xy_mps2,
@@ -497,9 +487,7 @@ def run_occluded_crossing_prefix() -> tuple[tuple[tuple[float, float], ...], boo
         assert revealed is True
         assert cleared is True
         assert completed is True
-        crossing_contact = environment._environment.scenario_ego_collided_with(
-            "crossing-cyclist"
-        )
+        crossing_contact = environment._environment.scenario_ego_collided_with("crossing-cyclist")
         return tuple(positions), crossing_contact
     finally:
         environment.close()
@@ -558,9 +546,7 @@ def test_real_occluder_contact_is_attributed_as_a_static_object_collision() -> N
         assert occluder.LENGTH == pytest.approx(5.0)
         assert occluder.WIDTH == pytest.approx(2.0)
         privileged_occluder = next(
-            actor
-            for actor in frame.privileged.all_actors
-            if actor.actor_id == "static-occluder"
+            actor for actor in frame.privileged.all_actors if actor.actor_id == "static-occluder"
         )
         assert privileged_occluder.actor_type == "obstacle"
         assert isinstance(occluder, TrafficObject)

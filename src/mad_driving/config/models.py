@@ -68,15 +68,9 @@ class CurriculumConfig(StrictTypedFrozenModel):
 class LeadBrakeScenarioConfig(StrictTypedFrozenModel):
     """Validated parameter ranges for the Lead Brake scenario."""
 
-    initial_gap_m: PositiveFloatRangeConfig = PositiveFloatRangeConfig(
-        minimum=35.0, maximum=55.0
-    )
-    speed_fraction: PositiveFloatRangeConfig = PositiveFloatRangeConfig(
-        minimum=0.80, maximum=1.00
-    )
-    trigger_s: PositiveFloatRangeConfig = PositiveFloatRangeConfig(
-        minimum=1.0, maximum=3.0
-    )
+    initial_gap_m: PositiveFloatRangeConfig = PositiveFloatRangeConfig(minimum=35.0, maximum=55.0)
+    speed_fraction: PositiveFloatRangeConfig = PositiveFloatRangeConfig(minimum=0.80, maximum=1.00)
+    trigger_s: PositiveFloatRangeConfig = PositiveFloatRangeConfig(minimum=1.0, maximum=3.0)
     mild_deceleration_mps2: PositiveFloatRangeConfig = PositiveFloatRangeConfig(
         minimum=2.0, maximum=4.0
     )
@@ -89,18 +83,10 @@ class LeadBrakeScenarioConfig(StrictTypedFrozenModel):
 class CutInScenarioConfig(StrictTypedFrozenModel):
     """Validated parameter ranges for the Cut-in scenario."""
 
-    initial_gap_m: PositiveFloatRangeConfig = PositiveFloatRangeConfig(
-        minimum=20.0, maximum=40.0
-    )
-    trigger_s: PositiveFloatRangeConfig = PositiveFloatRangeConfig(
-        minimum=1.0, maximum=3.0
-    )
-    merge_duration_s: PositiveFloatRangeConfig = PositiveFloatRangeConfig(
-        minimum=1.5, maximum=3.0
-    )
-    speed_fraction: PositiveFloatRangeConfig = PositiveFloatRangeConfig(
-        minimum=0.75, maximum=1.05
-    )
+    initial_gap_m: PositiveFloatRangeConfig = PositiveFloatRangeConfig(minimum=20.0, maximum=40.0)
+    trigger_s: PositiveFloatRangeConfig = PositiveFloatRangeConfig(minimum=1.0, maximum=3.0)
+    merge_duration_s: PositiveFloatRangeConfig = PositiveFloatRangeConfig(minimum=1.5, maximum=3.0)
+    speed_fraction: PositiveFloatRangeConfig = PositiveFloatRangeConfig(minimum=0.75, maximum=1.05)
     survival_s: FiniteFloat = Field(default=3.0, gt=0.0)
 
 
@@ -116,9 +102,7 @@ class OccludedCrossingScenarioConfig(StrictTypedFrozenModel):
     crossing_speed_mps: PositiveFloatRangeConfig = PositiveFloatRangeConfig(
         minimum=2.0, maximum=6.0
     )
-    trigger_s: PositiveFloatRangeConfig = PositiveFloatRangeConfig(
-        minimum=1.0, maximum=3.0
-    )
+    trigger_s: PositiveFloatRangeConfig = PositiveFloatRangeConfig(minimum=1.0, maximum=3.0)
     survival_s: FiniteFloat = Field(default=2.0, gt=0.0)
     occluder_lane_edge_offset_m: FiniteFloat = Field(default=0.5, ge=0.5)
     reveal_lateral_m: FiniteFloat = Field(default=3.0, gt=0.0)
@@ -132,9 +116,7 @@ class OccludedCrossingScenarioConfig(StrictTypedFrozenModel):
     @model_validator(mode="after")
     def validate_hidden_at_reset(self) -> Self:
         if self.crossing_start_offset_m.minimum <= self.reveal_lateral_m:
-            raise ValueError(
-                "crossing_start_offset_m.minimum must exceed reveal_lateral_m"
-            )
+            raise ValueError("crossing_start_offset_m.minimum must exceed reveal_lateral_m")
         return self
 
 
@@ -144,9 +126,7 @@ class ScenarioSplitsConfig(StrictTypedFrozenModel):
     train: SeedRangeConfig = SeedRangeConfig(seed_start=0, seed_count=10_000)
     validation: SeedRangeConfig = SeedRangeConfig(seed_start=10_000, seed_count=1_000)
     test: SeedRangeConfig = SeedRangeConfig(seed_start=20_000, seed_count=1_000)
-    selection: Literal["auto", "nominal", "lead_brake", "cut_in", "occluded_crossing"] = (
-        "nominal"
-    )
+    selection: Literal["auto", "nominal", "lead_brake", "cut_in", "occluded_crossing"] = "nominal"
     curriculum: CurriculumConfig = CurriculumConfig()
     lead_brake: LeadBrakeScenarioConfig = LeadBrakeScenarioConfig()
     cut_in: CutInScenarioConfig = CutInScenarioConfig()

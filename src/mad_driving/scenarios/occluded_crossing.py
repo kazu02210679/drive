@@ -102,8 +102,8 @@ class OccludedCrossingRuntime:
         self, environment: DrivingEnvironment, state: ScenarioState
     ) -> ScenarioState:
         geometry = environment.scenario_road_geometry()
-        conflict_longitudinal_m = (
-            geometry.ego_longitudinal_m + self._parameter_float(state, "conflict_distance_m")
+        conflict_longitudinal_m = geometry.ego_longitudinal_m + self._parameter_float(
+            state, "conflict_distance_m"
         )
         conflict_point = environment.scenario_lane_position(
             geometry.ego_lane_index, conflict_longitudinal_m, 0.0
@@ -160,8 +160,7 @@ class OccludedCrossingRuntime:
             LaneVehicleSpawn(
                 lead_id,
                 geometry.ego_lane_index,
-                geometry.ego_longitudinal_m
-                + self._parameter_float(state, "secondary_lead_gap_m"),
+                geometry.ego_longitudinal_m + self._parameter_float(state, "secondary_lead_gap_m"),
                 geometry.ego_lateral_m,
                 lead_speed_mps,
             )
@@ -298,10 +297,9 @@ class OccludedCrossingRuntime:
         cyclist = environment.scenario_actor_state(self._parameter_str(state, "cyclist_actor_id"))
         conflict_point = self._parameter_xy(state, "conflict_point_xy_m")
         direction = self._parameter_xy(state, "crossing_direction_xy")
-        return (
-            (cyclist.position_xy_m[0] - conflict_point[0]) * direction[0]
-            + (cyclist.position_xy_m[1] - conflict_point[1]) * direction[1]
-        )
+        return (cyclist.position_xy_m[0] - conflict_point[0]) * direction[0] + (
+            cyclist.position_xy_m[1] - conflict_point[1]
+        ) * direction[1]
 
     def _require_spawned_actor(
         self, environment: DrivingEnvironment, state: ScenarioState, parameter: str

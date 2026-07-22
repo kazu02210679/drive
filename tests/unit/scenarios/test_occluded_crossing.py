@@ -212,9 +212,7 @@ def test_crossing_contact_is_failure_without_crash_human_flag() -> None:
     runtime, environment, state = reset_crossing()
     environment.collided_actor_ids.add("crossing-cyclist")
 
-    transition = runtime.after_step(
-        environment, state, step_index=20, raw_info=no_collision_info()
-    )
+    transition = runtime.after_step(environment, state, step_index=20, raw_info=no_collision_info())
 
     assert transition.outcome == ScenarioStepResult(success=False, failure=True)
 

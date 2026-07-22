@@ -660,11 +660,7 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
         value = state.parameters.get("difficulty_level")
         if value is None and self._config.scenario_id != "phase5":
             return 0
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, int)
-            or not 0 <= value <= 3
-        ):
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 3:
             raise ValueError("Phase 5 difficulty_level must be an integer from 0 through 3")
         return value
 

@@ -14,9 +14,7 @@ from mad_driving.scenarios import (
 from mad_driving.scenarios.cut_in import CutInRuntime, smoothstep
 
 
-@pytest.mark.parametrize(
-    ("progress", "expected"), [(0.0, 0.0), (0.5, 0.5), (1.0, 1.0)]
-)
+@pytest.mark.parametrize(("progress", "expected"), [(0.0, 0.0), (0.5, 0.5), (1.0, 1.0)])
 def test_smoothstep_endpoints_and_midpoint(progress: float, expected: float) -> None:
     assert smoothstep(progress) == pytest.approx(expected)
 
@@ -217,9 +215,7 @@ def test_cut_in_does_not_succeed_at_the_boundary_after_a_human_collision() -> No
 def test_cut_in_does_not_succeed_at_the_boundary_when_off_road() -> None:
     runtime, environment, state = reset_cut_in(trigger_s=1.0, merge_s=2.0)
 
-    transition = runtime.after_step(
-        environment, state, step_index=60, raw_info={"off_road": True}
-    )
+    transition = runtime.after_step(environment, state, step_index=60, raw_info={"off_road": True})
 
     assert transition.outcome.success is False
     assert transition.outcome.failure is False

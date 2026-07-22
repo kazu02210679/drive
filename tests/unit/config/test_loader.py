@@ -275,9 +275,7 @@ def test_scenario_survival_duration_must_be_strictly_positive(
 ) -> None:
     overlay = tmp_path / f"invalid-{scenario}-survival.yaml"
     overlay.write_text(
-        "scenarios:\n"
-        f"  {scenario}:\n"
-        f"    survival_s: {survival_s}\n",
+        f"scenarios:\n  {scenario}:\n    survival_s: {survival_s}\n",
         encoding="utf-8",
     )
 

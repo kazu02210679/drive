@@ -298,9 +298,7 @@ class RunMetadata:
         object.__setattr__(
             self,
             "checkpoint_curriculum_artifacts",
-            _validated_checkpoint_curriculum_artifacts(
-                self.checkpoint_curriculum_artifacts
-            ),
+            _validated_checkpoint_curriculum_artifacts(self.checkpoint_curriculum_artifacts),
         )
         object.__setattr__(
             self,
@@ -322,9 +320,7 @@ def _validated_curriculum_state_artifact(
     if not isinstance(value, Mapping) or set(value) != required:
         raise ValueError("curriculum_state fields are malformed")
     if value["path"] != CURRICULUM_STATE_FILENAME:
-        raise ValueError(
-            f"curriculum_state.path must equal {CURRICULUM_STATE_FILENAME!r}"
-        )
+        raise ValueError(f"curriculum_state.path must equal {CURRICULUM_STATE_FILENAME!r}")
     digest = value["sha256"]
     if (
         not isinstance(digest, str)
@@ -553,9 +549,7 @@ def curriculum_state_artifact(
 
     state_path = Path(path)
     if state_path.name != CURRICULUM_STATE_FILENAME:
-        raise ValueError(
-            f"curriculum state path must be named {CURRICULUM_STATE_FILENAME}"
-        )
+        raise ValueError(f"curriculum state path must be named {CURRICULUM_STATE_FILENAME}")
     return _validated_curriculum_state_artifact(
         {
             "path": CURRICULUM_STATE_FILENAME,
@@ -846,9 +840,7 @@ def resolve_resume_source(checkpoint: str | Path, current_config: AppConfig) -> 
         if artifact["checkpoint_path"] == checkpoint_relative_path
     ]
     if len(matching_artifacts) != 1:
-        raise ValueError(
-            "Resume checkpoint does not have exactly one curriculum state binding"
-        )
+        raise ValueError("Resume checkpoint does not have exactly one curriculum state binding")
     curriculum_summary = matching_artifacts[0]
     expected_checkpoint_digest = cast(str, curriculum_summary["checkpoint_sha256"])
     checkpoint_bytes, checkpoint_digest = read_stable_artifact_bytes(checkpoint_path)

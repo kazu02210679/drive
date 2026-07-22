@@ -106,9 +106,7 @@ def test_lead_brake_sustains_deceleration_until_the_lead_stops() -> None:
 
 def test_lead_brake_succeeds_after_survival_window() -> None:
     runtime, environment, state = reset_lead_brake(trigger_s=1.0, survival_s=4.0)
-    transition = runtime.after_step(
-        environment, state, step_index=50, raw_info=no_collision_info()
-    )
+    transition = runtime.after_step(environment, state, step_index=50, raw_info=no_collision_info())
 
     assert transition.outcome == ScenarioStepResult(success=True, failure=False)
 

@@ -167,10 +167,7 @@ class FakeVecEnv:
         return [env.get_wrapper_attr(attr_name) for env in self.envs]
 
     def env_method(self, method_name: str, *args: object) -> list[object]:
-        return [
-            getattr(env.unwrapped, method_name)(*args)
-            for env in self.envs
-        ]
+        return [getattr(env.unwrapped, method_name)(*args) for env in self.envs]
 
 
 class VecFactory:
@@ -213,9 +210,7 @@ class FakeCheckpointCallback:
         for checkpoint_timesteps in sorted(checkpoint_timesteps_values):
             if checkpoint_timesteps > model.num_timesteps:
                 continue
-            checkpoint = (
-                self.save_path / f"{self.name_prefix}_{checkpoint_timesteps}_steps.zip"
-            )
+            checkpoint = self.save_path / f"{self.name_prefix}_{checkpoint_timesteps}_steps.zip"
             model.write_checkpoint(checkpoint, "periodic")
             write_checkpoint_curriculum_state(self.controller.state, checkpoint)
 
@@ -545,9 +540,7 @@ def seed_compatible_source_run(
     metadata = RunMetadata(
         resolved_config=resolved_config,
         curriculum_state=curriculum_state_artifact(curriculum_path, selected_state),
-        checkpoint_curriculum_artifacts=checkpoint_curriculum_artifact_inventory(
-            checkpoints_dir
-        ),
+        checkpoint_curriculum_artifacts=checkpoint_curriculum_artifact_inventory(checkpoints_dir),
     )
     metadata_module.write_run_metadata(metadata, run_dir / "run_metadata.json")
     return CompatibleSourceRun(run_dir=run_dir, checkpoint=checkpoint)
@@ -567,8 +560,7 @@ def add_periodic_checkpoint(
     metadata_path = source.run_dir / "run_metadata.json"
     payload = json.loads(metadata_path.read_text(encoding="utf-8"))
     payload["checkpoint_curriculum_artifacts"] = [
-        dict(summary)
-        for summary in checkpoint_curriculum_artifact_inventory(checkpoint.parent)
+        dict(summary) for summary in checkpoint_curriculum_artifact_inventory(checkpoint.parent)
     ]
     metadata_path.write_text(json.dumps(payload), encoding="utf-8")
     return checkpoint
@@ -1215,9 +1207,7 @@ def test_fresh_run_writes_complete_research_contract_metadata(tmp_path: Path) ->
         "resolved_config": config.model_dump(mode="json"),
         "resume": None,
     }
-    assert {
-        descriptor["checkpoint_path"] for descriptor in checkpoint_curriculum
-    } == {
+    assert {descriptor["checkpoint_path"] for descriptor in checkpoint_curriculum} == {
         "checkpoints/best_model.zip",
         "checkpoints/final_model.zip",
     }
@@ -2141,15 +2131,17 @@ def test_multiworker_shutdown_reserves_positive_fair_post_terminate_reaping(
     assert all(process.kill_calls == 0 for process in processes)
     assert all(len(process.join_calls) == 2 for process in processes)
     assert all(
-        process.join_calls[1] is not None and process.join_calls[1] > 0
-        for process in processes
+        process.join_calls[1] is not None and process.join_calls[1] > 0 for process in processes
     )
-    assert sum(
-        timeout
-        for process in processes
-        for timeout in process.join_calls
-        if timeout is not None
-    ) <= 5.0
+    assert (
+        sum(
+            timeout
+            for process in processes
+            for timeout in process.join_calls
+            if timeout is not None
+        )
+        <= 5.0
+    )
 
 
 def test_failed_worker_shutdown_does_not_mark_close_audit_complete() -> None:
@@ -2884,9 +2876,7 @@ def test_resume_rejects_invalid_run_final_curriculum_artifact_before_destination
 ) -> None:
     source = seed_compatible_source_run(tmp_path)
     selected_checkpoint = (
-        add_periodic_checkpoint(source)
-        if checkpoint_kind == "periodic"
-        else source.checkpoint
+        add_periodic_checkpoint(source) if checkpoint_kind == "periodic" else source.checkpoint
     )
     state_path = source.run_dir / "curriculum_state.yaml"
     metadata_path = source.run_dir / "run_metadata.json"
@@ -2931,9 +2921,7 @@ def test_resume_validates_run_final_curriculum_reachability_against_parent_confi
 ) -> None:
     source = seed_compatible_source_run(tmp_path)
     selected_checkpoint = (
-        add_periodic_checkpoint(source)
-        if checkpoint_kind == "periodic"
-        else source.checkpoint
+        add_periodic_checkpoint(source) if checkpoint_kind == "periodic" else source.checkpoint
     )
     unreachable = CurriculumState(level=1, consecutive_passes=0, evaluations=1)
     state_path = source.run_dir / "curriculum_state.yaml"
@@ -2983,9 +2971,7 @@ def test_resume_rejects_invalid_checkpoint_curriculum_state_before_destination(
     elif corruption == "malformed":
         state_path.write_text("level: [", encoding="utf-8")
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        metadata["checkpoint_curriculum_artifacts"][0]["state_sha256"] = sha256_file(
-            state_path
-        )
+        metadata["checkpoint_curriculum_artifacts"][0]["state_sha256"] = sha256_file(state_path)
         metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
     elif corruption == "level-out-of-range":
         state_path.write_text(

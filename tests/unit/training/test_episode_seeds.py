@@ -554,9 +554,7 @@ def test_seed_artifact_record_has_exact_phase5_provenance_fields(tmp_path: Path)
     wrapped.reset()
     wrapped.close()
 
-    record = read_jsonl(
-        workspace / "episode_seeds" / "validation-worker-004.jsonl"
-    )[0]
+    record = read_jsonl(workspace / "episode_seeds" / "validation-worker-004.jsonl")[0]
     assert set(record) == {
         "role",
         "worker_index",
@@ -763,8 +761,7 @@ def test_inventory_rejects_non_integer_numeric_header_and_record_fields(
     wrapped.close()
     artifact = workspace / "episode_seeds" / "train-worker-000.jsonl"
     header, record = [
-        json.loads(line)
-        for line in artifact.read_text(encoding="utf-8").splitlines()
+        json.loads(line) for line in artifact.read_text(encoding="utf-8").splitlines()
     ]
     if location == "header_identity":
         if replacement == "float-of-original":
@@ -776,8 +773,7 @@ def test_inventory_rejects_non_integer_numeric_header_and_record_fields(
         record[field] = replacement
     artifact.write_text(
         "\n".join(
-            json.dumps(value, sort_keys=True, separators=(",", ":"))
-            for value in (header, record)
+            json.dumps(value, sort_keys=True, separators=(",", ":")) for value in (header, record)
         )
         + "\n",
         encoding="utf-8",
