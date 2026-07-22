@@ -60,11 +60,11 @@ class NominalScenarioRuntime:
     ) -> ScenarioTransition:
         del environment
         collision = bool(raw_info.get("crash_vehicle", False))
-        off_road = bool(raw_info.get("out_of_road", False))
+        off_road = bool(raw_info.get("out_of_road", False)) or bool(raw_info.get("off_road", False))
         success = not collision and not off_road and step_index >= self._require_success_step()
         return ScenarioTransition(
             state,
-            ScenarioStepResult(success=success, failure=collision or off_road),
+            ScenarioStepResult(success=success, failure=collision),
         )
 
     def observation_context(self, state: ScenarioState) -> ScenarioObservationContext:

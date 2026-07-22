@@ -7,6 +7,7 @@ from mad_driving.scenarios import (
     ActorCommand,
     EpisodeSeeds,
     LeadBrakeRuntime,
+    NominalScenarioRuntime,
     RoadGeometry,
     ScenarioActorState,
     ScenarioParameterSampler,
@@ -116,6 +117,22 @@ def test_lead_brake_does_not_succeed_when_ego_is_off_road() -> None:
         state,
         step_index=50,
         raw_info={"crash_vehicle": False, "out_of_road": True},
+    )
+
+    assert transition.outcome == ScenarioStepResult(success=False, failure=False)
+
+
+def test_nominal_does_not_succeed_when_ego_is_off_road() -> None:
+    environment = FakeEnvironment()
+    runtime = NominalScenarioRuntime(survival_s=4.0)
+    state = runtime.reset(environment, seeds=EpisodeSeeds(1, 2, 3))
+    state = runtime.after_simulator_reset(environment, state)
+
+    transition = runtime.after_step(
+        environment,
+        state,
+        step_index=40,
+        raw_info={"crash_vehicle": False, "off_road": True},
     )
 
     assert transition.outcome == ScenarioStepResult(success=False, failure=False)

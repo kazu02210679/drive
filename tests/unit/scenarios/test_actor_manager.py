@@ -131,3 +131,16 @@ def test_fallback_command_converts_acceleration_using_decision_interval() -> Non
 
     actor = engine.get_objects(["lead"])["lead"]
     assert actor.velocity_calls[-1] == ((1.0, 0.0), 7.6)
+
+
+def test_actor_state_reports_acceleration_per_second() -> None:
+    engine = VelocityOnlyEngine()
+    manager = ScenarioActorManager(engine=engine)
+    manager.spawn_lane_vehicle(LaneVehicleSpawn("lead", (">", ">>", 0), 40.0, 0.0, 8.0))
+    actor = engine.get_objects(["lead"])["lead"]
+    actor.last_velocity = (8.0, 0.0)
+    actor.velocity = (7.6, 0.0)
+
+    state = manager.actor_state("lead")
+
+    assert state.acceleration_xy_mps2 == pytest.approx((-4.0, 0.0))

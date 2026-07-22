@@ -162,11 +162,15 @@ class ScenarioActorManager(BaseManager):  # type: ignore[misc]
         velocity = tuple(float(value) for value in actor.velocity[:2])
         last_velocity = getattr(actor, "last_velocity", actor.velocity)
         previous = tuple(float(value) for value in last_velocity[:2])
+        decision_interval_s = self._decision_interval_s()
         self._states[actor_id] = ScenarioActorState(
             actor_id=actor_id,
             position_xy_m=(position[0], position[1]),
             velocity_xy_mps=(velocity[0], velocity[1]),
-            acceleration_xy_mps2=(velocity[0] - previous[0], velocity[1] - previous[1]),
+            acceleration_xy_mps2=(
+                (velocity[0] - previous[0]) / decision_interval_s,
+                (velocity[1] - previous[1]) / decision_interval_s,
+            ),
             heading_rad=float(actor.heading_theta),
         )
 
