@@ -51,7 +51,7 @@ class ScheduledResetInfoEnv(ResetInfoEnv):
         super().__init__(reset_infos)
         self.validation_schedule: tuple[str, ...] | None = None
 
-    def set_validation_scenario_schedule(self, scenario_ids: tuple[str, ...]) -> None:
+    def set_evaluation_scenario_schedule(self, scenario_ids: tuple[str, ...]) -> None:
         self.validation_schedule = scenario_ids
 
 
@@ -81,7 +81,7 @@ def read_jsonl(path: Path) -> list[dict[str, object]]:
     return [value for value in values if "environment_seed" in value]
 
 
-def test_validation_schedule_is_forwarded_when_wrapped_environment_supports_it(
+def test_evaluation_schedule_is_forwarded_when_wrapped_environment_supports_it(
     tmp_path: Path,
 ) -> None:
     workspace = tmp_path / "private-workspace"
@@ -94,13 +94,13 @@ def test_validation_schedule_is_forwarded_when_wrapped_environment_supports_it(
         worker_index=0,
     )
 
-    wrapped.set_validation_scenario_schedule(("lead_brake", "cut_in"))
+    wrapped.set_evaluation_scenario_schedule(("lead_brake", "cut_in"))
 
     assert env.validation_schedule == ("lead_brake", "cut_in")
     wrapped.close()
 
 
-def test_validation_schedule_is_ignored_when_wrapped_environment_does_not_support_it(
+def test_evaluation_schedule_is_ignored_when_wrapped_environment_does_not_support_it(
     tmp_path: Path,
 ) -> None:
     workspace = tmp_path / "private-workspace"
@@ -112,7 +112,7 @@ def test_validation_schedule_is_ignored_when_wrapped_environment_does_not_suppor
         worker_index=0,
     )
 
-    wrapped.set_validation_scenario_schedule(("lead_brake", "cut_in"))
+    wrapped.set_evaluation_scenario_schedule(("lead_brake", "cut_in"))
 
     wrapped.close()
 

@@ -297,14 +297,19 @@ class EpisodeSeedRecordingWrapper(gym.Wrapper[Any, Any, Any, Any]):
             raise
         return observation, dict(info)
 
-    def set_validation_scenario_schedule(self, scenario_ids: tuple[str, ...]) -> None:
-        """Forward deterministic validation scheduling when the wrapped env supports it."""
+    def set_evaluation_scenario_schedule(self, scenario_ids: tuple[str, ...]) -> None:
+        """Forward deterministic evaluation scheduling when the wrapped env supports it."""
 
         try:
-            setter = self.env.get_wrapper_attr("set_validation_scenario_schedule")
+            setter = self.env.get_wrapper_attr("set_evaluation_scenario_schedule")
         except AttributeError:
             return
         setter(scenario_ids)
+
+    def set_validation_scenario_schedule(self, scenario_ids: tuple[str, ...]) -> None:
+        """Preserve the curriculum callback boundary while forwarding to the general hook."""
+
+        self.set_evaluation_scenario_schedule(scenario_ids)
 
     def close(self) -> None:
         """Close the wrapped environment and writer once without retrying resources."""

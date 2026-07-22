@@ -282,6 +282,7 @@ class EvaluationStepRecord:
     shield_reasons: tuple[str, ...]
     target_speed_mps: float
     ego_speed_mps: float
+    ego_speed_limit_mps: float
     ego_longitudinal_acceleration_mps2: float
     route_completion: float
     route_progress_m: float
@@ -329,6 +330,7 @@ class EvaluationStepRecord:
         )
         _require_non_negative("target_speed_mps", self.target_speed_mps)
         _require_non_negative("ego_speed_mps", self.ego_speed_mps)
+        _require_non_negative("ego_speed_limit_mps", self.ego_speed_limit_mps)
         _require_finite(
             "ego_longitudinal_acceleration_mps2",
             self.ego_longitudinal_acceleration_mps2,
@@ -374,6 +376,7 @@ class EvaluationStepRecord:
             "difficulty_level": self.difficulty_level,
             "ego_longitudinal_acceleration_mps2": self.ego_longitudinal_acceleration_mps2,
             "ego_speed_mps": self.ego_speed_mps,
+            "ego_speed_limit_mps": self.ego_speed_limit_mps,
             "episode_key": self.episode_key.to_dict(),
             "episode_rng_seed": self.episode_rng_seed,
             "errors": list(self.errors),

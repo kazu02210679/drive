@@ -45,7 +45,7 @@ class ScenarioManagerRuntime:
     ) -> None:
         self._config = config
         self._pending_level = self._initial_level(config)
-        self._scenario_schedule: list[str] = []
+        self._scenario_schedule: list[str] | None = None
         self._active_runtime: ScenarioRuntime | None = None
         self._runtimes = self._default_runtimes() if runtimes is None else dict(runtimes)
 
@@ -89,11 +89,12 @@ class ScenarioManagerRuntime:
         level = self._pending_level
         selection_sampler = ScenarioParameterSampler(seeds.scenario_selection_seed)
         parameter_sampler = ScenarioParameterSampler(seeds.scenario_parameter_seed)
-        scenario_id = (
-            self._scenario_schedule.pop(0)
-            if self._scenario_schedule
-            else self._select_scenario(level, selection_sampler)
-        )
+        if self._scenario_schedule is None:
+            scenario_id = self._select_scenario(level, selection_sampler)
+        elif self._scenario_schedule:
+            scenario_id = self._scenario_schedule.pop(0)
+        else:
+            raise RuntimeError("evaluation scenario schedule is exhausted")
         runtime = self._create_runtime(scenario_id, level, parameter_sampler)
         state = runtime.reset(environment, seeds=seeds)
         parameters = dict(state.parameters)

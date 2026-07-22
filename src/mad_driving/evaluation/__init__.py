@@ -14,11 +14,18 @@ from mad_driving.evaluation.models import (
     ScenarioCellId,
 )
 from mad_driving.evaluation.plans import build_formal_plan, build_smoke_plan
+from mad_driving.evaluation.policies import (
+    EvaluationPolicy,
+    PpoPolicyAdapter,
+    VisibleTtcRulePolicy,
+)
+from mad_driving.evaluation.runner import EvaluationRunResult, run_evaluation_episode
 from mad_driving.evaluation.serialization import (
     load_evaluation_plan,
     read_jsonl_strict,
     write_jsonl_strict,
 )
+from mad_driving.evaluation.workspace import EvaluationWorkspace
 
 __all__ = [
     "EVALUATION_CASES",
@@ -27,14 +34,20 @@ __all__ = [
     "EvaluationEpisodeKey",
     "EvaluationEpisodeRecord",
     "EvaluationPlanConfig",
+    "EvaluationPolicy",
+    "EvaluationRunResult",
     "EvaluationRunSpec",
     "EvaluationStepRecord",
     "EvaluationTrack",
+    "EvaluationWorkspace",
+    "PpoPolicyAdapter",
     "PpoRunBinding",
     "ScenarioCellId",
+    "VisibleTtcRulePolicy",
     "build_formal_plan",
     "build_smoke_plan",
     "load_evaluation_plan",
     "read_jsonl_strict",
+    "run_evaluation_episode",
     "write_jsonl_strict",
 ]

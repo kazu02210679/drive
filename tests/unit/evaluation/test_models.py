@@ -74,6 +74,7 @@ def make_step(**overrides: Any) -> EvaluationStepRecord:
         "shield_reasons": ("minimum_ttc",),
         "target_speed_mps": 8.0,
         "ego_speed_mps": 10.0,
+        "ego_speed_limit_mps": 13.0,
         "ego_longitudinal_acceleration_mps2": -1.0,
         "route_completion": 0.2,
         "route_progress_m": 12.5,
@@ -195,6 +196,12 @@ def test_step_record_rejects_invalid_versions_enums_ranges_and_latencies(
 def test_step_record_rejects_nonfinite_numbers(field: str, value: float) -> None:
     with pytest.raises(ValueError, match="finite"):
         make_step(**{field: value})
+
+
+@pytest.mark.parametrize("value", [-0.1, nan, inf])
+def test_step_record_requires_finite_non_negative_ego_speed_limit(value: float) -> None:
+    with pytest.raises(ValueError, match="ego_speed_limit_mps"):
+        make_step(ego_speed_limit_mps=value)
 
 
 def test_step_record_rejects_inconsistent_actions_rewards_and_outcomes() -> None:

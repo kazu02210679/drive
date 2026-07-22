@@ -57,6 +57,7 @@ class FakeNavigation:
     def __init__(self) -> None:
         self.current_lane = FakeLane()
         self.route_completion = 0.25
+        self.travelled_length = 12.5
 
 
 class FakeVehicle:
@@ -1977,6 +1978,15 @@ class DifficultyRecordingRuntimeFactory:
         self.levels.append(level)
 
 
+class EvaluationScheduleRecordingRuntimeFactory(DifficultyRecordingRuntimeFactory):
+    def __init__(self, runtime: RecordingRuntime) -> None:
+        super().__init__(runtime)
+        self.schedules: list[tuple[str, ...]] = []
+
+    def set_scenario_schedule(self, scenario_ids: tuple[str, ...]) -> None:
+        self.schedules.append(scenario_ids)
+
+
 def test_difficulty_level_is_forwarded_to_the_scenario_factory() -> None:
     runtime = RecordingRuntime()
     factory = DifficultyRecordingRuntimeFactory(runtime)
@@ -1985,6 +1995,45 @@ def test_difficulty_level_is_forwarded_to_the_scenario_factory() -> None:
     harness.env.set_difficulty_level(2)
 
     assert factory.levels == [2]
+
+
+@pytest.mark.parametrize("role", ["validation", "test"])
+def test_evaluation_schedule_is_forwarded_for_non_training_roles(role: str) -> None:
+    runtime = RecordingRuntime()
+    factory = EvaluationScheduleRecordingRuntimeFactory(runtime)
+    harness = make_env(role=role, runtime=runtime, runtime_factory=factory)
+
+    harness.env.set_evaluation_scenario_schedule(("lead_brake", "cut_in"))
+
+    assert factory.schedules == [("lead_brake", "cut_in")]
+
+
+def test_training_environment_rejects_evaluation_schedule_installation() -> None:
+    runtime = RecordingRuntime()
+    factory = EvaluationScheduleRecordingRuntimeFactory(runtime)
+    harness = make_env(role="train", runtime=runtime, runtime_factory=factory)
+
+    with pytest.raises(ValueError, match="validation.*test"):
+        harness.env.set_evaluation_scenario_schedule(("lead_brake",))
+
+    assert factory.schedules == []
+
+
+def test_evaluation_scene_read_requires_active_episode_and_returns_current_visible_view() -> None:
+    harness = make_env(role="test")
+
+    with pytest.raises(RuntimeError, match="reset"):
+        harness.env.current_scene_observation_for_evaluation()
+
+    harness.env.reset(seed=20_001)
+    initial = harness.env.current_scene_observation_for_evaluation()
+    harness.env.step(int(DrivingAction.KEEP))
+    current = harness.env.current_scene_observation_for_evaluation()
+
+    assert isinstance(initial, SceneObservation)
+    assert initial.step_index == 0
+    assert current.step_index == 1
+    assert not hasattr(current, "privileged")
 
 
 def test_reset_and_step_info_include_scenario_metadata() -> None:
@@ -1998,3 +2047,26 @@ def test_reset_and_step_info_include_scenario_metadata() -> None:
         assert info["scenario_parameters"] == {}
         assert info["scenario_success"] is False
         assert info["scenario_failure"] is False
+
+
+def test_step_info_exposes_strict_evaluation_record_telemetry_without_changing_shape() -> None:
+    harness = make_env(shield=RecordingShield(DrivingAction.KEEP))
+    harness.env.reset(seed=42)
+
+    observation, _, _, _, info = harness.env.step(int(DrivingAction.KEEP))
+
+    assert observation.shape == (24,)
+    assert info["simulation_time_s"] == pytest.approx(0.1)
+    assert info["decision_interval_s"] == pytest.approx(0.1)
+    assert info["ego_speed_mps"] == pytest.approx(10.0)
+    assert info["ego_longitudinal_acceleration_mps2"] == pytest.approx(0.0)
+    assert info["route_completion"] == pytest.approx(0.25)
+    assert info["route_progress_m"] == pytest.approx(12.5)
+    assert info["lane_offset_m"] == pytest.approx(0.0)
+    assert info["collision_kind"] is None
+    assert info["minimum_actual_ttc_s"] is None
+    assert info["minimum_actual_stopping_margin_m"] is None
+    assert info["pre_step_hard_rule_constraint"] is False
+    assert info["post_step_rule_violation_event"] is False
+    assert info["arrived"] is False
+    assert info["off_road"] is False

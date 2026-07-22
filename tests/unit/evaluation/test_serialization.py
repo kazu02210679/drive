@@ -50,6 +50,7 @@ def make_step(step_index: int = 0, **overrides: Any) -> EvaluationStepRecord:
         "shield_reasons": (),
         "target_speed_mps": 10.0,
         "ego_speed_mps": 10.0,
+        "ego_speed_limit_mps": 13.0,
         "ego_longitudinal_acceleration_mps2": 0.0,
         "route_completion": 0.1,
         "route_progress_m": 5.0,

@@ -7,7 +7,7 @@ from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
 from math import isclose, isfinite
-from numbers import Integral
+from numbers import Integral, Real
 from typing import Any, Protocol, cast
 
 import gymnasium as gym
@@ -306,15 +306,25 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
             raise RuntimeError("scenario runtime factory does not support difficulty levels")
         setter(level)
 
-    def set_validation_scenario_schedule(self, scenario_ids: tuple[str, ...]) -> None:
-        """Install an explicit reset schedule on the validation environment only."""
+    def set_evaluation_scenario_schedule(self, scenario_ids: tuple[str, ...]) -> None:
+        """Install an explicit finite reset schedule for evaluation roles."""
 
-        if self._role != "validation":
-            raise ValueError("scenario schedules may be installed only on validation environments")
+        if self._role not in {"validation", "test"}:
+            raise ValueError(
+                "scenario schedules may be installed only on validation and test environments"
+            )
         setter = getattr(self._scenario_runtime_factory, "set_scenario_schedule", None)
         if not callable(setter):
             raise RuntimeError("scenario runtime factory does not support scenario schedules")
         setter(scenario_ids)
+
+    def current_scene_observation_for_evaluation(self) -> SceneObservation:
+        """Return the active immutable Agent-visible scene and no privileged state."""
+
+        if self._role not in {"validation", "test"}:
+            raise ValueError("scene evaluation reads require a validation or test environment")
+        self._require_active_episode()
+        return cast(SceneFrame, self._frame).observation
 
     def reset(
         self,
@@ -581,7 +591,30 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
                     "analysis_errors": tuple(analysis.errors),
                     "reward_components": dict(reward_result.components),
                     "collision_occurred": privileged.collision_occurred,
+                    "collision_kind": privileged.collision_kind,
+                    "simulation_time_s": next_frame.observation.sim_time_s,
+                    "decision_interval_s": runtime_decision_interval_s,
+                    "ego_speed_mps": next_frame.observation.ego.speed_mps,
+                    "ego_longitudinal_acceleration_mps2": (
+                        next_frame.observation.ego.acceleration_mps2
+                    ),
+                    "route_completion": next_frame.observation.ego.route_progress,
+                    "route_progress_m": self._route_progress_m(
+                        environment, next_frame.observation.ego.route_progress
+                    ),
+                    "lane_offset_m": next_frame.observation.ego.lane_offset_m,
                     "route_progress": next_frame.observation.ego.route_progress,
+                    "minimum_actual_ttc_s": privileged.minimum_actual_ttc_s,
+                    "minimum_actual_stopping_margin_m": (
+                        privileged.minimum_actual_stopping_margin_m
+                    ),
+                    "pre_step_hard_rule_constraint": frame.privileged.hard_rule_constraint,
+                    "post_step_rule_violation_event": (
+                        frame.privileged.hard_rule_constraint
+                        and int(executed) < int(DrivingAction.STOP)
+                    ),
+                    "arrived": privileged.arrived,
+                    "off_road": privileged.off_road,
                     "unnecessary_stop_duration_s": self._unnecessary_stop_duration_s,
                     "control_fail_safe": control_fail_safe,
                     "control_fail_safe_reason": control_fail_safe_reason,
@@ -762,6 +795,25 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
         if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
             return [MultiAgentSpeedEnv._json_safe_copy(item) for item in value]
         raise ValueError("scenario parameters must be JSON-safe")
+
+    @staticmethod
+    def _route_progress_m(environment: DrivingEnvironment, route_completion: float) -> float:
+        vehicle = environment.agent if hasattr(environment, "agent") else environment.vehicle
+        navigation = getattr(vehicle, "navigation", None)
+        value = getattr(navigation, "travelled_length", None)
+        if value is None:
+            trajectory = getattr(navigation, "reference_trajectory", None)
+            trajectory_length = getattr(trajectory, "length", None)
+            if isinstance(trajectory_length, Real) and not isinstance(trajectory_length, bool):
+                value = route_completion * float(trajectory_length)
+            else:
+                value = route_completion
+        if isinstance(value, bool) or not isinstance(value, Real):
+            raise TypeError("route progress must be a real number")
+        progress = float(value)
+        if not isfinite(progress) or progress < 0.0:
+            raise ValueError("route progress must be finite and non-negative")
+        return progress
 
     @staticmethod
     def _copy_info(raw_info: Mapping[str, object]) -> dict[str, object]:
