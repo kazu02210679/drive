@@ -246,7 +246,7 @@ def write_checkpoint_curriculum_state(
     return destination
 
 
-def _read_stable_bytes(
+def read_stable_artifact_bytes(
     source_path: Path,
     *,
     expected_sha256: str | None = None,
@@ -291,7 +291,10 @@ def read_checkpoint_curriculum_artifact(
 
     source_path = Path(sidecar)
     try:
-        data, digest = _read_stable_bytes(source_path, expected_sha256=expected_sha256)
+        data, digest = read_stable_artifact_bytes(
+            source_path,
+            expected_sha256=expected_sha256,
+        )
         payload = load_unique_yaml(data.decode("utf-8"))
     except (OSError, UnicodeError, yaml.YAMLError) as error:
         raise ValueError(
@@ -299,7 +302,10 @@ def read_checkpoint_curriculum_artifact(
         ) from error
     if not isinstance(payload, dict) or set(payload) != _CHECKPOINT_CURRICULUM_FIELDS:
         raise ValueError(f"Checkpoint curriculum state fields are malformed: {source_path}")
-    if payload["schema_version"] != CHECKPOINT_CURRICULUM_SIDECAR_SCHEMA_VERSION:
+    if (
+        type(payload["schema_version"]) is not int
+        or payload["schema_version"] != CHECKPOINT_CURRICULUM_SIDECAR_SCHEMA_VERSION
+    ):
         raise ValueError(f"Checkpoint curriculum schema is malformed: {source_path}")
     if payload["checkpoint_sha256"] != expected_checkpoint_sha256:
         raise ValueError("Checkpoint curriculum state is bound to a different checkpoint")
@@ -337,7 +343,7 @@ def read_curriculum_state(source: Path) -> CurriculumState:
 
     source_path = Path(source)
     try:
-        data, _digest = _read_stable_bytes(source_path)
+        data, _digest = read_stable_artifact_bytes(source_path)
         payload = load_unique_yaml(data.decode("utf-8"))
     except (OSError, UnicodeError, yaml.YAMLError) as error:
         raise ValueError(f"Curriculum state is malformed: {source_path}: {error}") from error
@@ -363,6 +369,7 @@ __all__ = [
     "read_checkpoint_curriculum_artifact",
     "read_checkpoint_curriculum_state",
     "read_curriculum_state",
+    "read_stable_artifact_bytes",
     "write_checkpoint_curriculum_state",
     "write_curriculum_state",
 ]

@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 from gymnasium.utils.env_checker import check_env
 from numpy.typing import NDArray
+from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 
 from mad_driving.config.loader import load_config
@@ -74,6 +75,20 @@ PHASE5_RECORD_FIELDS = {
     "difficulty_level",
     "scenario_parameters",
 }
+
+
+def assert_finite_deterministic_policy(checkpoint: Path) -> None:
+    model = PPO.load(checkpoint, device="cpu")
+    for name, tensor in model.policy.state_dict().items():
+        if tensor.is_floating_point():
+            assert bool(tensor.isfinite().all()), f"non-finite policy tensor: {name}"
+    observation = np.zeros(24, dtype=np.float32)
+    assert np.isfinite(observation).all()
+    first_action, _ = model.predict(observation, deterministic=True)
+    second_action, _ = model.predict(observation, deterministic=True)
+    np.testing.assert_array_equal(first_action, second_action)
+    action = int(np.asarray(first_action).item())
+    assert 0 <= action < 4
 
 
 def assert_phase5_training_artifacts(
@@ -344,6 +359,8 @@ def test_real_single_metadrive_training_uses_isolated_subprocess_validation(
     assert result.timesteps == 8
     assert zipfile.is_zipfile(result.best_checkpoint)
     assert zipfile.is_zipfile(result.final_checkpoint)
+    assert_finite_deterministic_policy(result.best_checkpoint)
+    assert_finite_deterministic_policy(result.final_checkpoint)
     assert len(CapturingDummyVecEnv.created) == 1
     assert all(vector.closed for vector in CapturingDummyVecEnv.created)
     assert len(CapturingSubprocVecEnv.created) == 1
@@ -394,6 +411,8 @@ def test_real_automatic_curriculum_advances_after_one_scheduled_validation(
     assert result.timesteps == 8
     assert zipfile.is_zipfile(result.best_checkpoint)
     assert zipfile.is_zipfile(result.final_checkpoint)
+    assert_finite_deterministic_policy(result.best_checkpoint)
+    assert_finite_deterministic_policy(result.final_checkpoint)
     assert_phase5_training_artifacts(
         result.run_dir,
         expected_state=CurriculumState(level=1, consecutive_passes=0, evaluations=1),

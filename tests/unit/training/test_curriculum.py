@@ -1,14 +1,17 @@
 import hashlib
+from collections.abc import Callable
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
 from mad_driving.config.models import CurriculumConfig
 from mad_driving.training.curriculum import (
     CurriculumController,
     CurriculumState,
+    checkpoint_curriculum_sidecar_path,
     read_checkpoint_curriculum_state,
     read_curriculum_state,
     write_checkpoint_curriculum_state,
@@ -178,12 +181,36 @@ def test_curriculum_state_round_trips_through_atomic_artifact(tmp_path: Path) ->
     assert not list(tmp_path.glob(".curriculum_state.yaml.*.tmp"))
 
 
+def atomic_writer_case(
+    tmp_path: Path,
+    artifact_kind: str,
+) -> tuple[Path, Callable[[], None]]:
+    state = CurriculumState(1, 0, 1)
+    if artifact_kind == "curriculum":
+        destination = tmp_path / "curriculum_state.yaml"
+
+        def writer() -> None:
+            write_curriculum_state(state, destination)
+
+    else:
+        checkpoint = tmp_path / "model.zip"
+        checkpoint.write_bytes(b"checkpoint")
+        destination = checkpoint_curriculum_sidecar_path(checkpoint)
+
+        def writer() -> None:
+            write_checkpoint_curriculum_state(state, checkpoint)
+
+    destination.write_bytes(b"old-state\n")
+    return destination, writer
+
+
+@pytest.mark.parametrize("artifact_kind", ["curriculum", "checkpoint-sidecar"])
 def test_curriculum_atomic_write_preserves_old_state_when_fsync_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    artifact_kind: str,
 ) -> None:
-    destination = tmp_path / "curriculum_state.yaml"
-    destination.write_bytes(b"old-state\n")
+    destination, writer = atomic_writer_case(tmp_path, artifact_kind)
 
     def fail_fsync(_descriptor: int) -> None:
         raise OSError("fsync failed")
@@ -191,18 +218,19 @@ def test_curriculum_atomic_write_preserves_old_state_when_fsync_fails(
     monkeypatch.setattr("mad_driving.training.curriculum.os.fsync", fail_fsync)
 
     with pytest.raises(OSError, match="fsync failed"):
-        write_curriculum_state(CurriculumState(1, 0, 1), destination)
+        writer()
 
     assert destination.read_bytes() == b"old-state\n"
-    assert not list(tmp_path.glob(".curriculum_state.yaml.*.tmp"))
+    assert not list(tmp_path.glob(f".{destination.name}.*.tmp"))
 
 
+@pytest.mark.parametrize("artifact_kind", ["curriculum", "checkpoint-sidecar"])
 def test_curriculum_atomic_write_preserves_old_state_when_replace_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    artifact_kind: str,
 ) -> None:
-    destination = tmp_path / "curriculum_state.yaml"
-    destination.write_bytes(b"old-state\n")
+    destination, writer = atomic_writer_case(tmp_path, artifact_kind)
 
     def fail_replace(_source: Path, _destination: Path) -> None:
         raise OSError("replace failed")
@@ -210,18 +238,19 @@ def test_curriculum_atomic_write_preserves_old_state_when_replace_fails(
     monkeypatch.setattr("mad_driving.training.curriculum.os.replace", fail_replace)
 
     with pytest.raises(OSError, match="replace failed"):
-        write_curriculum_state(CurriculumState(1, 0, 1), destination)
+        writer()
 
     assert destination.read_bytes() == b"old-state\n"
-    assert not list(tmp_path.glob(".curriculum_state.yaml.*.tmp"))
+    assert not list(tmp_path.glob(f".{destination.name}.*.tmp"))
 
 
+@pytest.mark.parametrize("artifact_kind", ["curriculum", "checkpoint-sidecar"])
 def test_curriculum_atomic_write_preserves_primary_and_cleanup_errors(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    artifact_kind: str,
 ) -> None:
-    destination = tmp_path / "curriculum_state.yaml"
-    destination.write_bytes(b"old-state\n")
+    destination, writer = atomic_writer_case(tmp_path, artifact_kind)
     cleanup_attempts: list[Path] = []
 
     def fail_replace(_source: Path, _destination: Path) -> None:
@@ -236,7 +265,7 @@ def test_curriculum_atomic_write_preserves_primary_and_cleanup_errors(
     monkeypatch.setattr(Path, "unlink", fail_unlink)
 
     with pytest.raises(OSError, match="primary replace failure") as caught:
-        write_curriculum_state(CurriculumState(1, 0, 1), destination)
+        writer()
 
     assert destination.read_bytes() == b"old-state\n"
     assert len(cleanup_attempts) == 1
@@ -307,6 +336,25 @@ def test_checkpoint_curriculum_read_rejects_path_replacement_during_one_read(
             sidecar,
             expected_checkpoint_sha256=hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
             expected_sha256=expected_digest,
+        )
+
+
+@pytest.mark.parametrize("schema_version", [True, 1.0])
+def test_checkpoint_curriculum_schema_version_requires_an_exact_integer(
+    tmp_path: Path,
+    schema_version: object,
+) -> None:
+    checkpoint = tmp_path / "model.zip"
+    checkpoint.write_bytes(b"checkpoint")
+    sidecar = write_checkpoint_curriculum_state(CurriculumState(1, 0, 1), checkpoint)
+    payload = yaml.safe_load(sidecar.read_text(encoding="utf-8"))
+    payload["schema_version"] = schema_version
+    sidecar.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="schema"):
+        read_checkpoint_curriculum_state(
+            sidecar,
+            expected_checkpoint_sha256=hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
         )
 
 

@@ -312,3 +312,157 @@ Tests:
   covered explicitly.
 - No test-role seed appears in training or validation artifacts, checkpoint selection, or
   curriculum observations.
+
+## Second independent-review remediation
+
+This remediation started from `487c5d560f48530ee196f98098d3150fac34baf1` and preserves
+the per-checkpoint curriculum sidecar architecture from the first review fix.
+
+### Immutable checkpoint and resolved-config snapshots
+
+RED proved that a contract-valid checkpoint B could replace checkpoint A only while
+`PPO.load` reopened the path, then A could be restored before the post-load hash check.
+The run succeeded after loading B. Two more RED cases showed root and nested duplicate keys
+in `config_resolved.yaml` were silently accepted.
+
+```text
+.venv\Scripts\python.exe -m pytest tests/unit/training/test_train.py -k "authenticated_checkpoint_snapshot or duplicate_resolved_config" -q
+3 failed, 127 deselected
+```
+
+GREEN stores checkpoint bytes in the validated immutable `ResumeSource`, hashing and
+identity-checking the same descriptor snapshot before passing a new `BytesIO` over those
+exact bytes to SB3. The mutable source path is never reopened for model loading. Resolved
+config now uses the same stable descriptor reader and recursive unique-key YAML parser.
+
+```text
+3 passed, 127 deselected
+```
+
+### Strict sidecar and episode-seed numeric types
+
+Sidecar RED accepted Boolean and floating `schema_version` values. Episode-seed RED accepted
+floating schema/worker/file-identity values and Boolean/floating worker identities through
+Python numeric equality.
+
+```text
+tests/unit/training/test_curriculum.py -k schema_version_requires: 2 failed
+tests/unit/training/test_episode_seeds.py -k non_integer_numeric: 5 failed, 6 passed
+```
+
+GREEN requires exact Python `int` values after YAML/JSON decoding. Header schema, worker,
+device, and inode fields are validated before equality; record worker and all three seed
+fields are likewise validated before canonical identity comparison.
+
+```text
+tests/unit/training/test_curriculum.py -k schema_version_requires: 2 passed
+tests/unit/training/test_episode_seeds.py -k non_integer_numeric: 11 passed
+```
+
+### Shared shutdown budget and completed audit semantics
+
+RED showed workers that require a positive post-terminate join were killed because the
+graceful phase consumed the entire deadline. It also showed the close audit marker was set
+while a worker remained alive, and later that an unconfirmed `None` exit code was marked
+complete.
+
+```text
+tests/unit/training/test_train.py -k "multiworker_shutdown or failed_worker_shutdown":
+2 failed, 1 passed
+test_subprocess_none_exitcode_after_escalation_is_unconfirmed: 1 failed
+```
+
+GREEN divides one absolute five-second deadline into bounded 3/1/1-second
+graceful/terminate/kill phases. Each phase assigns an equal positive share to its workers;
+timeouts do not multiply with worker count. The audit marker is written only after every
+worker is not alive and has a confirmed integral exit code.
+
+```text
+tests/unit/training/test_train.py -k "multiworker_shutdown or failed_worker_shutdown":
+3 passed
+focused close-audit confirmation group: 3 passed
+```
+
+### Atomic sidecars and safe implicit-directory cleanup
+
+The existing durability injection tests are now parameterized across both
+`write_curriculum_state` and `write_checkpoint_curriculum_state`: six cases cover `fsync`,
+`os.replace`, and `unlink` cleanup failures, preserving the old destination, proving no
+partial publish, and retaining primary plus cleanup errors (`6 passed`).
+
+Implicit-directory RED left an unchanged empty reservation behind after a pre-ownership
+failure. GREEN records its device/inode/creation identity and removes it only if the same
+directory is still empty after a second identity check. Replacement, non-empty, and explicit
+user paths are retained. A malformed resume through the real pre-ownership path is also
+covered.
+
+```text
+tests/unit/cli/test_train.py focused RED: 2 failed, 2 passed
+tests/unit/cli/test_train.py focused GREEN: 4 passed
+malformed real resume cleanup: 1 passed
+```
+
+### Real PPO strengthening and documentation
+
+Both real MetaDrive 8-step smokes now load best and final checkpoints. Every floating policy
+tensor must be finite, and two deterministic predictions from the same finite 24D
+observation must be byte-equivalent and within the four-action contract.
+
+```text
+.venv\Scripts\python.exe -m pytest tests/integration/test_rl_metadrive_headless.py::test_real_single_metadrive_training_uses_isolated_subprocess_validation tests/integration/test_rl_metadrive_headless.py::test_real_automatic_curriculum_advances_after_one_scheduled_validation -q -m integration
+2 passed, 18 warnings
+```
+
+README training commands now show the exact no-`--run-dir` smoke, identify research contract
+v5, and include `curriculum_state.yaml` plus periodic/best/final checkpoint sidecars in the
+artifact tree. Historical Phase 4 v4 evidence is explicitly labeled historical.
+
+### Second-remediation final verification
+
+```text
+.venv\Scripts\python.exe -m pytest tests/unit -q
+884 passed, 20 warnings
+
+.venv\Scripts\python.exe -m pytest tests/integration/test_phase5_metadrive_headless.py tests/integration/test_rl_metadrive_headless.py tests/integration/test_ppo_checkpoint.py -q -m integration
+22 passed, 27 warnings in 56.88s
+
+.venv\Scripts\python.exe -m mad_driving.cli.train --help
+Exit 0; --run-dir remains optional and all expected options are listed
+
+.venv\Scripts\python.exe -m mad_driving.cli.train --config configs/base.yaml --smoke
+Exit 0; 6,144 timesteps; fresh best/final checkpoints published under training.run_root
+
+.venv\Scripts\python.exe -m pytest --cov=mad_driving --cov-report=term-missing -q
+913 passed, 33 warnings in 109.44s; total branch coverage 90.04%
+
+.venv\Scripts\python.exe -m ruff check .
+All checks passed
+
+.venv\Scripts\python.exe -m mypy --strict src
+Success: no issues found in 65 source files
+
+git diff --check
+Exit 0; only Git's configured LF-to-CRLF notices were emitted
+```
+
+The complete level 0--3 deterministic replay and both Level-2 seeded branches are part of
+the 22-test integration command. The exact CLI smoke generated one isolated run; its path
+was resolved and verified beneath the workspace `runs` root, then only that generated
+artifact directory was removed. Warning categories remain unchanged: Matplotlib/PyParsing
+deprecations and SB3 notices about unmonitored evaluation or intentionally different
+train/evaluation VecEnv classes.
+
+Second-remediation files changed:
+
+- `.superpowers/sdd/task-4-report.md`
+- `README.md`
+- `src/mad_driving/cli/train.py`
+- `src/mad_driving/training/curriculum.py`
+- `src/mad_driving/training/episode_seeds.py`
+- `src/mad_driving/training/metadata.py`
+- `src/mad_driving/training/train.py`
+- `tests/integration/test_rl_metadrive_headless.py`
+- `tests/unit/cli/test_train.py`
+- `tests/unit/training/test_curriculum.py`
+- `tests/unit/training/test_episode_seeds.py`
+- `tests/unit/training/test_train.py`

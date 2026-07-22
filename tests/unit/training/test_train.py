@@ -1,4 +1,5 @@
 import hashlib
+import io
 import json
 import math
 import os
@@ -369,7 +370,7 @@ class FakePPO:
     @classmethod
     def load(
         cls,
-        path: Path,
+        path: object,
         env: FakeVecEnv | None = None,
         device: str = "auto",
         custom_objects: dict[str, Any] | None = None,
@@ -377,7 +378,15 @@ class FakePPO:
         force_reset: bool = True,
         **kwargs: Any,
     ) -> "FakePPO":
-        source_bytes = Path(path).read_bytes()
+        if hasattr(path, "read") and hasattr(path, "seek"):
+            stream = path
+            stream.seek(0)  # type: ignore[attr-defined]
+            source_bytes = stream.read()  # type: ignore[attr-defined]
+            stream.seek(0)  # type: ignore[attr-defined]
+            checkpoint_source: object = io.BytesIO(source_bytes)
+        else:
+            source_bytes = Path(path).read_bytes()  # type: ignore[arg-type]
+            checkpoint_source = path
         cls.load_calls.append(
             {
                 "path": path,
@@ -398,8 +407,8 @@ class FakePPO:
         model.saved_path = None
         model.num_timesteps = cls.resume_num_timesteps
         contract = cls.default_contract()
-        if zipfile.is_zipfile(path):
-            with zipfile.ZipFile(path) as checkpoint:
+        if zipfile.is_zipfile(checkpoint_source):
+            with zipfile.ZipFile(checkpoint_source) as checkpoint:
                 if "ppo_contract.json" in checkpoint.namelist():
                     contract.update(json.loads(checkpoint.read("ppo_contract.json")))
         model._set_contract(contract)
@@ -1922,6 +1931,25 @@ class DeadlineProcess(FakeProcess):
             self.exitcode = 0
 
 
+class PostTerminateJoinProcess(FakeProcess):
+    def __init__(self, clock: list[float]) -> None:
+        super().__init__(exits_on_terminate=False, exits_on_kill=True)
+        self.clock = clock
+        self.terminated = False
+
+    def terminate(self) -> None:
+        self.terminate_calls += 1
+        self.terminated = True
+
+    def join(self, timeout: float | None = None) -> None:
+        self.join_calls.append(timeout)
+        assert timeout is not None
+        self.clock[0] += timeout
+        if self.terminated and timeout > 0:
+            self.alive = False
+            self.exitcode = -15
+
+
 def test_multiworker_shutdown_uses_one_shared_five_second_deadline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1940,14 +1968,65 @@ def test_multiworker_shutdown_uses_one_shared_five_second_deadline(
         graceful_join=True,
     )
 
-    assert first.join_calls == [5.0]
-    assert second.join_calls == [0.0, 0.0]
+    assert first.join_calls == [1.5]
+    assert second.join_calls == [1.5, 1.0]
     assert first.terminate_calls == 0
     assert second.terminate_calls == 1
-    assert clock[0] == 105.0
+    assert clock[0] == 104.0
     assert workers_alive is False
     assert escalated is True
     assert operation_errors == ()
+
+
+def test_multiworker_shutdown_reserves_positive_fair_post_terminate_reaping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [200.0]
+    processes = [PostTerminateJoinProcess(clock), PostTerminateJoinProcess(clock)]
+    monkeypatch.setattr(train_module, "_monotonic", lambda: clock[0], raising=False)
+
+    workers_alive, escalated, operation_errors = train_module._stop_processes(
+        processes,
+        graceful_join=True,
+    )
+
+    assert workers_alive is False
+    assert escalated is True
+    assert operation_errors == ()
+    assert all(process.terminate_calls == 1 for process in processes)
+    assert all(process.kill_calls == 0 for process in processes)
+    assert all(len(process.join_calls) == 2 for process in processes)
+    assert all(
+        process.join_calls[1] is not None and process.join_calls[1] > 0
+        for process in processes
+    )
+    assert sum(
+        timeout
+        for process in processes
+        for timeout in process.join_calls
+        if timeout is not None
+    ) <= 5.0
+
+
+def test_failed_worker_shutdown_does_not_mark_close_audit_complete() -> None:
+    vector_env = RuntimeProcessVecEnv(
+        [
+            lambda: FakeEnv(
+                0,
+                config=make_config(),
+                role="train",
+                worker_index=0,
+            )
+        ],
+        exits_on_terminate=False,
+        exits_on_kill=False,
+    )
+    vector_env.remotes = (FakeRemote(),)
+
+    with pytest.raises(RuntimeError, match="cleanup could not be confirmed"):
+        train_module._close_vector_env(vector_env)
+
+    assert not getattr(vector_env, train_module._VECTOR_CLOSE_AUDIT_MARKER, False)
 
 
 class ProcessFailingSubprocVecEnv:
@@ -2028,10 +2107,10 @@ def test_subprocess_cleanup_confirms_workers_dead_before_reporting_construction_
     terminated, killed, already_dead = partial.processes
     assert terminated.terminate_calls == 1
     assert terminated.kill_calls == 0
-    assert terminated.join_calls == [1.0]
+    assert terminated.join_calls == [pytest.approx(0.5)]
     assert killed.terminate_calls == 1
     assert killed.kill_calls == 1
-    assert killed.join_calls == [1.0, 1.0]
+    assert killed.join_calls == [pytest.approx(0.5), pytest.approx(1.0)]
     assert already_dead.terminate_calls == 0
     assert already_dead.kill_calls == 0
     assert already_dead.join_calls == []
@@ -2057,7 +2136,7 @@ def test_subprocess_cleanup_refuses_fallback_when_worker_survives(tmp_path: Path
     process = partial.processes[0]
     assert process.terminate_calls == 1
     assert process.kill_calls == 1
-    assert process.join_calls == [1.0, 1.0]
+    assert process.join_calls == [pytest.approx(1.0), pytest.approx(1.0)]
     assert process.is_alive() is True
     assert dummy.created == []
     assert any("worker cleanup could not be confirmed" in note for note in raised.value.__notes__)
@@ -2248,7 +2327,7 @@ def test_successful_training_confirms_subprocess_training_worker_exited(
     remote = training.remotes[0]
     assert remote.sent == [("close", None)]
     assert remote.close_calls == 1
-    assert process.join_calls == [5.0]
+    assert process.join_calls == [pytest.approx(3.0)]
     assert process.terminate_calls == 0
     assert process.kill_calls == 0
     assert process.is_alive() is False
@@ -2299,7 +2378,7 @@ def test_preclosed_subprocess_still_requires_first_exitcode_audit() -> None:
     with pytest.raises(RuntimeError, match="exit code 1"):
         train_module._close_vector_env(vector_env)
 
-    assert process.join_calls == [5.0]
+    assert process.join_calls == [pytest.approx(3.0)]
 
 
 @pytest.mark.parametrize(
@@ -2355,6 +2434,7 @@ def test_subprocess_none_exitcode_after_escalation_is_unconfirmed() -> None:
     assert process.terminate_calls == 1
     assert process.kill_calls == 0
     assert process.is_alive() is False
+    assert not getattr(vector_env, train_module._VECTOR_CLOSE_AUDIT_MARKER, False)
 
 
 def test_nonzero_worker_exit_blocks_inventory_and_publication(
@@ -2608,7 +2688,8 @@ def test_resume_records_provenance_preserves_source_and_keeps_timesteps(
         "config_diff": {},
         "start_num_timesteps": 12_500,
     }
-    assert FakePPO.load_calls[0]["path"] == source.checkpoint.resolve()
+    assert isinstance(FakePPO.load_calls[0]["path"], io.BytesIO)
+    assert FakePPO.load_calls[0]["source_bytes"] == source.checkpoint.read_bytes()
     assert FakePPO.instances[0].learn_kwargs is not None
     assert FakePPO.instances[0].learn_kwargs["reset_num_timesteps"] is False
     assert FakePPO.instances[0].num_timesteps == 17_596
@@ -3014,7 +3095,33 @@ def test_resume_rejects_invalid_resolved_source_config_before_destination(
     assert FakePPO.load_calls == []
 
 
-def test_resume_detects_checkpoint_change_during_load_before_destination_or_learning(
+@pytest.mark.parametrize("duplicate_scope", ["root", "nested"])
+def test_resume_rejects_duplicate_resolved_config_keys_before_destination_or_ppo_load(
+    tmp_path: Path,
+    duplicate_scope: str,
+) -> None:
+    source = seed_compatible_source_run(tmp_path)
+    config_path = source.run_dir / "config_resolved.yaml"
+    config_text = config_path.read_text(encoding="utf-8")
+    if duplicate_scope == "root":
+        config_text = config_text.replace("seed: 7\n", "seed: 7\nseed: 7\n", 1)
+    else:
+        config_text = config_text.replace(
+            "  seed: 42\n",
+            "  seed: 42\n  seed: 42\n",
+            1,
+        )
+    config_path.write_text(config_text, encoding="utf-8")
+    destination = tmp_path / f"duplicate-config-{duplicate_scope}"
+
+    with pytest.raises(ValueError, match="duplicate"):
+        run_with_fakes(make_config(), destination, resume_from=source.checkpoint)
+
+    assert not destination.exists()
+    assert FakePPO.load_calls == []
+
+
+def test_resume_load_uses_snapshot_if_checkpoint_path_changes_after_authentication(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3022,18 +3129,50 @@ def test_resume_detects_checkpoint_change_during_load_before_destination_or_lear
     destination = tmp_path / "changed-source"
     original_load = FakePPO.load.__func__
 
-    def changing_load(cls: type[FakePPO], path: Path, **kwargs: Any) -> FakePPO:
+    authenticated_bytes = source.checkpoint.read_bytes()
+
+    def changing_load(cls: type[FakePPO], path: object, **kwargs: Any) -> FakePPO:
         model = original_load(cls, path, **kwargs)
-        path.write_bytes(b"changed-during-load")
+        source.checkpoint.write_bytes(b"changed-during-load")
         return model
 
     monkeypatch.setattr(FakePPO, "load", classmethod(changing_load))
 
-    with pytest.raises(ValueError, match="changed"):
-        run_with_fakes(make_config(), destination, resume_from=source.checkpoint)
+    run_with_fakes(make_config(), destination, resume_from=source.checkpoint)
 
-    assert not destination.exists()
-    assert FakePPO.instances[0].learn_kwargs is None
+    assert destination.is_dir()
+    assert source.checkpoint.read_bytes() == b"changed-during-load"
+    assert FakePPO.load_calls[0]["source_bytes"] == authenticated_bytes
+
+
+def test_resume_loads_authenticated_checkpoint_snapshot_across_swap_and_restore_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = seed_compatible_source_run(tmp_path)
+    authenticated_bytes = source.checkpoint.read_bytes()
+    replacement = tmp_path / "replacement.zip"
+    FakePPO.write_checkpoint(replacement, "replacement-with-valid-contract")
+    replacement_bytes = replacement.read_bytes()
+    original_load = FakePPO.load.__func__
+
+    def swapping_load(cls: type[FakePPO], path: object, **kwargs: Any) -> FakePPO:
+        source.checkpoint.write_bytes(replacement_bytes)
+        try:
+            return original_load(cls, path, **kwargs)
+        finally:
+            source.checkpoint.write_bytes(authenticated_bytes)
+
+    monkeypatch.setattr(FakePPO, "load", classmethod(swapping_load))
+
+    run_with_fakes(
+        make_config(),
+        tmp_path / "immutable-checkpoint-resume",
+        resume_from=source.checkpoint,
+    )
+
+    assert FakePPO.load_calls[0]["source_bytes"] == authenticated_bytes
+    assert FakePPO.load_calls[0]["source_bytes"] != replacement_bytes
 
 
 def test_resume_loads_ppo_with_train_env_and_keeps_timesteps(tmp_path: Path) -> None:
@@ -3056,8 +3195,9 @@ def test_resume_loads_ppo_with_train_env_and_keeps_timesteps(tmp_path: Path) -> 
     assert private_workspace.name.startswith(".resume.training-")
     assert not private_workspace.exists()
     assert (tmp_path / "resume" / "tensorboard").is_dir()
-    assert FakePPO.load_calls[0] == {
-        "path": source.checkpoint.resolve(),
+    load_call = dict(FakePPO.load_calls[0])
+    assert isinstance(load_call.pop("path"), io.BytesIO)
+    assert load_call == {
         "source_bytes": source_bytes,
         "env": model.init_kwargs["env"],
         "device": "cpu",

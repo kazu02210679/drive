@@ -175,8 +175,8 @@ JSONには最終Snapshot・Claims・Reviewに加え、`final_trace`、4 Action�
 Windows PowerShell:
 
 ```powershell
-# Headless CPU smoke (replace <UNIQUE_RUN_ID>; destination must be fresh)
-.venv\Scripts\python.exe -m mad_driving.cli.train --config configs/base.yaml --smoke --run-dir runs/phase4_smoke_seed42_<UNIQUE_RUN_ID>
+# Headless CPU smoke (allocates a fresh directory under training.run_root)
+.venv\Scripts\python.exe -m mad_driving.cli.train --config configs/base.yaml --smoke
 
 # Standard 500,000-timestep run
 .venv\Scripts\python.exe -m mad_driving.cli.train --config configs/base.yaml --run-dir runs/phase4_standard_seed42
@@ -188,8 +188,8 @@ Windows PowerShell:
 Linux:
 
 ```bash
-# Headless CPU smoke (replace <UNIQUE_RUN_ID>; destination must be fresh)
-.venv/bin/python -m mad_driving.cli.train --config configs/base.yaml --smoke --run-dir runs/phase4_smoke_seed42_<UNIQUE_RUN_ID>
+# Headless CPU smoke (allocates a fresh directory under training.run_root)
+.venv/bin/python -m mad_driving.cli.train --config configs/base.yaml --smoke
 
 # Standard 500,000-timestep run
 .venv/bin/python -m mad_driving.cli.train --config configs/base.yaml --run-dir runs/phase4_standard_seed42
@@ -200,7 +200,14 @@ Linux:
 
 `configs/base.yaml`がsmokeとtrainingの共通canonical configです。`metadrive.start_seed`と`metadrive.num_scenarios`はsmoke用の既定値で、PPO環境はroleごとに`scenarios.<role>`の範囲へ上書きします。
 
-新規学習とresumeは必須の`--run-dir`で、存在しない、または空のdestinationを明示した場合だけ受け付けます。`<UNIQUE_RUN_ID>`は毎回新しい識別子へ置換してください。非空directoryを上書きしません。Resume sourceはread-onlyとして扱い、checkpoint SHA-256、親run/config、config差分、開始step、Observation/Action schemaを新しいrunの`run_metadata.json`へ記録します。source hostでcanonicalizeしたhistorical parent pathはcross-host provenance文字列として保持します。全runは`research_contract_version=4`、`observation_schema_version=1`です。各train/validation環境の実際のreset情報はdescriptor-boundな`episode_seeds/<role>-worker-<index>.jsonl`へ耐久書き込みします。parentはwriterがopenな間にVecEnv control channelからrole/worker/path/platform identityを保持し、close後のinventoryはそのparent-held identityに対して検証します。metadataの`episode_seed_artifacts`は相対path、role、worker、件数、schema version、検証済みplatform file identity、同一byte readのSHA-256を示します。
+`--run-dir` is optional for new training and resume runs. If omitted, the CLI reserves
+a unique empty destination under `training.run_root`; if supplied, it must still be
+absent or empty and is never overwritten. Resume authenticates one immutable checkpoint
+byte snapshot, restores the curriculum sidecar bound to that checkpoint, and records the
+parent checkpoint/config/diff/start step in the new run. Current runs use
+`research_contract_version=5` and `observation_schema_version=1`. Per-worker schema-v3
+episode seed JSONL artifacts retain descriptor-bound identity, exact counts, and SHA-256
+digests in `run_metadata.json`.
 
 `training.num_envs=1`ではtrainをparent processの`DummyVecEnv`、validationを1 workerの`SubprocVecEnv`にします。`num_envs>1`ではtrainを`SubprocVecEnv`、validation worker 0をparent processの`DummyVecEnv`にします。この相補構成でMetaDrive engineを1 processに1つに保ちつつ、学習中にperiodic evaluationとbest-checkpoint選択を行います。各評価直前にvalidation VecEnvをAppConfigのroot `seed`で再seedし、比較するcheckpointごとに同じepisode-seed列を再生します。
 
@@ -209,20 +216,24 @@ Linux:
 ```text
 <run-dir>/
 ├── config_resolved.yaml
-├── run_metadata.json
+├── run_metadata.json              # research contract v5 and artifact digests
+├── curriculum_state.yaml          # final run curriculum state
 ├── episode_seeds/
 │   ├── train-worker-000.jsonl
 │   └── validation-worker-000.jsonl
 ├── checkpoints/
 │   ├── best_model.zip
+│   ├── best_model.zip.curriculum.yaml
 │   ├── final_model.zip
-│   └── ppo_checkpoint_<steps>_steps.zip  # interval到達時のみ
+│   ├── final_model.zip.curriculum.yaml
+│   ├── ppo_checkpoint_<steps>_steps.zip  # interval到達時のみ
+│   └── ppo_checkpoint_<steps>_steps.zip.curriculum.yaml
 └── tensorboard/
     └── PPO_<n>/
         └── events.out.tfevents.*
 ```
 
-旧Task 11の再生成seed列と、path occupantをidentity trust sourceにした後続runは実run証拠として廃止しました。`runs/phase4_1_worker_identity_final_smoke_20260721_a`と`runs/phase4_1_worker_identity_final_smoke_20260721_b`は旧research contract v2、`runs/phase4_2_review_fix_v3_smoke_20260721_c`と`runs/phase4_2_review_fix_v3_smoke_20260721_d`は旧v3の履歴証拠です。最新のv4 evidenceは`runs/phase4_2_oracle_v4_smoke_20260721_g`と`runs/phase4_2_oracle_v4_smoke_20260721_h`です。両runは5,000 step時点で同一の5-episode periodic validationを行い、その後6,144 stepまで学習しました。両final checkpointは6,144 stepで再読込でき、各100 decision stepsのObservationとRewardはすべて有限かつ同一でした。詳細は [`docs/phase4_implementation_log.md`](docs/phase4_implementation_log.md) にあります。
+旧Task 11の再生成seed列と、path occupantをidentity trust sourceにした後続runは実run証拠として廃止しました。`runs/phase4_1_worker_identity_final_smoke_20260721_a`と`runs/phase4_1_worker_identity_final_smoke_20260721_b`は旧research contract v2、`runs/phase4_2_review_fix_v3_smoke_20260721_c`と`runs/phase4_2_review_fix_v3_smoke_20260721_d`は旧v3の履歴証拠です。Phase 4のhistorical v4 evidenceは`runs/phase4_2_oracle_v4_smoke_20260721_g`と`runs/phase4_2_oracle_v4_smoke_20260721_h`です。両runは5,000 step時点で同一の5-episode periodic validationを行い、その後6,144 stepまで学習しました。両final checkpointは6,144 stepで再読込でき、各100 decision stepsのObservationとRewardはすべて有限かつ同一でした。詳細は [`docs/phase4_implementation_log.md`](docs/phase4_implementation_log.md) にあります。
 
 ## Verify
 

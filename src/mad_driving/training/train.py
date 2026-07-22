@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import os
 import shutil
 import tempfile
@@ -44,7 +45,6 @@ from mad_driving.training.metadata import (
     checkpoint_curriculum_artifact_inventory,
     curriculum_state_artifact,
     resolve_resume_source,
-    sha256_file,
     validate_resume_contract,
     write_run_metadata,
 )
@@ -75,6 +75,9 @@ GenericFactory = Callable[..., FactoryResult]
 _STAGING_PREFIX = ".training-"
 _VECTOR_CLOSE_AUDIT_MARKER = "_mad_driving_close_audit_complete"
 _GRACEFUL_PROCESS_JOIN_TIMEOUT_SECONDS = 5.0
+_GRACEFUL_JOIN_PHASE_SECONDS = 3.0
+_TERMINATE_JOIN_PHASE_SECONDS = 1.0
+_KILL_JOIN_PHASE_SECONDS = 1.0
 
 
 @dataclass(frozen=True)
@@ -259,18 +262,25 @@ def _stop_processes(
 
     escalated = False
     operation_errors: list[Exception] = []
-    deadline = _monotonic() + _GRACEFUL_PROCESS_JOIN_TIMEOUT_SECONDS
+    started_at = _monotonic()
+    deadline = started_at + _GRACEFUL_PROCESS_JOIN_TIMEOUT_SECONDS
 
-    def remaining(*, cap: float | None = None) -> float:
-        value = max(0.0, deadline - _monotonic())
-        return value if cap is None else min(value, cap)
+    def join_for(candidates: list[object], phase_seconds: float) -> None:
+        if not candidates:
+            return
+        phase_deadline = min(deadline, _monotonic() + phase_seconds)
+        fair_timeout = max(0.0, phase_deadline - _monotonic()) / len(candidates)
+        for process in candidates:
+            join = getattr(process, "join", None)
+            if not callable(join):
+                continue
+            phase_remaining = max(0.0, phase_deadline - _monotonic())
+            timeout = min(fair_timeout, phase_remaining)
+            if error := _attempt_process_operation(join, timeout):
+                operation_errors.append(error)
 
     if graceful_join:
-        for process in processes:
-            join = getattr(process, "join", None)
-            if callable(join):
-                if error := _attempt_process_operation(join, remaining()):
-                    operation_errors.append(error)
+        join_for(processes, _GRACEFUL_JOIN_PHASE_SECONDS)
 
     terminated_processes: list[object] = []
     for process in processes:
@@ -282,11 +292,7 @@ def _stop_processes(
                 if error := _attempt_process_operation(terminate):
                     operation_errors.append(error)
 
-    for process in terminated_processes:
-        join = getattr(process, "join", None)
-        if callable(join):
-            if error := _attempt_process_operation(join, remaining(cap=1.0)):
-                operation_errors.append(error)
+    join_for(terminated_processes, _TERMINATE_JOIN_PHASE_SECONDS)
 
     killed_processes: list[object] = []
     for process in processes:
@@ -298,11 +304,7 @@ def _stop_processes(
                 if error := _attempt_process_operation(kill):
                     operation_errors.append(error)
 
-    for process in killed_processes:
-        join = getattr(process, "join", None)
-        if callable(join):
-            if error := _attempt_process_operation(join, remaining(cap=1.0)):
-                operation_errors.append(error)
+    join_for(killed_processes, _KILL_JOIN_PHASE_SECONDS)
     return (
         any(_process_is_alive(process) for process in processes),
         escalated,
@@ -317,17 +319,17 @@ def _close_vector_env(resource: object | None) -> None:
         return
     if getattr(resource, _VECTOR_CLOSE_AUDIT_MARKER, False):
         return
-    try:
-        setattr(resource, _VECTOR_CLOSE_AUDIT_MARKER, True)
-    except Exception as exc:
-        raise _VectorEnvCleanupError(
-            "Vector environment close idempotence could not be established"
-        ) from exc
     processes = getattr(resource, "processes", None)
     if not isinstance(processes, list):
         close = getattr(resource, "close", None)
         if callable(close):
             close()
+        try:
+            setattr(resource, _VECTOR_CLOSE_AUDIT_MARKER, True)
+        except Exception as exc:
+            raise _VectorEnvCleanupError(
+                "Vector environment close idempotence could not be established"
+            ) from exc
         return
 
     remotes = tuple(getattr(resource, "remotes", ()))
@@ -355,15 +357,18 @@ def _close_vector_env(resource: object | None) -> None:
         cleanup_errors.append(
             _VectorEnvCleanupError("Subprocess worker required terminate/kill escalation")
         )
+    exit_codes_confirmed = True
     for worker_index, process in enumerate(processes):
         exitcode = getattr(process, "exitcode", None)
         if exitcode is None:
+            exit_codes_confirmed = False
             cleanup_errors.append(
                 _VectorEnvCleanupError(
                     f"Subprocess worker {worker_index} shutdown exit code is unconfirmed"
                 )
             )
         elif isinstance(exitcode, bool) or not isinstance(exitcode, Integral):
+            exit_codes_confirmed = False
             cleanup_errors.append(
                 _VectorEnvCleanupError(
                     f"Subprocess worker {worker_index} returned malformed exit code"
@@ -394,6 +399,15 @@ def _close_vector_env(resource: object | None) -> None:
         cleanup_errors.append(
             _VectorEnvCleanupError("Subprocess worker cleanup could not be confirmed")
         )
+    elif exit_codes_confirmed:
+        try:
+            setattr(resource, _VECTOR_CLOSE_AUDIT_MARKER, True)
+        except Exception as error:
+            cleanup_errors.append(
+                _VectorEnvCleanupError(
+                    f"Vector environment close audit could not be recorded: {error}"
+                )
+            )
     if cleanup_errors:
         details = "; ".join(str(error) for error in cleanup_errors)
         raise _VectorEnvCleanupError(details) from cleanup_errors[0]
@@ -706,16 +720,11 @@ def run_training(
             )
         else:
             model = ppo_factory.load(  # type: ignore[attr-defined]
-                resume_source.checkpoint,
+                io.BytesIO(resume_source.checkpoint_bytes),
                 env=train_env,
                 device="cpu",
                 tensorboard_log=str(tensorboard_dir),
             )
-            if sha256_file(resume_source.checkpoint) != resume_source.checkpoint_sha256:
-                raise ValueError(
-                    "Resume checkpoint changed while it was being validated and loaded: "
-                    f"{resume_source.checkpoint}"
-                )
             validate_resume_contract(model, config, resume_source.metadata)
 
         raw_start_timesteps = model.num_timesteps

@@ -92,7 +92,7 @@ def _validate_reset_info(
     seeds: dict[str, int] = {}
     for field in _SEED_FIELDS:
         value = info.get(field)
-        if isinstance(value, bool) or not isinstance(value, Integral) or int(value) < 0:
+        if type(value) is not int or value < 0:
             raise ValueError(
                 f"Environment reset seed info {field} must be a non-negative non-bool integer"
             )
@@ -101,11 +101,7 @@ def _validate_reset_info(
     if not isinstance(scenario_id, str) or not scenario_id:
         raise ValueError("Environment reset seed info scenario_id must be a non-empty string")
     difficulty_level = info.get("difficulty_level")
-    if (
-        isinstance(difficulty_level, bool)
-        or not isinstance(difficulty_level, Integral)
-        or not 0 <= int(difficulty_level) <= 3
-    ):
+    if type(difficulty_level) is not int or not 0 <= difficulty_level <= 3:
         raise ValueError(
             "Environment reset seed info difficulty_level must be an integer from 0 through 3"
         )
@@ -179,6 +175,17 @@ def _strict_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
             raise ValueError(f"duplicate JSON field: {key}")
         result[key] = value
     return result
+
+
+def _parsed_json_integer(
+    value: object,
+    name: str,
+    *,
+    minimum: int,
+) -> int:
+    if type(value) is not int or value < minimum:
+        raise ValueError(f"Episode seed artifact {name} must be an integer >= {minimum}")
+    return value
 
 
 def _write_all(descriptor: int, payload: bytes) -> None:
@@ -378,14 +385,41 @@ def _parse_artifact_records(
         )
     except (json.JSONDecodeError, ValueError) as exc:
         raise ValueError(f"Episode seed artifact header is malformed: {artifact}") from exc
-    expected_header = {
-        "file_identity": _identity_payload(identity),
-        "record_type": _HEADER_RECORD_TYPE,
-        "role": role,
-        "schema_version": EPISODE_SEED_ARTIFACT_SCHEMA_VERSION,
-        "worker_index": worker_index,
+    header_fields = {
+        "file_identity",
+        "record_type",
+        "role",
+        "schema_version",
+        "worker_index",
     }
-    if header != expected_header:
+    if not isinstance(header, dict) or set(header) != header_fields:
+        raise ValueError(f"Episode seed artifact file identity header is malformed: {artifact}")
+    header_identity = header["file_identity"]
+    if not isinstance(header_identity, dict) or set(header_identity) != {"device", "inode"}:
+        raise ValueError(f"Episode seed artifact file identity header is malformed: {artifact}")
+    parsed_identity = (
+        _parsed_json_integer(header_identity["device"], "header device", minimum=0),
+        _parsed_json_integer(header_identity["inode"], "header inode", minimum=1),
+    )
+    parsed_schema_version = _parsed_json_integer(
+        header["schema_version"],
+        "header schema_version",
+        minimum=0,
+    )
+    parsed_worker_index = _parsed_json_integer(
+        header["worker_index"],
+        "header worker_index",
+        minimum=0,
+    )
+    if (
+        parsed_identity != identity
+        or header["record_type"] != _HEADER_RECORD_TYPE
+        or type(header["record_type"]) is not str
+        or header["role"] != role
+        or type(header["role"]) is not str
+        or parsed_schema_version != EPISODE_SEED_ARTIFACT_SCHEMA_VERSION
+        or parsed_worker_index != worker_index
+    ):
         raise ValueError(f"Episode seed artifact file identity header is malformed: {artifact}")
     records: list[dict[str, object]] = []
     for line_number, line in enumerate(lines[1:], start=2):
@@ -406,6 +440,20 @@ def _parse_artifact_records(
         if not isinstance(value, dict) or set(value) != _RECORD_FIELDS:
             raise ValueError(
                 f"Episode seed artifact record fields are malformed: {artifact}:{line_number}"
+            )
+        record_role = value["role"]
+        record_worker_index = _parsed_json_integer(
+            value["worker_index"],
+            "record worker_index",
+            minimum=0,
+        )
+        if (
+            type(record_role) is not str
+            or record_role != role
+            or record_worker_index != worker_index
+        ):
+            raise ValueError(
+                f"Episode seed artifact identity is malformed: {artifact}:{line_number}"
             )
         expected = _validate_reset_info(value, role=role, worker_index=worker_index)
         if value != expected:

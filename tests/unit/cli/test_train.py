@@ -220,9 +220,131 @@ def test_implicit_run_directory_skips_existing_name_collision(
 
     allocated = train_module._fresh_run_directory(run_root, smoke=True)
 
-    assert allocated == run_root / "fresh"
-    assert allocated.is_dir()
+    assert allocated.path == run_root / "fresh"
+    assert allocated.path.is_dir()
     assert marker.read_text(encoding="utf-8") == "keep"
+
+
+def test_implicit_run_directory_failure_removes_unchanged_empty_reservation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("seed: 42\n", encoding="utf-8")
+    run_root = tmp_path / "runs"
+    reserved = run_root / "reserved"
+    monkeypatch.setattr(
+        train_module,
+        "load_config",
+        lambda path: make_config(run_root=str(run_root)),
+    )
+    monkeypatch.setattr(train_module, "_run_directory_name", lambda *, smoke: "reserved")
+    monkeypatch.setattr(
+        train_module,
+        "run_training",
+        lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("malformed resume")),
+    )
+
+    assert main(["--config", str(config_path), "--smoke"]) == 2
+
+    assert not reserved.exists()
+    assert "malformed resume" in capsys.readouterr().err
+
+
+def test_malformed_resume_before_training_ownership_cleans_implicit_reservation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("seed: 42\n", encoding="utf-8")
+    resume_path = tmp_path / "orphan.zip"
+    resume_path.write_bytes(b"not-a-run-checkpoint")
+    run_root = tmp_path / "runs"
+    reserved = run_root / "malformed-resume"
+    monkeypatch.setattr(
+        train_module,
+        "load_config",
+        lambda path: make_config(run_root=str(run_root)),
+    )
+    monkeypatch.setattr(
+        train_module,
+        "_run_directory_name",
+        lambda *, smoke: "malformed-resume",
+    )
+
+    assert (
+        main(
+            [
+                "--config",
+                str(config_path),
+                "--resume-from",
+                str(resume_path),
+            ]
+        )
+        == 2
+    )
+
+    assert not reserved.exists()
+
+
+def test_implicit_failure_preserves_replaced_or_nonempty_reservation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("seed: 42\n", encoding="utf-8")
+    run_root = tmp_path / "runs"
+    monkeypatch.setattr(
+        train_module,
+        "load_config",
+        lambda path: make_config(run_root=str(run_root)),
+    )
+    names = iter(["identity-changed", "became-nonempty"])
+    monkeypatch.setattr(train_module, "_run_directory_name", lambda *, smoke: next(names))
+    calls = 0
+
+    def fail_after_changing_reservation(*args: object, **kwargs: object) -> None:
+        del args
+        nonlocal calls
+        run_dir = kwargs["run_dir"]
+        assert isinstance(run_dir, Path)
+        if calls == 0:
+            run_dir.rmdir()
+            run_dir.mkdir()
+        else:
+            (run_dir / "foreign.txt").write_text("preserve", encoding="utf-8")
+        calls += 1
+        raise RuntimeError("pre-ownership failure")
+
+    monkeypatch.setattr(train_module, "run_training", fail_after_changing_reservation)
+
+    assert main(["--config", str(config_path), "--smoke"]) == 2
+    assert main(["--config", str(config_path), "--smoke"]) == 2
+
+    assert (run_root / "identity-changed").is_dir()
+    assert list((run_root / "identity-changed").iterdir()) == []
+    assert (run_root / "became-nonempty" / "foreign.txt").read_text(encoding="utf-8") == "preserve"
+
+
+def test_explicit_empty_run_directory_is_not_cleaned_after_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("seed: 42\n", encoding="utf-8")
+    run_dir = tmp_path / "explicit"
+    run_dir.mkdir()
+    monkeypatch.setattr(train_module, "load_config", lambda path: make_config())
+    monkeypatch.setattr(
+        train_module,
+        "run_training",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("failed")),
+    )
+
+    assert main(["--config", str(config_path), "--run-dir", str(run_dir)]) == 2
+    assert run_dir.is_dir()
+    assert list(run_dir.iterdir()) == []
 
 
 @pytest.mark.parametrize("option", ["--config", "--resume-from"])

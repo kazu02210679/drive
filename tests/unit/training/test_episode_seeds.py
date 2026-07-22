@@ -728,6 +728,68 @@ def test_single_read_inventory_rejects_each_malformed_jsonl_boundary(
         )
 
 
+@pytest.mark.parametrize(
+    ("location", "field", "replacement"),
+    [
+        ("header", "schema_version", 3.0),
+        ("header", "schema_version", True),
+        ("header", "worker_index", 0.0),
+        ("header", "worker_index", False),
+        ("header_identity", "device", "float-of-original"),
+        ("header_identity", "inode", "float-of-original"),
+        ("record", "worker_index", 0.0),
+        ("record", "worker_index", False),
+        ("record", "environment_seed", 1.0),
+        ("record", "scenario_selection_seed", True),
+        ("record", "scenario_parameter_seed", 3.0),
+    ],
+)
+def test_inventory_rejects_non_integer_numeric_header_and_record_fields(
+    tmp_path: Path,
+    location: str,
+    field: str,
+    replacement: object,
+) -> None:
+    workspace = tmp_path / "private-workspace"
+    workspace.mkdir()
+    wrapped = EpisodeSeedRecordingWrapper(
+        ResetInfoEnv([seed_info(1, 2, 3)]),
+        workspace=workspace,
+        role="train",
+        worker_index=0,
+    )
+    wrapped.reset()
+    trusted_descriptor = wrapped.episode_seed_artifact_descriptor
+    wrapped.close()
+    artifact = workspace / "episode_seeds" / "train-worker-000.jsonl"
+    header, record = [
+        json.loads(line)
+        for line in artifact.read_text(encoding="utf-8").splitlines()
+    ]
+    if location == "header_identity":
+        if replacement == "float-of-original":
+            replacement = float(header["file_identity"][field])
+        header["file_identity"][field] = replacement
+    elif location == "header":
+        header[field] = replacement
+    else:
+        record[field] = replacement
+    artifact.write_text(
+        "\n".join(
+            json.dumps(value, sort_keys=True, separators=(",", ":"))
+            for value in (header, record)
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="header|identity|record|seed"):
+        summarize_episode_seed_artifacts(
+            workspace,
+            expected_descriptors=(trusted_descriptor,),
+        )
+
+
 def test_closed_recorder_rejects_reset_without_retrying_resources(tmp_path: Path) -> None:
     workspace = tmp_path / "private-workspace"
     workspace.mkdir()

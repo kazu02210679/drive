@@ -19,6 +19,7 @@ from gymnasium import spaces
 from stable_baselines3.common.utils import ConstantSchedule, FloatSchedule
 
 from mad_driving.config.models import AppConfig
+from mad_driving.config.parsing import load_unique_yaml
 from mad_driving.training.curriculum import (
     CHECKPOINT_CURRICULUM_SIDECAR_SCHEMA_VERSION,
     CURRICULUM_STATE_FILENAME,
@@ -26,6 +27,7 @@ from mad_driving.training.curriculum import (
     CurriculumState,
     checkpoint_curriculum_sidecar_path,
     read_checkpoint_curriculum_artifact,
+    read_stable_artifact_bytes,
 )
 
 RESEARCH_CONTRACT_VERSION: Final = 5
@@ -529,6 +531,7 @@ class ResumeSource:
     run_dir: Path
     metadata: RunMetadata
     resolved_config: dict[str, Any]
+    checkpoint_bytes: bytes
     checkpoint_sha256: str
     config_diff: dict[str, Any]
     curriculum_state: CurriculumState
@@ -805,8 +808,9 @@ def resolve_resume_source(checkpoint: str | Path, current_config: AppConfig) -> 
     if not config_path.is_file():
         raise ValueError(f"Resume source resolved config not found: {config_path}")
     try:
-        parent_payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        config_bytes, _config_digest = read_stable_artifact_bytes(config_path)
+        parent_payload = load_unique_yaml(config_bytes.decode("utf-8"))
+    except (OSError, UnicodeError, ValueError, yaml.YAMLError) as exc:
         raise ValueError(f"Resume source resolved config is malformed: {config_path}") from exc
     parent_config = _require_dict(parent_payload, "resolved config")
     if parent_config != metadata.resolved_config:
@@ -829,7 +833,8 @@ def resolve_resume_source(checkpoint: str | Path, current_config: AppConfig) -> 
         )
     curriculum_summary = matching_artifacts[0]
     expected_checkpoint_digest = cast(str, curriculum_summary["checkpoint_sha256"])
-    if sha256_file(checkpoint_path) != expected_checkpoint_digest:
+    checkpoint_bytes, checkpoint_digest = read_stable_artifact_bytes(checkpoint_path)
+    if checkpoint_digest != expected_checkpoint_digest:
         raise ValueError("Resume checkpoint hash does not match its curriculum binding")
     curriculum_path = run_dir / cast(str, curriculum_summary["state_path"])
     if not curriculum_path.is_file():
@@ -853,6 +858,7 @@ def resolve_resume_source(checkpoint: str | Path, current_config: AppConfig) -> 
         run_dir=run_dir.resolve(strict=True),
         metadata=metadata,
         resolved_config=parent_config,
+        checkpoint_bytes=checkpoint_bytes,
         checkpoint_sha256=expected_checkpoint_digest,
         config_diff=config_diff,
         curriculum_state=curriculum_state,
