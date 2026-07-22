@@ -1,0 +1,947 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="車内マルチエージェント運転シミュレーションMVPのインタラクティブ・アーキテクチャマップ">
+  <title>MAD Driving — Architecture Map</title>
+  <script src="https://cdn.jsdelivr.net/npm/cytoscape@3.34.0/dist/cytoscape.min.js"></script>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #090a0f;
+      --surface: #101118;
+      --surface-2: #151720;
+      --surface-3: #1b1d27;
+      --line: #292c38;
+      --line-strong: #3b3f4e;
+      --text: #f2f2f4;
+      --text-soft: #b5b7c2;
+      --text-muted: #7e818e;
+      --focus: #f0bd45;
+      --focus-soft: rgba(240, 189, 69, 0.14);
+      --danger: #ff6f72;
+      --radius: 12px;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body { margin: 0; width: 100%; height: 100%; background: var(--bg); color: var(--text); }
+
+    body { min-width: 320px; }
+
+    button, input, select, a { font: inherit; }
+
+    button, select, input, .button-link {
+      border: 1px solid var(--line-strong);
+      background: var(--surface-2);
+      color: var(--text);
+      border-radius: 8px;
+    }
+
+    button, select, .button-link { cursor: pointer; }
+
+    button:hover, select:hover, .button-link:hover { border-color: #606574; background: var(--surface-3); }
+
+    button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible {
+      outline: 2px solid var(--focus);
+      outline-offset: 2px;
+    }
+
+    .app {
+      height: 100vh;
+      min-height: 100vh;
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr);
+      overflow: hidden;
+    }
+
+    .topbar {
+      min-height: 68px;
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      padding: 12px 18px;
+      border-bottom: 1px solid var(--line);
+      background: #0c0d12;
+      position: relative;
+      z-index: 5;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 11px;
+      min-width: max-content;
+    }
+
+    .brand-mark {
+      width: 30px;
+      height: 30px;
+      display: grid;
+      place-items: center;
+      border: 1px solid var(--focus);
+      border-radius: 7px;
+      color: var(--focus);
+      font-weight: 700;
+      letter-spacing: -0.04em;
+    }
+
+    .brand-copy { display: grid; gap: 2px; }
+    .brand-title { font-size: 13px; font-weight: 650; letter-spacing: 0.08em; text-transform: uppercase; }
+    .brand-subtitle { font-size: 11px; color: var(--text-muted); }
+
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      min-width: max-content;
+      padding: 6px 9px;
+      border: 1px solid rgba(240, 189, 69, 0.45);
+      border-radius: 999px;
+      color: #f5cf73;
+      background: var(--focus-soft);
+      font-size: 11px;
+      letter-spacing: 0.07em;
+      text-transform: uppercase;
+    }
+
+    .status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--focus); }
+
+    .top-meta {
+      color: var(--text-muted);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .toolbar {
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .toolbar input {
+      width: 190px;
+      min-width: 170px;
+      height: 36px;
+      padding: 0 11px;
+    }
+
+    .toolbar button, .button-link { height: 36px; padding: 0 11px; display: inline-flex; align-items: center; text-decoration: none; }
+
+    .workspace {
+      min-height: 0;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 356px;
+    }
+
+    .map-panel {
+      min-width: 0;
+      min-height: 0;
+      position: relative;
+      overflow: hidden;
+      background: var(--bg);
+    }
+
+    #cy { position: absolute; inset: 0; }
+
+    .map-summary {
+      position: absolute;
+      top: 18px;
+      left: 18px;
+      z-index: 3;
+      max-width: min(760px, calc(100% - 36px));
+      pointer-events: none;
+    }
+
+    .eyebrow {
+      margin: 0 0 7px;
+      color: var(--focus);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    h1 { margin: 0; font-size: clamp(20px, 2.2vw, 30px); line-height: 1.16; font-weight: 640; letter-spacing: -0.025em; }
+    .map-summary p { margin: 8px 0 0; color: var(--text-soft); font-size: 12px; line-height: 1.55; }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 7px 13px;
+      max-width: 100%;
+      width: fit-content;
+      margin-top: 12px;
+      padding: 9px 11px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: rgba(12, 13, 18, 0.91);
+    }
+
+    .legend-item { display: inline-flex; align-items: center; gap: 6px; color: var(--text-soft); font-size: 10px; white-space: nowrap; }
+    .legend-swatch { width: 7px; height: 7px; border-radius: 50%; background: var(--swatch); }
+
+    .map-hint {
+      position: absolute;
+      right: 16px;
+      bottom: 17px;
+      z-index: 3;
+      color: var(--text-muted);
+      font-size: 10px;
+      text-align: right;
+      pointer-events: none;
+    }
+
+    .loading {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      padding: 28px;
+      color: var(--text-soft);
+      text-align: center;
+      z-index: 4;
+      background: var(--bg);
+    }
+
+    .loading.is-hidden { display: none; }
+    .loading strong { display: block; margin-bottom: 8px; color: var(--text); }
+    .loading code { color: var(--focus); }
+
+    .inspector {
+      min-width: 0;
+      min-height: 0;
+      overflow-y: auto;
+      border-left: 1px solid var(--line);
+      background: var(--surface);
+    }
+
+    .inspector-header {
+      padding: 18px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(16, 17, 24, 0.96);
+    }
+
+    .flow-nav {
+      padding: 14px 16px 15px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(12, 13, 18, 0.98);
+    }
+
+    .flow-nav-label {
+      margin: 0 0 9px;
+      color: var(--text-muted);
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 0.13em;
+      text-transform: uppercase;
+    }
+
+    .flow-nav-grid { display: grid; grid-template-columns: 1fr; gap: 8px; }
+    .flow-nav-button {
+      min-width: 0;
+      min-height: 64px;
+      height: auto;
+      padding: 11px 12px;
+      display: grid;
+      align-content: center;
+      gap: 4px;
+      color: var(--text-soft);
+      text-align: left;
+    }
+    .flow-nav-button strong { color: var(--text); font-size: 12px; font-weight: 650; line-height: 1.3; }
+    .flow-nav-button span { color: var(--text-muted); font-size: 9px; line-height: 1.45; }
+    .flow-nav-button[aria-pressed="true"] {
+      border-color: rgba(240, 189, 69, 0.58);
+      background: var(--focus-soft);
+    }
+    .flow-nav-button[aria-pressed="true"] strong { color: #f6d884; }
+
+    .flow-content-anchor { height: 1px; scroll-margin-top: 12px; }
+
+    .inspector-kicker { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; color: var(--text-muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; }
+    .inspector-kicker::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--node-color, var(--focus)); }
+    .inspector h2 { margin: 0; font-size: 21px; line-height: 1.25; font-weight: 640; letter-spacing: -0.02em; }
+    .node-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+
+    .meta-chip {
+      padding: 4px 7px;
+      border: 1px solid var(--line-strong);
+      border-radius: 999px;
+      color: var(--text-soft);
+      font-size: 10px;
+    }
+
+    .meta-chip.status { border-color: rgba(240, 189, 69, 0.45); color: #f5cf73; }
+
+    .inspector-body { padding: 18px; }
+    .description { margin: 0 0 20px; color: #d6d7dc; font-size: 13px; line-height: 1.72; }
+    .detail-section { margin: 0 0 22px; }
+    .detail-section h3 { margin: 0 0 9px; color: var(--text-muted); font-size: 10px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; }
+    .detail-section ul { margin: 0; padding: 0; list-style: none; }
+    .detail-section li { position: relative; margin: 0 0 7px; padding-left: 14px; color: var(--text-soft); font-size: 12px; line-height: 1.55; }
+    .detail-section li::before { content: ""; position: absolute; left: 1px; top: 0.63em; width: 4px; height: 4px; border-radius: 50%; background: var(--node-color, var(--focus)); }
+
+    .contract-grid { display: grid; grid-template-columns: 1fr; gap: 9px; }
+    .contract-row { padding: 9px 10px; border-left: 2px solid var(--line-strong); background: #13151c; }
+    .contract-row span { display: block; margin-bottom: 3px; color: var(--text-muted); font-size: 9px; text-transform: uppercase; letter-spacing: 0.1em; }
+    .contract-row strong { color: var(--text-soft); font-size: 11px; font-weight: 550; line-height: 1.45; }
+
+    .source-list code {
+      display: block;
+      overflow-wrap: anywhere;
+      color: #c9cad2;
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      font-size: 10px;
+      line-height: 1.5;
+    }
+
+    .relation-list { display: grid; gap: 6px; }
+    .relation-button {
+      width: 100%;
+      height: auto;
+      padding: 8px 9px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      text-align: left;
+      font-size: 11px;
+    }
+    .relation-button small { color: var(--text-muted); text-align: right; }
+
+    .flow-route {
+      display: grid;
+      gap: 10px;
+      counter-reset: flow-stage;
+    }
+
+    .flow-stage {
+      position: relative;
+      padding: 13px 13px 13px 46px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #13151c;
+      counter-increment: flow-stage;
+    }
+
+    .flow-stage::before {
+      content: counter(flow-stage, decimal-leading-zero);
+      position: absolute;
+      top: 13px;
+      left: 12px;
+      color: var(--focus);
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+    }
+
+    .flow-stage:not(:last-child)::after {
+      content: "";
+      position: absolute;
+      left: 23px;
+      top: 32px;
+      bottom: -18px;
+      width: 1px;
+      background: linear-gradient(var(--focus), rgba(240, 189, 69, 0.08));
+    }
+
+    .flow-stage h4 { margin: 0; font-size: 13px; font-weight: 650; }
+    .flow-stage > p { margin: 5px 0 10px; color: var(--text-soft); font-size: 11px; line-height: 1.55; }
+
+    .flow-modules { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 10px; }
+    .module-chip {
+      height: auto;
+      padding: 4px 7px;
+      border-radius: 999px;
+      color: #e6d39e;
+      background: rgba(240, 189, 69, 0.07);
+      border-color: rgba(240, 189, 69, 0.3);
+      font-size: 9px;
+    }
+
+    .stage-blueprint { display: grid; gap: 6px; }
+    .stage-blueprint div { padding-top: 7px; border-top: 1px solid var(--line); }
+    .stage-blueprint span { display: block; margin-bottom: 3px; color: var(--text-muted); font-size: 8px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; }
+    .stage-blueprint p { margin: 0; color: #c5c7d0; font-size: 10px; line-height: 1.45; }
+
+    .coverage-note {
+      margin: 0;
+      padding: 10px 11px;
+      border-left: 2px solid var(--focus);
+      background: var(--focus-soft);
+      color: #dbc994;
+      font-size: 11px;
+      line-height: 1.55;
+    }
+
+    .empty-inspector { color: var(--text-muted); font-size: 13px; line-height: 1.6; }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    @media (max-width: 1400px) {
+      .top-meta { display: none; }
+      .brand-subtitle { display: none; }
+    }
+
+    @media (max-width: 1120px) {
+      .workspace { grid-template-columns: minmax(0, 1fr) 320px; }
+      .status-badge { display: none; }
+    }
+
+    @media (max-width: 860px) {
+      html, body { height: auto; }
+      .app { height: auto; overflow: visible; }
+      .topbar { align-items: flex-start; flex-wrap: wrap; }
+      .toolbar { width: 100%; margin-left: 0; justify-content: flex-start; }
+      .toolbar input { flex: 1 1 210px; width: auto; }
+      .workspace { display: block; }
+      .map-panel { height: 68vh; min-height: 520px; }
+      .inspector { border-left: 0; border-top: 1px solid var(--line); overflow: visible; }
+      .map-hint { display: none; }
+    }
+
+    @media (max-width: 560px) {
+      .topbar { padding: 12px; gap: 10px; }
+      .status-badge { order: 3; }
+      .map-panel { height: 64vh; min-height: 460px; }
+      .map-summary { top: 14px; left: 14px; }
+      .map-summary p { max-width: 300px; }
+      .legend { max-width: 347px; gap: 6px 10px; padding: 8px 9px; }
+      .legend-item:nth-child(n+6) { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand" aria-label="MAD Driving system map">
+        <div class="brand-mark" aria-hidden="true">M</div>
+        <div class="brand-copy">
+          <div class="brand-title">MAD Driving / System Map</div>
+          <div class="brand-subtitle">Architecture, contracts, and delivery path</div>
+        </div>
+      </div>
+      <div class="status-badge"><span class="status-dot"></span>Specification map</div>
+      <div class="top-meta" id="topMeta">Loading architecture…</div>
+      <div class="toolbar" aria-label="Map controls">
+        <label class="sr-only" for="nodeSearch">ノードを検索</label>
+        <input id="nodeSearch" type="search" placeholder="ノード・責務・パスを検索">
+        <button id="fitButton" type="button">全体表示</button>
+        <a class="button-link" href="architecture-map.json" download>JSON</a>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <section class="map-panel" aria-labelledby="mapTitle">
+        <div class="map-summary">
+          <p class="eyebrow">Single source of architectural truth</p>
+          <h1 id="mapTitle">車内マルチエージェント運転シミュレーション</h1>
+          <p>同じSceneSnapshotから独立分析し、PPOで統合、Safety Shieldで最終防護する意思決定フロー。</p>
+          <div class="legend" id="legend" aria-label="ノードの色分け"></div>
+        </div>
+        <div id="cy" role="application" aria-label="アーキテクチャ依存関係マップ。マウスでパン・ズームし、ノードを選択すると詳細が表示されます。"></div>
+        <div class="map-hint">Drag to pan · Scroll to zoom · Select a node to inspect</div>
+        <div class="loading" id="loading"><div><strong>Architecture mapを読み込んでいます</strong><span>データと描画ライブラリを準備中…</span></div></div>
+      </section>
+
+      <aside class="inspector" id="detailInspector" aria-label="選択したFlowまたはノードの詳細">
+        <nav class="flow-nav" id="flowNav" aria-label="Flow表示を切り替え"></nav>
+        <div class="flow-content-anchor" id="flowContentAnchor" aria-hidden="true"></div>
+        <div class="inspector-header" id="inspectorHeader">
+          <div class="inspector-kicker" id="inspectorKicker">Flow inspector</div>
+          <h2 id="inspectorTitle">ノードを選択</h2>
+          <div class="node-meta" id="nodeMeta"></div>
+        </div>
+        <div class="inspector-body" id="inspectorBody">
+          <p class="empty-inspector">マップ上のノードを選ぶと、責務・入出力・安全条件・予定ソースパスを確認できます。</p>
+        </div>
+      </aside>
+    </main>
+  </div>
+
+  <script>
+    (() => {
+      const loading = document.getElementById('loading');
+      const topMeta = document.getElementById('topMeta');
+      const detailInspector = document.getElementById('detailInspector');
+      const inspectorHeader = document.getElementById('inspectorHeader');
+      const inspectorKicker = document.getElementById('inspectorKicker');
+      const inspectorTitle = document.getElementById('inspectorTitle');
+      const inspectorBody = document.getElementById('inspectorBody');
+      const nodeMeta = document.getElementById('nodeMeta');
+      const nodeSearch = document.getElementById('nodeSearch');
+      const flowNav = document.getElementById('flowNav');
+      const flowContentAnchor = document.getElementById('flowContentAnchor');
+      const fitButton = document.getElementById('fitButton');
+      const legend = document.getElementById('legend');
+      const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      const animationDuration = reducedMotion ? 0 : 260;
+
+      let architecture;
+      let cy;
+      let selectedNodeId = '';
+      let selectedFlowId = 'decision-cycle';
+      let searchQuery = '';
+      let resizeTimer;
+
+      const escapeHtml = (value) => String(value ?? '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#039;');
+
+      const categoryById = (id) => architecture.categories.find((category) => category.id === id);
+      const nodeById = (id) => architecture.nodes.find((node) => node.id === id);
+      const flowById = (id) => architecture.flows.find((flow) => flow.id === id);
+
+      function renderLegend() {
+        legend.innerHTML = architecture.categories.map((category) => (
+          `<span class="legend-item"><span class="legend-swatch" style="--swatch:${escapeHtml(category.color)}"></span>${escapeHtml(category.label)}</span>`
+        )).join('');
+      }
+
+      function renderFlowNav() {
+        const views = [
+          {
+            id: 'all',
+            label: 'すべての関係',
+            description: `全${architecture.nodes.length}モジュールと${architecture.edges.length}の関係を一度に表示します。`
+          },
+          ...architecture.flows.map((flow) => ({ id: flow.id, label: flow.label, description: flow.description }))
+        ];
+        flowNav.innerHTML = `
+          <p class="flow-nav-label">Flow views</p>
+          <div class="flow-nav-grid">
+            ${views.map((view) => `<button class="flow-nav-button" type="button" data-flow-id="${escapeHtml(view.id)}" aria-pressed="${view.id === selectedFlowId}"><strong>${escapeHtml(view.label)}</strong><span>${escapeHtml(view.description)}</span></button>`).join('')}
+          </div>`;
+      }
+
+      function scrollInspectorTo(flowId) {
+        const target = flowId === 'all' ? flowNav : flowContentAnchor;
+        target.scrollIntoView({ behavior: reducedMotion ? 'auto' : 'smooth', block: 'start' });
+      }
+
+      function listSection(title, values, className = '') {
+        if (!Array.isArray(values) || values.length === 0) return '';
+        return `<section class="detail-section ${className}"><h3>${escapeHtml(title)}</h3><ul>${values.map((value) => `<li>${escapeHtml(value)}</li>`).join('')}</ul></section>`;
+      }
+
+      function renderInspector(node) {
+        if (!node) return;
+        const category = categoryById(node.category);
+        detailInspector.setAttribute('aria-label', `${node.label}ノードの詳細`);
+        inspectorKicker.textContent = 'Node inspector';
+        inspectorHeader.style.setProperty('--node-color', category?.color || '#f0bd45');
+        inspectorBody.style.setProperty('--node-color', category?.color || '#f0bd45');
+        inspectorTitle.textContent = node.label;
+        nodeMeta.innerHTML = [
+          `<span class="meta-chip">${escapeHtml(category?.label || node.category)}</span>`,
+          `<span class="meta-chip">Phase ${escapeHtml(node.phase)}</span>`,
+          `<span class="meta-chip status">${escapeHtml(node.status)}</span>`
+        ].join('');
+
+        const incoming = architecture.edges.filter((edge) => edge.target === node.id);
+        const outgoing = architecture.edges.filter((edge) => edge.source === node.id);
+        const relationMarkup = [...incoming.map((edge) => ({edge, direction: 'IN', nodeId: edge.source})), ...outgoing.map((edge) => ({edge, direction: 'OUT', nodeId: edge.target}))]
+          .map(({edge, direction, nodeId}) => {
+            const related = nodeById(nodeId);
+            return `<button class="relation-button" type="button" data-node-id="${escapeHtml(nodeId)}"><span>${escapeHtml(related?.label || nodeId)}</span><small>${direction} · ${escapeHtml(edge.label)}</small></button>`;
+          }).join('');
+
+        const contractRows = [
+          ['Inputs', node.inputs],
+          ['Outputs', node.outputs],
+          ['Interfaces', node.interfaces]
+        ].filter(([, values]) => Array.isArray(values) && values.length > 0)
+          .map(([label, values]) => `<div class="contract-row"><span>${escapeHtml(label)}</span><strong>${values.map(escapeHtml).join(' · ')}</strong></div>`)
+          .join('');
+
+        inspectorBody.innerHTML = `
+          <p class="description">${escapeHtml(node.description)}</p>
+          ${listSection('Responsibilities', node.responsibilities)}
+          ${contractRows ? `<section class="detail-section"><h3>Data contracts</h3><div class="contract-grid">${contractRows}</div></section>` : ''}
+          ${listSection('Safety & invariants', node.invariants)}
+          ${Array.isArray(node.sourcePaths) && node.sourcePaths.length ? `<section class="detail-section source-list"><h3>Planned source paths</h3>${node.sourcePaths.map((path) => `<code>${escapeHtml(path)}</code>`).join('')}</section>` : ''}
+          ${relationMarkup ? `<section class="detail-section"><h3>Direct relationships</h3><div class="relation-list">${relationMarkup}</div></section>` : ''}
+        `;
+      }
+
+      function renderFlowInspector(flow) {
+        if (!flow) return;
+        detailInspector.setAttribute('aria-label', `${flow.label} Flowの詳細`);
+        inspectorKicker.textContent = 'Flow / service blueprint';
+        inspectorHeader.style.setProperty('--node-color', '#f0bd45');
+        inspectorBody.style.setProperty('--node-color', '#f0bd45');
+        inspectorTitle.textContent = flow.label;
+        nodeMeta.innerHTML = [
+          `<span class="meta-chip">${escapeHtml(flow.stages.length)} stages</span>`,
+          `<span class="meta-chip">${escapeHtml(new Set(flow.nodeIds).size)} modules</span>`,
+          `<span class="meta-chip status">${escapeHtml(flow.evidenceStatus)}</span>`
+        ].join('');
+
+        const stageMarkup = flow.stages.map((stage) => {
+          const modules = stage.nodeIds.map((nodeId) => {
+            const node = nodeById(nodeId);
+            return `<button class="module-chip" type="button" data-node-id="${escapeHtml(nodeId)}">${escapeHtml(node?.label || nodeId)}</button>`;
+          }).join('');
+          return `
+            <article class="flow-stage">
+              <h4>${escapeHtml(stage.label)}</h4>
+              <p>${escapeHtml(stage.description)}</p>
+              <div class="flow-modules" aria-label="${escapeHtml(stage.label)}のモジュール">${modules}</div>
+              <div class="stage-blueprint">
+                <div><span>Backstage / code does</span><p>${escapeHtml(stage.backstage)}</p></div>
+                <div><span>Produces</span><p>${escapeHtml(stage.produces)}</p></div>
+              </div>
+            </article>`;
+        }).join('');
+
+        const contractRows = [
+          ['Actor / owner', [flow.actor]],
+          ['Trigger', [flow.trigger]],
+          ['Outcome', [flow.outcome]]
+        ].map(([label, values]) => `<div class="contract-row"><span>${escapeHtml(label)}</span><strong>${values.map(escapeHtml).join(' · ')}</strong></div>`).join('');
+
+        inspectorBody.innerHTML = `
+          <p class="description">${escapeHtml(flow.description)}</p>
+          <section class="detail-section"><h3>Flow contract</h3><div class="contract-grid">${contractRows}</div></section>
+          <section class="detail-section"><h3>Journey stages</h3><div class="flow-route">${stageMarkup}</div></section>
+          ${listSection('Safety & recovery', flow.safetyChecks)}
+          ${listSection('Specification evidence', flow.evidence, 'source-list')}
+          <section class="detail-section"><h3>Coverage gap</h3><p class="coverage-note">${escapeHtml(flow.coverageNote)}</p></section>
+        `;
+      }
+
+      function renderFlowOverview() {
+        detailInspector.setAttribute('aria-label', 'Architecture Flow一覧');
+        inspectorKicker.textContent = 'Flow index';
+        inspectorHeader.style.setProperty('--node-color', '#f0bd45');
+        inspectorBody.style.setProperty('--node-color', '#f0bd45');
+        inspectorTitle.textContent = 'すべての関係';
+        nodeMeta.innerHTML = `<span class="meta-chip">${escapeHtml(architecture.flows.length)} flows</span><span class="meta-chip">${escapeHtml(architecture.nodes.length)} modules</span>`;
+        inspectorBody.innerHTML = `
+          <p class="description">仕様書から抽出したモジュールとData contractの全体像です。上の選択肢からFlowを選ぶと対象経路へ寄り、その下に段階別のservice blueprintが表示されます。</p>
+          <section class="detail-section"><h3>Map contents</h3><div class="contract-grid">
+            <div class="contract-row"><span>Modules</span><strong>${escapeHtml(architecture.nodes.length)} planned components</strong></div>
+            <div class="contract-row"><span>Contracts</span><strong>${escapeHtml(architecture.edges.length)} directed relationships</strong></div>
+            <div class="contract-row"><span>Flows</span><strong>${escapeHtml(architecture.flows.length)} executable views</strong></div>
+          </div></section>
+          <section class="detail-section"><h3>How to explore</h3><p class="coverage-note">ノードをクリックするとNode inspectorへ切り替わります。Flowの内容へ戻るときは、上のFlow選択肢をもう一度選んでください。</p></section>
+        `;
+      }
+
+      function flowEdges(flow) {
+        const ids = new Set(flow?.edgeIds || []);
+        if (!flow) return ids;
+        for (let index = 0; index < flow.nodePath.length - 1; index += 1) {
+          const source = flow.nodePath[index];
+          const target = flow.nodePath[index + 1];
+          architecture.edges
+            .filter((edge) => edge.source === source && edge.target === target)
+            .forEach((edge) => ids.add(edge.id));
+        }
+        return ids;
+      }
+
+      function updateGraphState() {
+        if (!cy) return;
+        cy.batch(() => {
+          cy.elements().removeClass('dimmed flow related search-match');
+
+          if (selectedFlowId !== 'all') {
+            const flow = architecture.flows.find((item) => item.id === selectedFlowId);
+            const nodeIds = new Set(flow?.nodeIds || flow?.nodePath || []);
+            const edgeIds = flowEdges(flow);
+            cy.nodes().forEach((element) => {
+              if (nodeIds.has(element.id())) element.addClass('flow');
+              else element.removeClass('flow');
+            });
+            cy.edges().forEach((element) => {
+              if (edgeIds.has(element.id())) element.addClass('flow');
+              else element.removeClass('flow');
+            });
+            cy.elements().forEach((element) => {
+              const onFlow = element.isNode() ? nodeIds.has(element.id()) : edgeIds.has(element.id());
+              if (!onFlow) element.addClass('dimmed');
+            });
+          }
+
+          if (searchQuery) {
+            const matchedIds = new Set(
+              architecture.nodes
+                .filter((node) => JSON.stringify(node).toLowerCase().includes(searchQuery))
+                .map((node) => node.id)
+            );
+            cy.nodes().forEach((element) => {
+              if (matchedIds.has(element.id())) element.addClass('search-match');
+              else element.addClass('dimmed');
+            });
+            cy.edges().forEach((edge) => {
+              if (!matchedIds.has(edge.source().id()) && !matchedIds.has(edge.target().id())) edge.addClass('dimmed');
+            });
+          }
+
+          if (selectedNodeId) {
+            const selected = cy.getElementById(selectedNodeId);
+            if (selected.nonempty()) {
+              selected.addClass('related');
+              selected.connectedEdges().addClass('related');
+              selected.neighborhood('node').addClass('related');
+            }
+          }
+        });
+      }
+
+      function focusCurrentFlow() {
+        if (!cy) return;
+        cy.resize();
+        const focusNodes = selectedFlowId === 'all' ? cy.nodes() : cy.nodes('.flow');
+        const target = focusNodes.nonempty() ? focusNodes : cy.elements();
+        const compact = window.innerWidth <= 860;
+        cy.fit(target, compact ? 34 : 72);
+        cy.zoom(cy.zoom() * (compact ? 1.02 : 1.06));
+        cy.center(target);
+        cy.panBy({ x: 0, y: compact ? 48 : 64 });
+      }
+
+      function selectFlow(flowId, options = {}) {
+        if (!cy || (flowId !== 'all' && !flowById(flowId))) return;
+        selectedFlowId = flowId;
+        selectedNodeId = '';
+        cy.$(':selected').unselect();
+        updateGraphState();
+        renderFlowNav();
+        if (flowId === 'all') renderFlowOverview();
+        else renderFlowInspector(flowById(flowId));
+        if (options.updateHash !== false) {
+          history.replaceState(null, '', `#flow=${encodeURIComponent(flowId)}`);
+        }
+        if (options.focus !== false) focusCurrentFlow();
+        if (options.scroll !== false) requestAnimationFrame(() => scrollInspectorTo(flowId));
+      }
+
+      function selectNode(nodeId, options = {}) {
+        const node = nodeById(nodeId);
+        if (!node || !cy) return;
+        const currentFlow = selectedFlowId === 'all' ? null : flowById(selectedFlowId);
+        if (currentFlow && !currentFlow.nodeIds.includes(nodeId)) {
+          selectedFlowId = 'all';
+        }
+        selectedNodeId = nodeId;
+        cy.$(':selected').unselect();
+        const element = cy.getElementById(nodeId);
+        element.select();
+        renderFlowNav();
+        renderInspector(node);
+        updateGraphState();
+        const nextHash = `#flow=${encodeURIComponent(selectedFlowId)}&node=${encodeURIComponent(nodeId)}`;
+        history.replaceState(null, '', nextHash);
+        if (options.center !== false) {
+          cy.animate({ center: { eles: element }, duration: animationDuration });
+        }
+        if (options.scroll !== false) requestAnimationFrame(() => scrollInspectorTo('node'));
+      }
+
+      function initializeGraph() {
+        const categoryStyles = architecture.categories.map((category) => ({
+          selector: `node[category = "${category.id}"]`,
+          style: { 'border-color': category.color }
+        }));
+
+        const elements = [
+          ...architecture.nodes.map((node) => ({
+            group: 'nodes',
+            data: { id: node.id, label: node.label, category: node.category, phase: node.phase, status: node.status },
+            position: node.position
+          })),
+          ...architecture.edges.map((edge) => ({
+            group: 'edges',
+            data: { id: edge.id, source: edge.source, target: edge.target, label: edge.label, contract: edge.contract },
+            classes: [edge.primary ? 'primary' : '', edge.cycle ? 'cycle' : ''].filter(Boolean).join(' ')
+          }))
+        ];
+
+        cy = cytoscape({
+          container: document.getElementById('cy'),
+          elements,
+          layout: { name: 'preset', fit: true, padding: 88 },
+          minZoom: 0.12,
+          maxZoom: 2.4,
+          boxSelectionEnabled: false,
+          autoungrabify: true,
+          style: [
+            {
+              selector: 'node',
+              style: {
+                'shape': 'roundrectangle',
+                'width': 118,
+                'height': 34,
+                'padding': '11px',
+                'background-color': '#151720',
+                'border-width': 1.4,
+                'border-color': '#5b6070',
+                'label': 'data(label)',
+                'color': '#dedfe5',
+                'font-size': 11,
+                'font-weight': 500,
+                'text-wrap': 'wrap',
+                'text-max-width': 150,
+                'text-valign': 'center',
+                'text-halign': 'center',
+                'overlay-opacity': 0,
+                'transition-property': 'opacity, background-color, border-width, border-color, color',
+                'transition-duration': '180ms'
+              }
+            },
+            ...categoryStyles,
+            {
+              selector: 'edge',
+              style: {
+                'curve-style': 'bezier',
+                'width': 1,
+                'line-color': '#3a3d49',
+                'target-arrow-color': '#525665',
+                'target-arrow-shape': 'triangle',
+                'arrow-scale': 0.72,
+                'label': 'data(label)',
+                'font-size': 8,
+                'color': '#737783',
+                'text-background-color': '#090a0f',
+                'text-background-opacity': 0.78,
+                'text-background-padding': 3,
+                'text-rotation': 'autorotate',
+                'text-margin-y': -5,
+                'overlay-opacity': 0,
+                'transition-property': 'opacity, line-color, target-arrow-color, width, color',
+                'transition-duration': '180ms'
+              }
+            },
+            {
+              selector: 'edge.primary',
+              style: { 'line-color': '#8b722f', 'target-arrow-color': '#b28d32' }
+            },
+            {
+              selector: 'edge.cycle',
+              style: { 'curve-style': 'unbundled-bezier', 'control-point-distances': -80, 'control-point-weights': 0.5 }
+            },
+            {
+              selector: 'node.dimmed',
+              style: { 'opacity': 0.075 }
+            },
+            {
+              selector: 'edge.dimmed',
+              style: { 'opacity': 0.035 }
+            },
+            {
+              selector: 'node.flow',
+              style: { 'opacity': 1, 'background-color': '#191b22' }
+            },
+            {
+              selector: 'edge.flow',
+              style: { 'opacity': 1, 'width': 2, 'line-color': '#d6aa3f', 'target-arrow-color': '#f0bd45', 'color': '#c9a845' }
+            },
+            {
+              selector: '.related',
+              style: { 'opacity': 1 }
+            },
+            {
+              selector: 'edge.related',
+              style: { 'width': 2.4, 'line-color': '#e8b943', 'target-arrow-color': '#ffd366', 'color': '#e0ba57' }
+            },
+            {
+              selector: 'node.search-match',
+              style: { 'opacity': 1, 'border-width': 2.6, 'background-color': '#1d1f28' }
+            },
+            {
+              selector: 'node:selected',
+              style: { 'opacity': 1, 'border-width': 3, 'border-color': '#f0bd45', 'background-color': '#242116', 'color': '#fff3d0' }
+            }
+          ]
+        });
+        cy.on('tap', 'node', (event) => selectNode(event.target.id(), { center: false }));
+        cy.on('tap', (event) => {
+          if (event.target === cy) {
+            selectedNodeId = '';
+            cy.$(':selected').unselect();
+            updateGraphState();
+            if (selectedFlowId === 'all') renderFlowOverview();
+            else renderFlowInspector(flowById(selectedFlowId));
+          }
+        });
+
+        if (selectedNodeId && nodeById(selectedNodeId)) {
+          selectNode(selectedNodeId, { center: false, scroll: false });
+        } else {
+          selectFlow(selectedFlowId, { focus: false, updateHash: false, scroll: false });
+        }
+        requestAnimationFrame(focusCurrentFlow);
+      }
+
+      flowNav.addEventListener('click', (event) => {
+        const button = event.target.closest('[data-flow-id]');
+        if (button) selectFlow(button.dataset.flowId);
+      });
+      fitButton.addEventListener('click', focusCurrentFlow);
+      nodeSearch.addEventListener('input', () => {
+        searchQuery = nodeSearch.value.trim().toLowerCase();
+        updateGraphState();
+      });
+      nodeSearch.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter' || !searchQuery) return;
+        const exactMatch = architecture.nodes.find((node) => node.label.toLowerCase() === searchQuery || node.id === searchQuery);
+        const prefixMatch = architecture.nodes.find((node) => node.label.toLowerCase().startsWith(searchQuery));
+        const match = exactMatch || prefixMatch || architecture.nodes.find((node) => JSON.stringify(node).toLowerCase().includes(searchQuery));
+        if (match) selectNode(match.id);
+      });
+      inspectorBody.addEventListener('click', (event) => {
+        const button = event.target.closest('[data-node-id]');
+        if (button) selectNode(button.dataset.nodeId);
+      });
+      window.addEventListener('resize', () => {
+        window.clearTimeout(resizeTimer);
+        resizeTimer = window.setTimeout(focusCurrentFlow, 90);
+      });
+
+      fetch('architecture-map.json')
+        .then((response) => {
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          return response.json();
+        })
+        .then((data) => {
+          architecture = data;
+          const requestedFlowMatch = location.hash.match(/flow=([^&]+)/);
+          const requestedNodeMatch = location.hash.match(/node=([^&]+)/);
+          const requestedFlow = requestedFlowMatch ? decodeURIComponent(requestedFlowMatch[1]) : selectedFlowId;
+          selectedFlowId = requestedFlow === 'all' || flowById(requestedFlow) ? requestedFlow : 'decision-cycle';
+          selectedNodeId = requestedNodeMatch ? decodeURIComponent(requestedNodeMatch[1]) : '';
+          if (!nodeById(selectedNodeId)) selectedNodeId = '';
+          topMeta.textContent = `${architecture.nodes.length} planned modules · ${architecture.edges.length} contracts · ${architecture.phases.length} phases`;
+          renderLegend();
+          initializeGraph();
+          loading.classList.add('is-hidden');
+        })
+        .catch((error) => {
+          loading.innerHTML = `<div><strong>マップデータを読み込めませんでした</strong><span><code>python -m http.server 4173</code> をこのディレクトリで実行し、<code>http://localhost:4173/architecture-map.html</code> を開いてください。</span><span class="sr-only">${escapeHtml(error.message)}</span></div>`;
+        });
+    })();
+  </script>
+</body>
+</html>
