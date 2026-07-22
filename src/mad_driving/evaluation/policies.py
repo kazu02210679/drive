@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from math import cos, isclose, sin
 from numbers import Integral
@@ -23,6 +24,7 @@ _KEEP: Final = 0
 _SLOW: Final = 1
 _PREPARE_STOP: Final = 2
 _STOP: Final = 3
+_SHA256_PATTERN: Final = re.compile(r"[0-9a-f]{64}\Z")
 
 
 class EvaluationPolicy(Protocol):
@@ -123,6 +125,7 @@ class PpoPolicyAdapter:
         resolved_config: Mapping[str, object],
         checkpoint_metadata: Mapping[str, object],
     ) -> None:
+        validate_ppo_checkpoint_identity(checkpoint_path, checkpoint_sha256)
         self._model = model
         self.method_id = method_id
         self.checkpoint_path = checkpoint_path
@@ -193,4 +196,21 @@ class PpoPolicyAdapter:
             raise ValueError("resolved config method does not match PPO adapter")
 
 
-__all__ = ["EvaluationPolicy", "PpoPolicyAdapter", "VisibleTtcRulePolicy"]
+def validate_ppo_checkpoint_identity(checkpoint_path: object, checkpoint_sha256: object) -> None:
+    """Validate the immutable filesystem path and lowercase SHA-256 binding."""
+
+    if not isinstance(checkpoint_path, str) or not checkpoint_path.strip():
+        raise ValueError("checkpoint path must be a non-empty string")
+    if (
+        not isinstance(checkpoint_sha256, str)
+        or _SHA256_PATTERN.fullmatch(checkpoint_sha256) is None
+    ):
+        raise ValueError("checkpoint SHA-256 must be 64 lowercase hexadecimal characters")
+
+
+__all__ = [
+    "EvaluationPolicy",
+    "PpoPolicyAdapter",
+    "VisibleTtcRulePolicy",
+    "validate_ppo_checkpoint_identity",
+]

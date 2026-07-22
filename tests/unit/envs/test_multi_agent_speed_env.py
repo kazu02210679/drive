@@ -15,7 +15,7 @@ from mad_driving.agents.critic import CriticAgent
 from mad_driving.agents.nominal import NominalMotionAgent
 from mad_driving.agents.noop_critic import NoOpCritic
 from mad_driving.agents.suite import AgentAnalysisResult, AgentSuite
-from mad_driving.config.models import AppConfig, ControlConfig
+from mad_driving.config.models import AppConfig, ControlConfig, ShieldConfig
 from mad_driving.control import DrivingAction
 from mad_driving.envs import MultiAgentSpeedEnv
 from mad_driving.envs.reward import RewardContext, RewardResult
@@ -2017,6 +2017,39 @@ def test_training_environment_rejects_evaluation_schedule_installation() -> None
         harness.env.set_evaluation_scenario_schedule(("lead_brake",))
 
     assert factory.schedules == []
+
+
+@pytest.mark.parametrize("mode", ["monitor", "enforce", "off"])
+@pytest.mark.parametrize("role", ["validation", "test"])
+def test_evaluation_shield_mode_is_used_to_construct_the_next_episode(mode: str, role: str) -> None:
+    shield_configs: list[ShieldConfig] = []
+
+    def shield_factory(shield_config: ShieldConfig) -> RecordingShield:
+        shield_configs.append(shield_config)
+        return RecordingShield()
+
+    harness = make_env(role=role, shield_factory=shield_factory)
+
+    harness.env.set_evaluation_shield_mode(mode)  # type: ignore[arg-type]
+    harness.env.reset(seed=10_001 if role == "validation" else 20_001)
+
+    assert [value.mode for value in shield_configs] == [mode]
+    assert harness.env.observation_space.shape == (24,)
+
+
+def test_training_environment_rejects_evaluation_shield_mode_installation() -> None:
+    harness = make_env(role="train")
+
+    with pytest.raises(ValueError, match="validation.*test"):
+        harness.env.set_evaluation_shield_mode("monitor")
+
+
+def test_active_evaluation_episode_rejects_shield_mode_mutation() -> None:
+    harness = make_env(role="test")
+    harness.env.reset(seed=20_001)
+
+    with pytest.raises(RuntimeError, match="active"):
+        harness.env.set_evaluation_shield_mode("off")
 
 
 def test_evaluation_scene_read_requires_active_episode_and_returns_current_visible_view() -> None:

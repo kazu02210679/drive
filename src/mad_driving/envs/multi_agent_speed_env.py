@@ -8,7 +8,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from math import isclose, isfinite
 from numbers import Integral, Real
-from typing import Any, Protocol, cast
+from typing import Any, Literal, Protocol, cast
 
 import gymnasium as gym
 import numpy as np
@@ -317,6 +317,20 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
         if not callable(setter):
             raise RuntimeError("scenario runtime factory does not support scenario schedules")
         setter(scenario_ids)
+
+    def set_evaluation_shield_mode(self, mode: Literal["off", "monitor", "enforce"]) -> None:
+        """Install the evaluation-only Shield mode used on the next reset."""
+
+        if self._role not in {"validation", "test"}:
+            raise ValueError(
+                "Shield modes may be installed only on validation and test environments"
+            )
+        self._require_resettable()
+        if self._episode_active:
+            raise RuntimeError("Shield mode cannot change during an active episode")
+        if mode not in {"off", "monitor", "enforce"}:
+            raise ValueError("Shield mode must be off, monitor, or enforce")
+        self._shield_config = self._shield_config.model_copy(update={"mode": mode})
 
     def current_scene_observation_for_evaluation(self) -> SceneObservation:
         """Return the active immutable Agent-visible scene and no privileged state."""

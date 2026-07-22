@@ -18,14 +18,17 @@ from mad_driving.evaluation.models import (
     EVALUATION_CASES,
     RECORD_SCHEMA_VERSION,
     RESEARCH_CONTRACT_VERSION,
+    EvaluationCase,
     EvaluationEpisodeRecord,
     EvaluationRunSpec,
     EvaluationStepRecord,
+    ShieldMode,
 )
 from mad_driving.evaluation.policies import (
     EvaluationPolicy,
     PpoPolicyAdapter,
     VisibleTtcRulePolicy,
+    validate_ppo_checkpoint_identity,
 )
 from mad_driving.evaluation.serialization import read_jsonl_strict, write_jsonl_strict
 from mad_driving.evaluation.workspace import EvaluationWorkspace
@@ -40,6 +43,8 @@ class EvaluationEnvironment(Protocol):
     def set_difficulty_level(self, level: int) -> None: ...
 
     def set_evaluation_scenario_schedule(self, scenario_ids: tuple[str, ...]) -> None: ...
+
+    def set_evaluation_shield_mode(self, mode: ShieldMode) -> None: ...
 
     def reset(
         self, *, seed: int | None = None, options: dict[str, Any] | None = None
@@ -85,6 +90,7 @@ def run_evaluation_episode(
         workspace = EvaluationWorkspace.stage(destination)
         environment.set_difficulty_level(case.difficulty_level)
         environment.set_evaluation_scenario_schedule((case.scenario_id,))
+        environment.set_evaluation_shield_mode(spec.shield_mode)
         policy.reset()
         ppo_observation, reset_info = environment.reset(
             seed=spec.test_seed,
@@ -113,6 +119,8 @@ def run_evaluation_episode(
                 record = _build_step_record(
                     spec=spec,
                     profile=profile,
+                    case=case,
+                    expected_seeds=expected_seeds,
                     checkpoint_sha256=checkpoint_sha256,
                     step_index=step_index,
                     visible_scene=visible_scene,
@@ -146,6 +154,7 @@ def run_evaluation_episode(
             steps=persisted_steps,
         )
         write_jsonl_strict(workspace.path / "episode.jsonl", (episode.to_dict(),))
+        workspace.write_manifest()
         result = EvaluationRunResult(persisted_steps, episode)
     except BaseException as error:
         primary_error = error
@@ -171,6 +180,7 @@ def _validate_run_binding(
     config: AppConfig,
     checkpoint_sha256: str | None,
 ) -> MethodProfileSnapshot:
+    _validate_spec_shield_mode(spec)
     if config.method.id != spec.method_id:
         raise ValueError("evaluation config method does not match the run specification")
     profile = MethodProfileSnapshot.from_method_id(spec.method_id)
@@ -182,6 +192,8 @@ def _validate_run_binding(
     else:
         if not isinstance(policy, PpoPolicyAdapter):
             raise ValueError("PPO run requires PpoPolicyAdapter")
+        validate_ppo_checkpoint_identity(spec.checkpoint_path, checkpoint_sha256)
+        validate_ppo_checkpoint_identity(policy.checkpoint_path, policy.checkpoint_sha256)
         if (
             policy.method_profile != profile
             or policy.checkpoint_path != spec.checkpoint_path
@@ -195,6 +207,32 @@ def _validate_run_binding(
     return profile
 
 
+def _validate_spec_shield_mode(spec: EvaluationRunSpec) -> None:
+    methods_by_track = {
+        "decision": frozenset({"b1_nominal", "b2_multi_no_review", "proposed"}),
+        "system": frozenset({"b0_rule", "b1_nominal", "b2_multi_no_review", "proposed"}),
+        "ablation": frozenset(
+            {
+                "proposed",
+                "proposed_no_critic",
+                "proposed_no_shield",
+                "proposed_no_hazard",
+            }
+        ),
+    }
+    if spec.method_id not in methods_by_track[spec.track]:
+        raise ValueError("evaluation track and method are outside the fixed plan matrix")
+    expected: ShieldMode = (
+        "monitor"
+        if spec.track == "decision"
+        else "off"
+        if spec.track == "ablation" and spec.method_id == "proposed_no_shield"
+        else "enforce"
+    )
+    if spec.shield_mode != expected:
+        raise ValueError("evaluation shield mode does not match the fixed plan matrix")
+
+
 def _verify_reset_identity(
     info: Mapping[str, object],
     scenario_id: str,
@@ -202,6 +240,7 @@ def _verify_reset_identity(
     seeds: EpisodeSeeds,
 ) -> None:
     expected: dict[str, object] = {
+        "role": "test",
         "scenario_id": scenario_id,
         "difficulty_level": difficulty_level,
         "episode_rng_seed": seeds.episode_rng_seed,
@@ -218,6 +257,8 @@ def _build_step_record(
     *,
     spec: EvaluationRunSpec,
     profile: MethodProfileSnapshot,
+    case: EvaluationCase,
+    expected_seeds: EpisodeSeeds,
     checkpoint_sha256: str | None,
     step_index: int,
     visible_scene: SceneObservation,
@@ -231,6 +272,7 @@ def _build_step_record(
     trace = info.get("decision_trace")
     if not isinstance(trace, DecisionTrace):
         raise ValueError("evaluation step info requires a DecisionTrace")
+    _verify_step_identity(info, trace, case, expected_seeds)
     total_latency_ms = max(
         total_latency_ms,
         policy_latency_ms,
@@ -295,6 +337,28 @@ def _build_step_record(
         total_decision_latency_ms=total_latency_ms,
         frame_path=cast(str | None, info.get("frame_path")),
     )
+
+
+def _verify_step_identity(
+    info: Mapping[str, object],
+    trace: DecisionTrace,
+    case: EvaluationCase,
+    seeds: EpisodeSeeds,
+) -> None:
+    expected: dict[str, object] = {
+        "role": "test",
+        "episode_rng_seed": seeds.episode_rng_seed,
+        "metadrive_scenario_index": seeds.metadrive_scenario_index,
+        "scenario_selection_seed": seeds.scenario_selection_seed,
+        "scenario_parameter_seed": seeds.scenario_parameter_seed,
+        "scenario_id": case.scenario_id,
+        "difficulty_level": case.difficulty_level,
+    }
+    for field, value in expected.items():
+        if info.get(field) != value:
+            raise RuntimeError(f"evaluation step info {field} mismatch")
+        if getattr(trace, field) != value:
+            raise RuntimeError(f"evaluation step DecisionTrace {field} mismatch")
 
 
 def _build_episode_record(

@@ -141,13 +141,15 @@ def make_ppo_adapter(
     model: FakeModel | None = None,
     *,
     checkpoint_metadata: dict[str, Any] | None = None,
+    checkpoint_path: str = "runs/proposed/checkpoints/final.zip",
+    checkpoint_sha256: str = "a" * 64,
 ) -> PpoPolicyAdapter:
     values = metadata() if checkpoint_metadata is None else checkpoint_metadata
     return PpoPolicyAdapter(
         model or FakeModel(),
         method_id="proposed",
-        checkpoint_path="runs/proposed/checkpoints/final.zip",
-        checkpoint_sha256="a" * 64,
+        checkpoint_path=checkpoint_path,
+        checkpoint_sha256=checkpoint_sha256,
         resolved_config={"method": {"id": "proposed"}, "seed": 42},
         checkpoint_metadata=values,
     )
@@ -194,3 +196,28 @@ def test_ppo_rejects_checkpoint_contract_mismatches(field: str, value: object) -
 
     with pytest.raises(ValueError, match="metadata|checkpoint|config|profile|schema"):
         make_ppo_adapter(checkpoint_metadata=changed)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("checkpoint_path", ""),
+        ("checkpoint_path", "   "),
+        ("checkpoint_sha256", ""),
+        ("checkpoint_sha256", "A" * 64),
+        ("checkpoint_sha256", "g" * 64),
+        ("checkpoint_sha256", "a" * 63),
+    ],
+)
+def test_ppo_rejects_malformed_checkpoint_identity_before_prediction(
+    field: str, value: str
+) -> None:
+    model = FakeModel()
+    changed = metadata()
+    changed[field] = value
+    arguments = {field: value}
+
+    with pytest.raises(ValueError, match="checkpoint"):
+        make_ppo_adapter(model, checkpoint_metadata=changed, **arguments)
+
+    assert model.calls == []
