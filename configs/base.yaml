@@ -28,6 +28,7 @@ scenarios:
   curriculum:
     mode: fixed
     fixed_level: 0
+    maximum_unnecessary_stop_duration_s: 1.0
   lead_brake:
     initial_gap_m: {minimum: 35.0, maximum: 55.0}
     speed_fraction: {minimum: 0.80, maximum: 1.00}

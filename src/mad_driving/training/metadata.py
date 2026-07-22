@@ -31,13 +31,13 @@ from mad_driving.training.curriculum import (
     read_stable_artifact_bytes,
 )
 
-RESEARCH_CONTRACT_VERSION: Final = 5
+RESEARCH_CONTRACT_VERSION: Final = 6
 OBSERVATION_SCHEMA_VERSION: Final = 1
 OBSERVATION_SHAPE: Final = (24,)
 OBSERVATION_DTYPE: Final = "float32"
 ACTION_SCHEMA_VERSION: Final = 1
 ACTION_ORDER: Final = ("KEEP", "SLOW", "PREPARE_STOP", "STOP")
-EPISODE_SEED_ARTIFACT_SCHEMA_VERSION: Final = 3
+EPISODE_SEED_ARTIFACT_SCHEMA_VERSION: Final = 4
 _ALLOWED_CONFIG_DIFFS: Final = frozenset(
     {
         "training.checkpoint_interval_steps",

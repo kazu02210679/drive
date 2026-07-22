@@ -104,7 +104,7 @@ def reset_crossing(
         crossing_config(), ScenarioParameterSampler(7), difficulty_level=3
     )
     environment = FakeEnvironment()
-    state = runtime.reset(environment, seeds=EpisodeSeeds(1, 2, 3))
+    state = runtime.reset(environment, seeds=EpisodeSeeds(1, 2, 3, 4))
     state = runtime.after_simulator_reset(environment, state)
     environment.actor_states["crossing-cyclist"] = replace(
         environment.actor_states["crossing-cyclist"],
@@ -231,7 +231,7 @@ def test_crossing_rejects_an_unexpected_spawn_identity() -> None:
     )
     environment = FakeEnvironment()
     environment.spawn_return_ids["crossing-cyclist"] = "wrong-id"
-    state = runtime.reset(environment, seeds=EpisodeSeeds(1, 2, 3))
+    state = runtime.reset(environment, seeds=EpisodeSeeds(1, 2, 3, 4))
 
     with pytest.raises(RuntimeError, match="unexpected ID"):
         runtime.after_simulator_reset(environment, state)

@@ -57,6 +57,7 @@ def make_seeds(**overrides: Any) -> EpisodeSeeds:
     values: dict[str, Any] = {
         "episode_rng_seed": 42,
         "metadrive_scenario_index": 7,
+        "scenario_selection_seed": 9,
         "scenario_parameter_seed": 11,
     }
     values.update(overrides)
@@ -215,6 +216,7 @@ def test_decision_trace_preserves_complete_phase5_episode_metadata() -> None:
     trace = make_trace(
         episode_rng_seed=42,
         metadrive_scenario_index=7,
+        scenario_selection_seed=9,
         scenario_parameter_seed=11,
         role="train",
         worker_index=0,

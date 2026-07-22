@@ -4,6 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from mad_driving.config.loader import load_config
+from mad_driving.config.models import AppConfig
 
 VALID_CONFIG = """\
 seed: 42
@@ -222,6 +223,34 @@ def test_metadrive_ranges_are_validated(tmp_path: Path, field: str, bad_value: f
 
     with pytest.raises(ValidationError, match=field):
         load_config(write_config(tmp_path, text))
+
+
+@pytest.mark.parametrize(
+    ("horizon", "scenario"),
+    [
+        (60, "lead_brake"),
+        (80, "cut_in"),
+        (100, "occluded_crossing"),
+    ],
+)
+def test_scenario_worst_case_duration_must_fit_metadrive_horizon(
+    horizon: int,
+    scenario: str,
+) -> None:
+    payload = load_config("configs/base.yaml").model_dump(mode="python")
+    payload["metadrive"]["horizon"] = horizon
+
+    with pytest.raises(ValidationError, match=scenario):
+        AppConfig.model_validate(payload)
+
+
+def test_scenario_worst_case_duration_accepts_the_exact_configured_capacity() -> None:
+    payload = load_config("configs/base.yaml").model_dump(mode="python")
+    payload["metadrive"]["horizon"] = 120
+
+    config = AppConfig.model_validate(payload)
+
+    assert config.metadrive.horizon == 120
 
 
 @pytest.mark.parametrize(

@@ -143,6 +143,7 @@ def build_frame(
         seeds=EpisodeSeeds(
             episode_rng_seed=42,
             metadrive_scenario_index=7,
+            scenario_selection_seed=9,
             scenario_parameter_seed=11,
         ),
         context=ScenarioObservationContext(
@@ -312,7 +313,7 @@ def test_builder_uses_scenario_context_only_for_observable_road_facts() -> None:
     frame = SceneSnapshotBuilder().build(
         make_env(),
         step_index=1,
-        seeds=EpisodeSeeds(42, 7, 11),
+        seeds=EpisodeSeeds(42, 7, 9, 11),
         context=ScenarioObservationContext(
             scenario_id="scenario_flags",
             stop_required=True,
@@ -329,7 +330,7 @@ def test_builder_uses_scenario_context_only_for_observable_road_facts() -> None:
     assert frame.observation.road_context.distance_to_conflict_point_m == 12.0
     assert frame.observation.road_context.intersection_entry_prohibited is True
     assert frame.scenario_id == "scenario_flags"
-    assert frame.seeds == EpisodeSeeds(42, 7, 11)
+    assert frame.seeds == EpisodeSeeds(42, 7, 9, 11)
     assert frame.privileged.collision_occurred is False
     assert frame.privileged.off_road is False
 

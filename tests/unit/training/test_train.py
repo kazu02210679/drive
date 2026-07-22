@@ -1232,7 +1232,7 @@ def test_fresh_run_writes_complete_research_contract_metadata(tmp_path: Path) ->
     for summary in summaries:
         artifact = run_dir / summary["path"]
         stat_result = os.stat(artifact, follow_symlinks=False)
-        assert summary["schema_version"] == 3
+        assert summary["schema_version"] == 4
         assert summary["file_identity"] == {
             "device": stat_result.st_dev,
             "inode": stat_result.st_ino,

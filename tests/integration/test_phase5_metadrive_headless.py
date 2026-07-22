@@ -88,11 +88,13 @@ def run_fixed_level_replay(level: int, episode_seed: int) -> bytes:
                     "scenario_success": info["scenario_success"],
                     "scenario_failure": info["scenario_failure"],
                     "collision_occurred": info["collision_occurred"],
+                    "route_progress": info["route_progress"],
+                    "unnecessary_stop_duration_s": info["unnecessary_stop_duration_s"],
                     "terminated": terminated,
                     "truncated": truncated,
                     "trace_metadata": {
                         "environment_seed": trace.episode_rng_seed,
-                        "scenario_selection_seed": trace.metadrive_scenario_index,
+                        "scenario_selection_seed": trace.scenario_selection_seed,
                         "scenario_parameter_seed": trace.scenario_parameter_seed,
                         "scenario_id": trace.scenario_id,
                         "difficulty_level": trace.difficulty_level,
@@ -152,6 +154,7 @@ def test_real_fixed_levels_select_only_allowed_scenarios_and_replay_byte_for_byt
     )
     assert all(item["trace_metadata"]["difficulty_level"] == level for item in trajectory)
     final = trajectory[-1]
+    assert final["unnecessary_stop_duration_s"] > 1.0
     assert (
         final["terminated"]
         or final["truncated"]
@@ -200,7 +203,7 @@ def run_prefix() -> tuple[np.ndarray, tuple[float, ...], tuple[float, ...]]:
         assert isinstance(trigger_step, int)
         rewards = []
         braking_speeds = []
-        for step_index in range(1, trigger_step + 4):
+        for step_index in range(1, trigger_step + 8):
             observation, reward, terminated, truncated, _ = environment.step(0)
             assert np.isfinite(observation).all()
             assert math.isfinite(reward)
@@ -208,7 +211,7 @@ def run_prefix() -> tuple[np.ndarray, tuple[float, ...], tuple[float, ...]]:
             assert not (terminated or truncated)
             if step_index >= trigger_step:
                 braking_speeds.append(manager.actor_state("lead-brake").velocity_xy_mps[0])
-        assert len(braking_speeds) >= 4
+        assert len(braking_speeds) >= 8
         assert sum(later < earlier for earlier, later in pairwise(braking_speeds)) >= 2
         return observation.copy(), tuple(rewards), tuple(braking_speeds)
     finally:
@@ -364,6 +367,44 @@ def test_real_cut_in_is_deterministic_merges_and_cleans_up() -> None:
         environment.reset(seed=43)
 
         assert previous_actor not in manager.engine.get_objects().values()
+    finally:
+        environment.close()
+
+
+@pytest.mark.integration
+def test_real_cut_in_is_predicted_before_entering_the_ego_lane() -> None:
+    config = load_config("configs/base.yaml", "configs/scenarios/cut_in.yaml")
+    environment = MultiAgentSpeedEnv(config, role="train", worker_index=0)
+    try:
+        _observation, info = environment.reset(seed=42)
+        trigger_step = info["scenario_parameters"]["trigger_step"]
+        merge_steps = info["scenario_parameters"]["merge_steps"]
+        assert isinstance(trigger_step, int)
+        assert isinstance(merge_steps, int)
+
+        predicted_during_merge = False
+        for _ in range(trigger_step + merge_steps):
+            _observation, _reward, terminated, truncated, _info = environment.step(3)
+            assert not (terminated or truncated)
+            frame = environment._frame
+            assert frame is not None
+            cut_in = next(
+                actor for actor in frame.observation.visible_actors if actor.actor_id == "cut-in"
+            )
+            if cut_in.same_lane:
+                continue
+            lateral_velocity_mps = project_vector(
+                cut_in.velocity_xy_mps, frame.observation.ego.heading_rad
+            )[1]
+            if abs(lateral_velocity_mps) <= 1e-6:
+                continue
+            assert cut_in.relative_lateral_m * lateral_velocity_mps < 0.0
+            nominal_claims = NominalMotionAgent(config.agents.nominal).analyze(frame.observation)
+            if any(claim.event_type == "nominal_cut_in" for claim in nominal_claims):
+                predicted_during_merge = True
+                break
+
+        assert predicted_during_merge is True
     finally:
         environment.close()
 

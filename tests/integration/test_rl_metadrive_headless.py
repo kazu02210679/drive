@@ -98,14 +98,14 @@ def assert_phase5_training_artifacts(
 ) -> None:
     assert read_curriculum_state(run_dir / "curriculum_state.yaml") == expected_state
     metadata = json.loads((run_dir / "run_metadata.json").read_text(encoding="utf-8"))
-    assert metadata["research_contract_version"] == RESEARCH_CONTRACT_VERSION == 5
+    assert metadata["research_contract_version"] == RESEARCH_CONTRACT_VERSION == 6
     assert metadata["observation_shape"] == [24]
     assert metadata["action_order"] == ["KEEP", "SLOW", "PREPARE_STOP", "STOP"]
     assert metadata["curriculum_state"]["level"] == expected_state.level
     assert metadata["curriculum_state"]["evaluations"] == expected_state.evaluations
     assert metadata["episode_seed_artifacts"]
     for summary in metadata["episode_seed_artifacts"]:
-        assert summary["schema_version"] == 3
+        assert summary["schema_version"] == 4
         artifact = run_dir / summary["path"]
         records = [
             json.loads(line) for line in artifact.read_text(encoding="utf-8").splitlines()[1:]
@@ -330,7 +330,9 @@ def test_real_single_metadrive_training_uses_isolated_subprocess_validation(
         "configs/base.yaml",
         "configs/scenarios/lead_brake.yaml",
     ).model_dump(mode="python")
-    payload["metadrive"]["horizon"] = 8
+    payload["metadrive"]["horizon"] = 120
+    payload["scenarios"]["lead_brake"]["trigger_s"] = {"minimum": 0.1, "maximum": 0.1}
+    payload["scenarios"]["lead_brake"]["survival_s"] = 0.1
     payload["training"].update(
         {
             "n_steps": 8,
@@ -378,7 +380,7 @@ def test_real_automatic_curriculum_advances_after_one_scheduled_validation(
 ) -> None:
     payload = load_config("configs/base.yaml").model_dump(mode="python")
     payload["scenario_id"] = "phase5"
-    payload["metadrive"]["horizon"] = 8
+    payload["metadrive"]["horizon"] = 120
     payload["scenarios"]["selection"] = "auto"
     payload["scenarios"]["curriculum"] = {
         "mode": "automatic",

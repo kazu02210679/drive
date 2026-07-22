@@ -53,7 +53,7 @@ def test_metadata_models_are_frozen_and_json_serializable(tmp_path: Path) -> Non
         curriculum_state=curriculum_summary(),
     )
 
-    assert metadata.research_contract_version == 5
+    assert metadata.research_contract_version == 6
     assert metadata.observation_schema_version == 1
     assert metadata.observation_shape == (24,)
     assert metadata.observation_dtype == "float32"
@@ -294,7 +294,7 @@ def test_metadata_writer_rejects_non_finite_nested_value_without_destination(
     assert list(tmp_path.iterdir()) == []
 
 
-def test_contract_5_metadata_without_seed_artifacts_remains_loadable(tmp_path: Path) -> None:
+def test_contract_6_metadata_without_seed_artifacts_remains_loadable(tmp_path: Path) -> None:
     destination = tmp_path / "run_metadata.json"
     metadata_module.write_run_metadata(
         RunMetadata(
@@ -309,7 +309,7 @@ def test_contract_5_metadata_without_seed_artifacts_remains_loadable(tmp_path: P
 
     loaded = metadata_module._load_run_metadata(destination)
 
-    assert loaded.research_contract_version == 5
+    assert loaded.research_contract_version == 6
     assert loaded.episode_seed_artifacts == ()
 
 
@@ -340,8 +340,8 @@ def test_run_metadata_json_rejects_duplicate_keys(tmp_path: Path) -> None:
     )
     text = destination.read_text(encoding="utf-8")
     text = text.replace(
-        '  "research_contract_version": 5,',
-        '  "research_contract_version": 5,\n  "research_contract_version": 5,',
+        '  "research_contract_version": 6,',
+        '  "research_contract_version": 6,\n  "research_contract_version": 6,',
         1,
     )
     destination.write_text(text, encoding="utf-8")

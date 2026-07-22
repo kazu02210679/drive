@@ -273,6 +273,7 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
         self._analysis: AgentAnalysisResult | None = None
         self._episode_seeds: EpisodeSeeds | None = None
         self._actual_scenario_index: int | None = None
+        self._unnecessary_stop_duration_s = 0.0
         self._episode_active = False
         self._gym_rng_initialized = False
         self._closed = False
@@ -285,6 +286,16 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
         if not callable(setter):
             raise RuntimeError("scenario runtime factory does not support difficulty levels")
         setter(level)
+
+    def set_validation_scenario_schedule(self, scenario_ids: tuple[str, ...]) -> None:
+        """Install an explicit reset schedule on the validation environment only."""
+
+        if self._role != "validation":
+            raise ValueError("scenario schedules may be installed only on validation environments")
+        setter = getattr(self._scenario_runtime_factory, "set_scenario_schedule", None)
+        if not callable(setter):
+            raise RuntimeError("scenario runtime factory does not support scenario schedules")
+        setter(scenario_ids)
 
     def reset(
         self,
@@ -458,6 +469,8 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
                 previous_shield_intervention=shield_result.intervened,
             )
             next_analysis = self._analyze(suite, next_frame.observation)
+            if self._is_unnecessary_stop(next_frame, executed, shield_result.intervened):
+                self._unnecessary_stop_duration_s += runtime_decision_interval_s
             reward_result = reward_calculator.calculate(
                 RewardContext(
                     previous_frame=frame,
@@ -505,6 +518,7 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
                 errors=analysis.errors,
                 episode_rng_seed=seeds.episode_rng_seed,
                 metadrive_scenario_index=actual_scenario_index,
+                scenario_selection_seed=seeds.scenario_selection_seed,
                 scenario_parameter_seed=seeds.scenario_parameter_seed,
                 role=self._role,
                 worker_index=self._worker_index,
@@ -527,6 +541,8 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
                     "analysis_errors": tuple(analysis.errors),
                     "reward_components": dict(reward_result.components),
                     "collision_occurred": privileged.collision_occurred,
+                    "route_progress": next_frame.observation.ego.route_progress,
+                    "unnecessary_stop_duration_s": self._unnecessary_stop_duration_s,
                     "control_fail_safe": control_fail_safe,
                     "control_fail_safe_reason": control_fail_safe_reason,
                     "decision_trace": trace,
@@ -605,6 +621,7 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
         self._analysis = None
         self._episode_seeds = None
         self._actual_scenario_index = None
+        self._unnecessary_stop_duration_s = 0.0
         self._episode_active = False
 
     def _require_resettable(self) -> None:
@@ -625,6 +642,27 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
             raise ValueError("action must be an integer from 0 through 3")
         return DrivingAction(value)
 
+    def _is_unnecessary_stop(
+        self,
+        frame: SceneFrame,
+        executed_action: DrivingAction,
+        shield_intervened: bool,
+    ) -> bool:
+        privileged = frame.privileged
+        minimum_ttc_s = privileged.minimum_actual_ttc_s
+        safe_ttc = (
+            minimum_ttc_s is None
+            or minimum_ttc_s >= self._config.reward.unnecessary_brake_safe_ttc_s
+        )
+        return (
+            executed_action == DrivingAction.STOP
+            and safe_ttc
+            and not privileged.hard_rule_constraint
+            and not privileged.collision_occurred
+            and not privileged.off_road
+            and not shield_intervened
+        )
+
     def _episode_metadata(
         self,
         seeds: EpisodeSeeds,
@@ -636,7 +674,7 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
             "simulator_seed": int(seeds.metadrive_scenario_index),
             "scenario_seed": int(seeds.scenario_parameter_seed),
             "metadrive_scenario_index": int(actual_scenario_index),
-            "scenario_selection_seed": int(actual_scenario_index),
+            "scenario_selection_seed": int(seeds.scenario_selection_seed),
             "scenario_parameter_seed": int(seeds.scenario_parameter_seed),
             "role": self._role,
             "worker_index": int(self._worker_index),

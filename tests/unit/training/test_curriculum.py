@@ -10,6 +10,7 @@ import yaml
 from mad_driving.config.models import CurriculumConfig
 from mad_driving.training.curriculum import (
     CurriculumController,
+    CurriculumEpisodeResult,
     CurriculumState,
     checkpoint_curriculum_sidecar_path,
     read_checkpoint_curriculum_state,
@@ -17,6 +18,26 @@ from mad_driving.training.curriculum import (
     write_checkpoint_curriculum_state,
     write_curriculum_state,
 )
+
+
+def episode_results(
+    *,
+    successes: int,
+    collisions: int,
+    episodes: int,
+    scenario_ids: tuple[str, ...] = ("nominal",),
+    unnecessary_stop_duration_s: float = 0.0,
+) -> tuple[CurriculumEpisodeResult, ...]:
+    return tuple(
+        CurriculumEpisodeResult(
+            scenario_id=scenario_ids[index % len(scenario_ids)],
+            success=index < successes,
+            collision=index < collisions,
+            route_progress=0.25,
+            unnecessary_stop_duration_s=unnecessary_stop_duration_s,
+        )
+        for index in range(episodes)
+    )
 
 
 def automatic_config(**overrides: Any) -> CurriculumConfig:
@@ -61,8 +82,10 @@ def test_curriculum_state_is_immutable_and_strictly_validated() -> None:
 def test_automatic_curriculum_advances_after_two_passing_validations() -> None:
     controller = CurriculumController(automatic_config(), CurriculumState(0, 0, 0))
 
-    first = controller.observe("validation", successes=4, collisions=0, episodes=5)
-    second = controller.observe("validation", successes=5, collisions=0, episodes=5)
+    first = controller.observe("validation", episode_results(successes=4, collisions=0, episodes=5))
+    second = controller.observe(
+        "validation", episode_results(successes=5, collisions=0, episodes=5)
+    )
 
     assert first == CurriculumState(level=0, consecutive_passes=1, evaluations=1)
     assert second == CurriculumState(level=1, consecutive_passes=0, evaluations=2)
@@ -72,8 +95,24 @@ def test_automatic_curriculum_advances_after_two_passing_validations() -> None:
 def test_automatic_curriculum_requires_both_thresholds_and_resets_failed_streak() -> None:
     controller = CurriculumController(automatic_config(), CurriculumState(1, 1, 4))
 
-    collision_failure = controller.observe("validation", successes=5, collisions=1, episodes=5)
-    success_failure = controller.observe("validation", successes=3, collisions=0, episodes=5)
+    collision_failure = controller.observe(
+        "validation",
+        episode_results(
+            successes=5,
+            collisions=1,
+            episodes=5,
+            scenario_ids=("lead_brake",),
+        ),
+    )
+    success_failure = controller.observe(
+        "validation",
+        episode_results(
+            successes=3,
+            collisions=0,
+            episodes=5,
+            scenario_ids=("lead_brake",),
+        ),
+    )
 
     assert collision_failure == CurriculumState(1, 0, 5)
     assert success_failure == CurriculumState(1, 0, 6)
@@ -82,8 +121,24 @@ def test_automatic_curriculum_requires_both_thresholds_and_resets_failed_streak(
 def test_automatic_curriculum_advances_exactly_one_level_and_never_regresses() -> None:
     controller = CurriculumController(automatic_config(), CurriculumState(1, 1, 7))
 
-    advanced = controller.observe("validation", successes=5, collisions=0, episodes=5)
-    failed = controller.observe("validation", successes=0, collisions=0, episodes=5)
+    advanced = controller.observe(
+        "validation",
+        episode_results(
+            successes=5,
+            collisions=0,
+            episodes=5,
+            scenario_ids=("lead_brake",),
+        ),
+    )
+    failed = controller.observe(
+        "validation",
+        episode_results(
+            successes=0,
+            collisions=0,
+            episodes=5,
+            scenario_ids=("lead_brake", "cut_in"),
+        ),
+    )
 
     assert advanced == CurriculumState(2, 0, 8)
     assert failed == CurriculumState(2, 0, 9)
@@ -92,7 +147,15 @@ def test_automatic_curriculum_advances_exactly_one_level_and_never_regresses() -
 def test_automatic_curriculum_caps_at_level_three() -> None:
     controller = CurriculumController(automatic_config(), CurriculumState(3, 1, 7))
 
-    state = controller.observe("validation", successes=5, collisions=0, episodes=5)
+    state = controller.observe(
+        "validation",
+        episode_results(
+            successes=5,
+            collisions=0,
+            episodes=5,
+            scenario_ids=("occluded_crossing",),
+        ),
+    )
 
     assert state.level == 3
     assert state.evaluations == 8
@@ -102,53 +165,124 @@ def test_test_role_cannot_drive_curriculum() -> None:
     controller = CurriculumController(automatic_config(), CurriculumState(0, 0, 0))
 
     with pytest.raises(ValueError, match="test role"):
-        controller.observe("test", successes=5, collisions=0, episodes=5)
+        controller.observe("test", episode_results(successes=5, collisions=0, episodes=5))
 
 
 def test_automatic_curriculum_rejects_training_observations() -> None:
     controller = CurriculumController(automatic_config(), CurriculumState(0, 0, 0))
 
     with pytest.raises(ValueError, match="validation"):
-        controller.observe("train", successes=5, collisions=0, episodes=5)
+        controller.observe("train", episode_results(successes=5, collisions=0, episodes=5))
+
+
+@pytest.mark.parametrize("results", [(), (object(),), "invalid"])
+def test_curriculum_observations_require_non_empty_typed_results(results: object) -> None:
+    controller = CurriculumController(automatic_config(), CurriculumState(0, 0, 0))
+
+    with pytest.raises((TypeError, ValueError), match="results"):
+        controller.observe("validation", results)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(
-    ("successes", "collisions", "episodes", "message"),
+    ("field", "value"),
     [
-        (True, 0, 5, "successes"),
-        (4.0, 0, 5, "successes"),
-        (-1, 0, 5, "successes"),
-        (6, 0, 5, "successes"),
-        (4, False, 5, "collisions"),
-        (4, 1.0, 5, "collisions"),
-        (4, -1, 5, "collisions"),
-        (4, 6, 5, "collisions"),
-        (4, 0, True, "episodes"),
-        (4, 0, 5.0, "episodes"),
-        (0, 0, 0, "episodes"),
+        ("scenario_id", ""),
+        ("success", 1),
+        ("collision", 0),
+        ("route_progress", -0.1),
+        ("route_progress", 1.1),
+        ("unnecessary_stop_duration_s", -0.1),
     ],
 )
-def test_curriculum_observations_require_bounded_integer_counts(
-    successes: object,
-    collisions: object,
-    episodes: object,
-    message: str,
-) -> None:
-    controller = CurriculumController(automatic_config(), CurriculumState(0, 0, 0))
+def test_curriculum_episode_result_is_strictly_validated(field: str, value: object) -> None:
+    values: dict[str, object] = {
+        "scenario_id": "nominal",
+        "success": True,
+        "collision": False,
+        "route_progress": 0.25,
+        "unnecessary_stop_duration_s": 0.0,
+    }
+    values[field] = value
 
-    with pytest.raises(ValueError, match=message):
-        controller.observe(  # type: ignore[arg-type]
-            "validation",
-            successes=successes,
-            collisions=collisions,
-            episodes=episodes,
-        )
+    with pytest.raises(ValueError, match=field):
+        CurriculumEpisodeResult(**values)  # type: ignore[arg-type]
+
+
+def test_automatic_curriculum_rejects_successful_episodes_that_stop_too_long() -> None:
+    controller = CurriculumController(
+        automatic_config(consecutive_evaluations=1, maximum_unnecessary_stop_duration_s=1.0),
+        CurriculumState(0, 0, 0),
+    )
+
+    state = controller.observe(
+        "validation",
+        episode_results(
+            successes=5,
+            collisions=0,
+            episodes=5,
+            unnecessary_stop_duration_s=1.1,
+        ),
+    )
+
+    assert state == CurriculumState(level=0, consecutive_passes=0, evaluations=1)
+
+
+def test_level_two_requires_each_scenario_to_meet_the_success_threshold() -> None:
+    controller = CurriculumController(
+        automatic_config(consecutive_evaluations=1),
+        CurriculumState(2, 0, 4),
+    )
+    results = (
+        *episode_results(
+            successes=4,
+            collisions=0,
+            episodes=4,
+            scenario_ids=("lead_brake",),
+        ),
+        *episode_results(
+            successes=0,
+            collisions=0,
+            episodes=1,
+            scenario_ids=("cut_in",),
+        ),
+    )
+
+    state = controller.observe("validation", results)
+
+    assert state == CurriculumState(level=2, consecutive_passes=0, evaluations=5)
+
+
+def test_level_two_cannot_advance_when_cut_in_was_not_evaluated() -> None:
+    controller = CurriculumController(
+        automatic_config(consecutive_evaluations=1),
+        CurriculumState(2, 0, 4),
+    )
+
+    state = controller.observe(
+        "validation",
+        episode_results(
+            successes=5,
+            collisions=0,
+            episodes=5,
+            scenario_ids=("lead_brake",),
+        ),
+    )
+
+    assert state == CurriculumState(level=2, consecutive_passes=0, evaluations=5)
 
 
 def test_fixed_curriculum_never_advances() -> None:
     controller = CurriculumController(fixed_config(level=2), CurriculumState(2, 0, 0))
 
-    state = controller.observe("validation", successes=5, collisions=0, episodes=5)
+    state = controller.observe(
+        "validation",
+        episode_results(
+            successes=5,
+            collisions=0,
+            episodes=5,
+            scenario_ids=("lead_brake", "cut_in"),
+        ),
+    )
 
     assert state == CurriculumState(level=2, consecutive_passes=0, evaluations=1)
 

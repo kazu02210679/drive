@@ -37,7 +37,7 @@ def run_smoke(
     final_frame: SceneFrame | None = None
     final_analysis: AgentAnalysisResult | None = None
     steps_completed = 0
-    seeds = EpisodeSeeds(config.seed, config.seed, config.seed)
+    seeds = EpisodeSeeds(config.seed, config.seed, config.seed, config.seed)
     runtime = NoOpScenarioRuntime(config.scenario_id)
 
     try:

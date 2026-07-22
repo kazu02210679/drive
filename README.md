@@ -56,24 +56,33 @@ scenarios:
     initial_level: 0
     success_rate_threshold: 0.80
     collision_rate_threshold: 0.05
+    maximum_unnecessary_stop_duration_s: 1.0
     consecutive_evaluations: 2
 ```
 
-Every actual reset is appended and `fsync`ed to a schema-v3 per-worker JSONL file.
+Every actual reset is appended and `fsync`ed to a schema-v4 per-worker JSONL file.
 Each record has exactly `role`, `worker_index`, `environment_seed`,
 `scenario_selection_seed`, `scenario_parameter_seed`, `scenario_id`,
 `difficulty_level`, and recursively finite JSON-safe `scenario_parameters`.
 `environment_seed` is the Gymnasium episode RNG identity;
-`scenario_selection_seed` is the role-bounded MetaDrive scenario index; and
-`scenario_parameter_seed` alone drives the Phase 5 scenario choice and parameter
-sampling. Train `[0, 10000)`, validation `[10000, 11000)`, and test
+`scenario_selection_seed` independently drives the Phase 5 scenario choice; and
+`scenario_parameter_seed` independently drives concrete parameter sampling. The
+MetaDrive road index is derived from a third independent child seed. Train
+`[0, 10000)`, validation `[10000, 11000)`, and test
 `[20000, 21000)` scenario identities remain disjoint. Test seeds are never used for
 training, validation, checkpoint selection, or curriculum progression.
+
+Automatic curriculum validation uses typed per-episode records. Safe STOP commands
+longer than `maximum_unnecessary_stop_duration_s` do not count as successful, and
+Level 2 validation alternates Lead Brake and Cut-in so each scenario must meet the
+success threshold independently. Best reward comparison resets at level changes and
+archives `best_model_level_<level>.zip`; Phase 6 performs final model selection on a
+fixed all-level validation suite.
 
 `curriculum_state.yaml` is atomically replaced with flush/`fsync` semantics. Every
 periodic, best, and final `*.zip` also has an adjacent `*.zip.curriculum.yaml`
 sidecar containing the exact curriculum state at that checkpoint's lifecycle point
-and the checkpoint SHA-256. Research contract v5 inventories both checkpoint and
+and the checkpoint SHA-256. Research contract v6 inventories both checkpoint and
 sidecar hashes in `run_metadata.json`. Resume resolves the sidecar bound to the
 selected checkpoint, reads and hashes one immutable byte snapshot, rejects path
 replacement races and malformed/duplicate-key data, and restores that exact state
@@ -205,7 +214,7 @@ a unique empty destination under `training.run_root`; if supplied, it must still
 absent or empty and is never overwritten. Resume authenticates one immutable checkpoint
 byte snapshot, restores the curriculum sidecar bound to that checkpoint, and records the
 parent checkpoint/config/diff/start step in the new run. Current runs use
-`research_contract_version=5` and `observation_schema_version=1`. Per-worker schema-v3
+`research_contract_version=6` and `observation_schema_version=1`. Per-worker schema-v4
 episode seed JSONL artifacts retain descriptor-bound identity, exact counts, and SHA-256
 digests in `run_metadata.json`.
 
@@ -216,7 +225,7 @@ digests in `run_metadata.json`.
 ```text
 <run-dir>/
 ├── config_resolved.yaml
-├── run_metadata.json              # research contract v5 and artifact digests
+├── run_metadata.json              # research contract v6 and artifact digests
 ├── curriculum_state.yaml          # final run curriculum state
 ├── episode_seeds/
 │   ├── train-worker-000.jsonl

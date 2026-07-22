@@ -70,7 +70,7 @@ def reset_lead_brake(
     )
     runtime = LeadBrakeRuntime(config, ScenarioParameterSampler(7), difficulty_level=1)
     environment = FakeEnvironment()
-    state = runtime.reset(environment, seeds=EpisodeSeeds(1, 2, 3))
+    state = runtime.reset(environment, seeds=EpisodeSeeds(1, 2, 3, 4))
     state = runtime.after_simulator_reset(environment, state)
     return runtime, environment, state
 
@@ -127,7 +127,7 @@ def test_lead_brake_does_not_succeed_when_ego_is_off_road() -> None:
 def test_nominal_does_not_succeed_when_ego_is_off_road() -> None:
     environment = FakeEnvironment()
     runtime = NominalScenarioRuntime(survival_s=4.0)
-    state = runtime.reset(environment, seeds=EpisodeSeeds(1, 2, 3))
+    state = runtime.reset(environment, seeds=EpisodeSeeds(1, 2, 3, 4))
     state = runtime.after_simulator_reset(environment, state)
 
     transition = runtime.after_step(
@@ -171,7 +171,7 @@ def test_nominal_does_not_succeed_or_fail_after_a_physical_collision() -> None:
     runtime = NominalScenarioRuntime(survival_s=4.0)
     state = runtime.after_simulator_reset(
         environment,
-        runtime.reset(environment, seeds=EpisodeSeeds(1, 2, 3)),
+        runtime.reset(environment, seeds=EpisodeSeeds(1, 2, 3, 4)),
     )
 
     transition = runtime.after_step(

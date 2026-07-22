@@ -35,9 +35,16 @@ class TinyDeterministicEnv(gym.Env[NDArray[np.float32], int]):
         self.reset_count = 0
         self.difficulty_level = 1
         self.pending_difficulty_level = 1
+        self.validation_schedule: tuple[str, ...] = ()
+        self.validation_schedule_index = 0
+        self.current_scenario_id = "lead_brake"
 
     def set_difficulty_level(self, level: int) -> None:
         self.pending_difficulty_level = level
+
+    def set_validation_scenario_schedule(self, scenario_ids: tuple[str, ...]) -> None:
+        self.validation_schedule = scenario_ids
+        self.validation_schedule_index = 0
 
     def reset(
         self,
@@ -49,6 +56,11 @@ class TinyDeterministicEnv(gym.Env[NDArray[np.float32], int]):
         del options
         self.steps = 0
         self.difficulty_level = self.pending_difficulty_level
+        if self.role == "validation" and self.validation_schedule_index < len(
+            self.validation_schedule
+        ):
+            self.current_scenario_id = self.validation_schedule[self.validation_schedule_index]
+            self.validation_schedule_index += 1
         role_offset = 100 if self.role == "train" else 10_000
         episode_seed = role_offset + self.worker_index * 100 + self.reset_count
         self.reset_count += 1
@@ -56,7 +68,7 @@ class TinyDeterministicEnv(gym.Env[NDArray[np.float32], int]):
             "environment_seed": episode_seed,
             "scenario_selection_seed": episode_seed + 20_000,
             "scenario_parameter_seed": episode_seed + 30_000,
-            "scenario_id": "lead_brake",
+            "scenario_id": self.current_scenario_id,
             "difficulty_level": self.difficulty_level,
             "scenario_parameters": {"initial_gap_m": 40.0},
         }
@@ -75,8 +87,11 @@ class TinyDeterministicEnv(gym.Env[NDArray[np.float32], int]):
             self.steps == 4,
             False,
             {
+                "scenario_id": self.current_scenario_id,
                 "scenario_success": self.steps == 4,
                 "collision_occurred": False,
+                "route_progress": self.steps / 4.0,
+                "unnecessary_stop_duration_s": 0.0,
             },
         )
 
@@ -129,8 +144,11 @@ class SeedAwareTinyEnv(gym.Env[NDArray[np.float32], int]):
             True,
             False,
             {
+                "scenario_id": "lead_brake",
                 "scenario_success": True,
                 "collision_occurred": False,
+                "route_progress": 1.0,
+                "unnecessary_stop_duration_s": 0.0,
             },
         )
 
@@ -264,6 +282,7 @@ def test_every_published_checkpoint_restores_its_exact_automatic_curriculum_stat
                     "total_timesteps": 24,
                     "checkpoint_interval_steps": 8,
                     "eval_interval_steps": 8,
+                    "eval_episodes": 2,
                 }
             ),
         }
@@ -282,7 +301,10 @@ def test_every_published_checkpoint_restores_its_exact_automatic_curriculum_stat
         run_dir / "checkpoints" / "ppo_checkpoint_8_steps.zip": CurriculumState(1, 0, 1),
         run_dir / "checkpoints" / "ppo_checkpoint_16_steps.zip": CurriculumState(2, 0, 2),
         run_dir / "checkpoints" / "ppo_checkpoint_24_steps.zip": CurriculumState(3, 0, 3),
-        result.best_checkpoint: CurriculumState(1, 0, 1),
+        result.best_checkpoint: CurriculumState(3, 0, 3),
+        run_dir / "checkpoints" / "best_model_level_0.zip": CurriculumState(1, 0, 1),
+        run_dir / "checkpoints" / "best_model_level_1.zip": CurriculumState(2, 0, 2),
+        run_dir / "checkpoints" / "best_model_level_2.zip": CurriculumState(3, 0, 3),
         result.final_checkpoint: CurriculumState(3, 0, 3),
     }
     for checkpoint, state in expected.items():
@@ -321,7 +343,7 @@ def test_periodic_checkpoint_resume_matches_absolute_non_aligned_continuation(
                     "total_timesteps": 24,
                     "checkpoint_interval_steps": 11,
                     "eval_interval_steps": 7,
-                    "eval_episodes": 1,
+                    "eval_episodes": 2,
                 }
             ),
         }
@@ -562,7 +584,7 @@ def test_real_ppo_writes_artifacts_and_resumes_transactionally(tmp_path: Path) -
         seed_records[summary["role"]] = records
         assert summary["record_count"] == len(records)
         assert summary["sha256"] == checkpoint_hash(artifact)
-        assert summary["schema_version"] == 3
+        assert summary["schema_version"] == 4
         assert summary["file_identity"] == header["file_identity"]
     train_seeds = [record["environment_seed"] for record in seed_records["train"]]
     validation_seeds = [record["environment_seed"] for record in seed_records["validation"]]

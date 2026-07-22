@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import shutil
 from collections.abc import Mapping, Sequence
 from numbers import Integral, Real
 from pathlib import Path
@@ -15,6 +16,7 @@ from stable_baselines3.common.vec_env import VecEnv
 
 from mad_driving.training.curriculum import (
     CurriculumController,
+    CurriculumEpisodeResult,
     CurriculumState,
     write_checkpoint_curriculum_state,
     write_curriculum_state,
@@ -32,6 +34,12 @@ REWARD_COMPONENT_KEYS: Final = (
     "standstill_penalty",
     "shield_intervention_penalty",
 )
+_VALIDATION_SCENARIOS_BY_LEVEL: Final = {
+    0: ("nominal",),
+    1: ("lead_brake",),
+    2: ("lead_brake", "cut_in"),
+    3: ("occluded_crossing",),
+}
 
 
 class _AbsoluteTimestepSchedule:
@@ -227,10 +235,10 @@ class CurriculumEvalCallback(SeededEvalCallback):
         )
         self.controller = controller
         self.curriculum_state_path = Path(curriculum_state_path)
-        self._terminal_records: list[tuple[bool, bool]] = []
+        self._terminal_records: list[CurriculumEpisodeResult] = []
 
     @property
-    def terminal_records(self) -> tuple[tuple[bool, bool], ...]:
+    def terminal_records(self) -> tuple[CurriculumEpisodeResult, ...]:
         """Return the records captured during the current scheduled evaluation."""
 
         return tuple(self._terminal_records)
@@ -249,13 +257,30 @@ class CurriculumEvalCallback(SeededEvalCallback):
         info = locals_.get("info")
         if not isinstance(info, Mapping):
             raise ValueError("terminal validation info must be a mapping")
+        scenario_id = info.get("scenario_id")
         scenario_success = info.get("scenario_success")
         collision_occurred = info.get("collision_occurred")
+        route_progress = info.get("route_progress")
+        unnecessary_stop_duration_s = info.get("unnecessary_stop_duration_s")
+        if not isinstance(scenario_id, str) or not scenario_id:
+            raise ValueError("terminal scenario_id must be a non-empty string")
         if type(scenario_success) is not bool:
             raise ValueError("terminal scenario_success must be a boolean")
         if type(collision_occurred) is not bool:
             raise ValueError("terminal collision_occurred must be a boolean")
-        self._terminal_records.append((scenario_success, collision_occurred))
+        if type(route_progress) is not float:
+            raise ValueError("terminal route_progress must be a float")
+        if type(unnecessary_stop_duration_s) is not float:
+            raise ValueError("terminal unnecessary_stop_duration_s must be a float")
+        self._terminal_records.append(
+            CurriculumEpisodeResult(
+                scenario_id=scenario_id,
+                success=scenario_success,
+                collision=collision_occurred,
+                route_progress=route_progress,
+                unnecessary_stop_duration_s=unnecessary_stop_duration_s,
+            )
+        )
 
     def _on_step(self) -> bool:
         scheduled = self._evaluation_due()
@@ -265,30 +290,33 @@ class CurriculumEvalCallback(SeededEvalCallback):
         previous_best_mean_reward = self.best_mean_reward
         self._terminal_records = []
         previous_state = self.controller.state
+        scenarios = _VALIDATION_SCENARIOS_BY_LEVEL[previous_state.level]
+        schedule = tuple(scenarios[index % len(scenarios)] for index in range(self.n_eval_episodes))
+        self.eval_env.env_method("set_validation_scenario_schedule", schedule)
         continue_training = self._run_scheduled_evaluation()
         if len(self._terminal_records) != self.n_eval_episodes:
             raise RuntimeError(
                 "scheduled validation did not produce exactly one terminal curriculum record "
                 "per episode"
             )
-        state = self.controller.observe(
-            "validation",
-            successes=sum(success for success, _collision in self._terminal_records),
-            collisions=sum(collision for _success, collision in self._terminal_records),
-            episodes=len(self._terminal_records),
-        )
+        state = self.controller.observe("validation", self.terminal_records)
         write_curriculum_state(state, self.curriculum_state_path)
-        if (
-            self.best_mean_reward > previous_best_mean_reward
-            and self.best_model_save_path is not None
-        ):
+        new_level_best = self.best_mean_reward > previous_best_mean_reward
+        if new_level_best and self.best_model_save_path is not None:
+            best_checkpoint = Path(self.best_model_save_path) / "best_model.zip"
             write_checkpoint_curriculum_state(
                 state,
-                Path(self.best_model_save_path) / "best_model.zip",
+                best_checkpoint,
             )
+            level_checkpoint = (
+                Path(self.best_model_save_path) / f"best_model_level_{previous_state.level}.zip"
+            )
+            shutil.copy2(best_checkpoint, level_checkpoint)
+            write_checkpoint_curriculum_state(state, level_checkpoint)
         if previous_state is not None and state.level != previous_state.level:
             self.training_env.env_method("set_difficulty_level", state.level)
             self.eval_env.env_method("set_difficulty_level", state.level)
+            self.best_mean_reward = -math.inf
         return continue_training
 
 

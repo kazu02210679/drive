@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass
 from numbers import Integral
 from pathlib import Path
@@ -28,6 +30,12 @@ _CHECKPOINT_CURRICULUM_FIELDS = frozenset(
         "evaluations",
     }
 )
+_EXPECTED_SCENARIOS_BY_LEVEL: dict[int, frozenset[str]] = {
+    0: frozenset({"nominal"}),
+    1: frozenset({"lead_brake"}),
+    2: frozenset({"lead_brake", "cut_in"}),
+    3: frozenset({"occluded_crossing"}),
+}
 
 
 def _strict_non_negative_integer(name: str, value: object) -> int:
@@ -37,6 +45,35 @@ def _strict_non_negative_integer(name: str, value: object) -> int:
     if normalized < 0:
         raise ValueError(f"{name} must be non-negative")
     return normalized
+
+
+@dataclass(frozen=True)
+class CurriculumEpisodeResult:
+    """Typed terminal metrics for one curriculum validation episode."""
+
+    scenario_id: str
+    success: bool
+    collision: bool
+    route_progress: float
+    unnecessary_stop_duration_s: float
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.scenario_id, str) or not self.scenario_id:
+            raise ValueError("scenario_id must be a non-empty string")
+        if type(self.success) is not bool:
+            raise ValueError("success must be a boolean")
+        if type(self.collision) is not bool:
+            raise ValueError("collision must be a boolean")
+        if type(self.route_progress) is not float or not math.isfinite(self.route_progress):
+            raise ValueError("route_progress must be a finite float")
+        if not 0.0 <= self.route_progress <= 1.0:
+            raise ValueError("route_progress must be from 0 through 1")
+        if (
+            type(self.unnecessary_stop_duration_s) is not float
+            or not math.isfinite(self.unnecessary_stop_duration_s)
+            or self.unnecessary_stop_duration_s < 0.0
+        ):
+            raise ValueError("unnecessary_stop_duration_s must be a non-negative finite float")
 
 
 @dataclass(frozen=True)
@@ -106,9 +143,7 @@ class CurriculumController:
     def observe(
         self,
         role: EnvironmentRole,
-        successes: int,
-        collisions: int,
-        episodes: int,
+        results: Sequence[CurriculumEpisodeResult],
     ) -> CurriculumState:
         """Observe one complete scheduled validation and return the updated state."""
 
@@ -116,23 +151,49 @@ class CurriculumController:
             raise ValueError("test role cannot drive curriculum")
         if role != "validation":
             raise ValueError("curriculum observations must use the validation role")
-        episode_count = _strict_non_negative_integer("episodes", episodes)
-        if episode_count == 0:
-            raise ValueError("episodes must be greater than zero")
-        success_count = _strict_non_negative_integer("successes", successes)
-        collision_count = _strict_non_negative_integer("collisions", collisions)
-        if success_count > episode_count:
-            raise ValueError("successes must not exceed episodes")
-        if collision_count > episode_count:
-            raise ValueError("collisions must not exceed episodes")
+        if isinstance(results, str | bytes) or not isinstance(results, Sequence):
+            raise TypeError("results must be a sequence of CurriculumEpisodeResult values")
+        episode_results = tuple(results)
+        if not episode_results:
+            raise ValueError("results must not be empty")
+        if not all(isinstance(result, CurriculumEpisodeResult) for result in episode_results):
+            raise TypeError("results must contain only CurriculumEpisodeResult values")
 
         evaluations = self._state.evaluations + 1
         if self._config.mode == "fixed":
             self._state = CurriculumState(self._state.level, 0, evaluations)
             return self._state
 
-        passed = success_count / episode_count >= self._config.success_rate_threshold and (
-            collision_count / episode_count <= self._config.collision_rate_threshold
+        expected_scenarios = _EXPECTED_SCENARIOS_BY_LEVEL[self._state.level]
+        observed_scenarios = {result.scenario_id for result in episode_results}
+        unexpected_scenarios = observed_scenarios - expected_scenarios
+        if unexpected_scenarios:
+            raise ValueError(
+                "results contain scenarios outside the current difficulty level: "
+                f"{sorted(unexpected_scenarios)!r}"
+            )
+        collision_rate = sum(result.collision for result in episode_results) / len(episode_results)
+        scenario_success_rates: dict[str, float] = {}
+        for scenario_id in expected_scenarios:
+            scenario_results = tuple(
+                result for result in episode_results if result.scenario_id == scenario_id
+            )
+            if not scenario_results:
+                scenario_success_rates[scenario_id] = 0.0
+                continue
+            qualified_successes = sum(
+                result.success
+                and result.unnecessary_stop_duration_s
+                <= self._config.maximum_unnecessary_stop_duration_s
+                for result in scenario_results
+            )
+            scenario_success_rates[scenario_id] = qualified_successes / len(scenario_results)
+        passed = (
+            all(
+                success_rate >= self._config.success_rate_threshold
+                for success_rate in scenario_success_rates.values()
+            )
+            and collision_rate <= self._config.collision_rate_threshold
         )
         consecutive_passes = self._state.consecutive_passes + 1 if passed else 0
         should_advance = (
@@ -378,6 +439,7 @@ __all__ = [
     "CURRICULUM_STATE_FILENAME",
     "MAX_DIFFICULTY_LEVEL",
     "CurriculumController",
+    "CurriculumEpisodeResult",
     "CurriculumState",
     "checkpoint_curriculum_sidecar_path",
     "read_checkpoint_curriculum_artifact",

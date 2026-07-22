@@ -704,7 +704,7 @@ def assert_episode_metadata(
     assert info["simulator_seed"] == seeds.metadrive_scenario_index
     assert info["scenario_seed"] == seeds.scenario_parameter_seed
     assert info["metadrive_scenario_index"] == seeds.metadrive_scenario_index
-    assert info["scenario_selection_seed"] == seeds.metadrive_scenario_index
+    assert info["scenario_selection_seed"] == seeds.scenario_selection_seed
     assert info["scenario_parameter_seed"] == seeds.scenario_parameter_seed
     assert info["role"] == role
     assert info["worker_index"] == worker_index
@@ -1009,7 +1009,7 @@ def test_runtime_validates_scenario_identity_after_every_state_hook(
     message: str,
 ) -> None:
     seeds = expected_seeds(76)
-    returned_seeds = EpisodeSeeds(1, 2, 3) if mismatch == "seeds" else seeds
+    returned_seeds = EpisodeSeeds(1, 2, 3, 4) if mismatch == "seeds" else seeds
     scenario_id = "stale_scenario" if mismatch == "scenario_id" else make_config().scenario_id
     returned_state = ScenarioState(scenario_id, returned_seeds, {})
     runtime_kwargs = {
@@ -1493,6 +1493,26 @@ def test_returned_info_and_reward_components_do_not_alias_internal_values() -> N
         harness.env.close()
 
 
+def test_info_tracks_route_progress_and_safe_unnecessary_stop_duration() -> None:
+    simulator = FakeSimulator()
+    harness = make_env(simulators=(simulator,))
+    try:
+        harness.env.reset(seed=84)
+
+        _, _, _, _, first_info = harness.env.step(DrivingAction.STOP)
+        _, _, _, _, second_info = harness.env.step(DrivingAction.STOP)
+
+        assert first_info["route_progress"] == pytest.approx(0.25)
+        assert first_info["unnecessary_stop_duration_s"] == pytest.approx(0.1)
+        assert second_info["unnecessary_stop_duration_s"] == pytest.approx(0.2)
+
+        harness.env.reset(seed=85)
+        _, _, _, _, reset_episode_info = harness.env.step(DrivingAction.STOP)
+        assert reset_episode_info["unnecessary_stop_duration_s"] == pytest.approx(0.1)
+    finally:
+        harness.env.close()
+
+
 def test_step_builds_trace_from_pre_step_analysis_and_post_step_reward() -> None:
     pre = make_analysis(
         claims=(make_claim("nominal"), make_claim("rule")),
@@ -1527,6 +1547,7 @@ def test_step_builds_trace_from_pre_step_analysis_and_post_step_reward() -> None
         assert trace.intervention_required is info["intervention_required"] is True
         assert trace.episode_rng_seed == 87
         assert trace.metadrive_scenario_index == info["metadrive_scenario_index"]
+        assert trace.scenario_selection_seed == info["scenario_selection_seed"]
         assert trace.scenario_parameter_seed == info["scenario_parameter_seed"]
         assert trace.role == "train"
         assert trace.worker_index == 0

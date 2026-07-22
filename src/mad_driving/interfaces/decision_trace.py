@@ -67,6 +67,7 @@ class DecisionTrace:
     errors: tuple[str, ...] = ()
     episode_rng_seed: int | None = None
     metadrive_scenario_index: int | None = None
+    scenario_selection_seed: int | None = None
     scenario_parameter_seed: int | None = None
     role: str | None = None
     worker_index: int | None = None
@@ -115,6 +116,7 @@ class DecisionTrace:
         episode_metadata = (
             self.episode_rng_seed,
             self.metadrive_scenario_index,
+            self.scenario_selection_seed,
             self.scenario_parameter_seed,
             self.role,
             self.worker_index,
@@ -125,6 +127,7 @@ class DecisionTrace:
             for name, metadata_value in (
                 ("episode_rng_seed", self.episode_rng_seed),
                 ("metadrive_scenario_index", self.metadrive_scenario_index),
+                ("scenario_selection_seed", self.scenario_selection_seed),
                 ("scenario_parameter_seed", self.scenario_parameter_seed),
                 ("worker_index", self.worker_index),
             ):

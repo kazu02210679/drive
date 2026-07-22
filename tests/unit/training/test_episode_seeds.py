@@ -46,6 +46,15 @@ class ResetInfoEnv(gym.Env[NDArray[np.float32], int]):
         return np.zeros(24, dtype=np.float32), 0.0, False, False, {}
 
 
+class ScheduledResetInfoEnv(ResetInfoEnv):
+    def __init__(self, reset_infos: list[dict[str, Any]]) -> None:
+        super().__init__(reset_infos)
+        self.validation_schedule: tuple[str, ...] | None = None
+
+    def set_validation_scenario_schedule(self, scenario_ids: tuple[str, ...]) -> None:
+        self.validation_schedule = scenario_ids
+
+
 def seed_info(
     environment: object,
     selection: object,
@@ -70,6 +79,42 @@ def seed_info(
 def read_jsonl(path: Path) -> list[dict[str, object]]:
     values = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
     return [value for value in values if "environment_seed" in value]
+
+
+def test_validation_schedule_is_forwarded_when_wrapped_environment_supports_it(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "private-workspace"
+    workspace.mkdir()
+    env = ScheduledResetInfoEnv([seed_info(1, 2, 3)])
+    wrapped = EpisodeSeedRecordingWrapper(
+        env,
+        workspace=workspace,
+        role="validation",
+        worker_index=0,
+    )
+
+    wrapped.set_validation_scenario_schedule(("lead_brake", "cut_in"))
+
+    assert env.validation_schedule == ("lead_brake", "cut_in")
+    wrapped.close()
+
+
+def test_validation_schedule_is_ignored_when_wrapped_environment_does_not_support_it(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "private-workspace"
+    workspace.mkdir()
+    wrapped = EpisodeSeedRecordingWrapper(
+        ResetInfoEnv([seed_info(1, 2, 3)]),
+        workspace=workspace,
+        role="validation",
+        worker_index=0,
+    )
+
+    wrapped.set_validation_scenario_schedule(("lead_brake", "cut_in"))
+
+    wrapped.close()
 
 
 def replace_artifact_if_permitted(path: Path, replacement: bytes) -> bool:
@@ -231,7 +276,7 @@ def test_parent_held_identity_rejects_post_close_self_attested_replacement(
         },
         "record_type": "episode_seed_artifact",
         "role": "train",
-        "schema_version": 3,
+        "schema_version": 4,
         "worker_index": 0,
     }
     replacement_record = {
@@ -439,7 +484,7 @@ def test_records_each_actual_reset_info_in_order_and_summarizes_it(tmp_path: Pat
             "path": "episode_seeds/train-worker-000.jsonl",
             "record_count": 2,
             "role": "train",
-            "schema_version": 3,
+            "schema_version": 4,
             "sha256": summaries[0]["sha256"],
             "worker_index": 0,
         },
@@ -729,7 +774,7 @@ def test_single_read_inventory_rejects_each_malformed_jsonl_boundary(
 @pytest.mark.parametrize(
     ("location", "field", "replacement"),
     [
-        ("header", "schema_version", 3.0),
+        ("header", "schema_version", 4.0),
         ("header", "schema_version", True),
         ("header", "worker_index", 0.0),
         ("header", "worker_index", False),

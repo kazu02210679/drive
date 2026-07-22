@@ -22,6 +22,11 @@ class ScenarioRuntimeFactory:
 
         self._phase5_runtime.set_difficulty_level(level)
 
+    def set_scenario_schedule(self, scenario_ids: tuple[str, ...]) -> None:
+        """Replace the finite Phase 5 reset schedule used by validation."""
+
+        self._phase5_runtime.set_scenario_schedule(scenario_ids)
+
 
 def build_scenario_runtime_factory(config: AppConfig) -> ScenarioRuntimeFactory:
     """Build the one stateful scenario factory owned by a Gym environment."""

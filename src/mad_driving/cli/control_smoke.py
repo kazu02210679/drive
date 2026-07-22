@@ -66,7 +66,7 @@ def run_control_smoke(
     final_trace: DecisionTrace | None = None
     frame: SceneFrame | None = None
     analysis: AgentAnalysisResult | None = None
-    seeds = EpisodeSeeds(config.seed, config.seed, config.seed)
+    seeds = EpisodeSeeds(config.seed, config.seed, config.seed, config.seed)
     runtime = NoOpScenarioRuntime(config.scenario_id)
 
     try:
@@ -142,6 +142,7 @@ def run_control_smoke(
                 errors=analysis.errors,
                 episode_rng_seed=seeds.episode_rng_seed,
                 metadrive_scenario_index=seeds.metadrive_scenario_index,
+                scenario_selection_seed=seeds.scenario_selection_seed,
                 scenario_parameter_seed=seeds.scenario_parameter_seed,
                 role="train",
                 worker_index=0,

@@ -7,7 +7,10 @@ from dataclasses import replace
 from math import atan2, ceil, hypot
 from typing import TYPE_CHECKING
 
-from mad_driving.config.models import OccludedCrossingScenarioConfig
+from mad_driving.config.models import (
+    OCCLUDED_CROSSING_ACTOR_HALF_WIDTH_M,
+    OccludedCrossingScenarioConfig,
+)
 from mad_driving.interfaces import OcclusionRegion
 from mad_driving.scenarios.actors import (
     KinematicActorSpawn,
@@ -34,7 +37,6 @@ _OCCLUDER_ID = "static-occluder"
 _LEAD_ID = "crossing-lead"
 _OCCLUDER_LENGTH_M = 5.0
 _OCCLUDER_WIDTH_M = 2.0
-_CYCLIST_HALF_WIDTH_M = 0.2
 
 
 class OccludedCrossingRuntime:
@@ -181,7 +183,9 @@ class OccludedCrossingRuntime:
                 "crossing_direction_xy": crossing_direction,
                 "cyclist_velocity_direction_xy": cyclist_velocity_direction,
                 "trigger_step": trigger_step,
-                "clear_lateral_m": geometry.lane_width_m / 2.0 + _CYCLIST_HALF_WIDTH_M,
+                "clear_lateral_m": (
+                    geometry.lane_width_m / 2.0 + OCCLUDED_CROSSING_ACTOR_HALF_WIDTH_M
+                ),
                 "decision_interval_s": geometry.decision_interval_s,
                 "lead_speed_mps": lead_speed_mps,
             },

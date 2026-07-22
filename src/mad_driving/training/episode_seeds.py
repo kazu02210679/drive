@@ -15,7 +15,7 @@ import gymnasium as gym
 
 from mad_driving.scenarios import EnvironmentRole
 
-EPISODE_SEED_ARTIFACT_SCHEMA_VERSION: Final = 3
+EPISODE_SEED_ARTIFACT_SCHEMA_VERSION: Final = 4
 _ARTIFACT_DIRECTORY: Final = "episode_seeds"
 _HEADER_RECORD_TYPE: Final = "episode_seed_artifact"
 _RECORD_FIELDS: Final = frozenset(
@@ -296,6 +296,15 @@ class EpisodeSeedRecordingWrapper(gym.Wrapper[Any, Any, Any, Any]):
                     )
             raise
         return observation, dict(info)
+
+    def set_validation_scenario_schedule(self, scenario_ids: tuple[str, ...]) -> None:
+        """Forward deterministic validation scheduling when the wrapped env supports it."""
+
+        try:
+            setter = self.env.get_wrapper_attr("set_validation_scenario_schedule")
+        except AttributeError:
+            return
+        setter(scenario_ids)
 
     def close(self) -> None:
         """Close the wrapped environment and writer once without retrying resources."""

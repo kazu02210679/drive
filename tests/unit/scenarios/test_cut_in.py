@@ -76,7 +76,7 @@ def reset_cut_in(
     )
     runtime = CutInRuntime(config, ScenarioParameterSampler(7), difficulty_level=2)
     environment = FakeEnvironment()
-    state = runtime.reset(environment, seeds=EpisodeSeeds(1, 2, 3))
+    state = runtime.reset(environment, seeds=EpisodeSeeds(1, 2, 3, 4))
     state = runtime.after_simulator_reset(environment, state)
     return runtime, environment, state
 
@@ -147,11 +147,11 @@ def test_cut_in_sampling_is_seeded_and_uses_sorted_adjacent_lanes() -> None:
     second_environment = FakeEnvironment(geometry)
     first_state = first_runtime.after_simulator_reset(
         first_environment,
-        first_runtime.reset(first_environment, seeds=EpisodeSeeds(1, 2, 3)),
+        first_runtime.reset(first_environment, seeds=EpisodeSeeds(1, 2, 3, 4)),
     )
     second_state = second_runtime.after_simulator_reset(
         second_environment,
-        second_runtime.reset(second_environment, seeds=EpisodeSeeds(1, 2, 3)),
+        second_runtime.reset(second_environment, seeds=EpisodeSeeds(1, 2, 3, 4)),
     )
 
     assert first_state.parameters == second_state.parameters
@@ -162,7 +162,7 @@ def test_cut_in_fails_fast_without_an_available_adjacent_lane() -> None:
     geometry = RoadGeometry((">", ">>", 0), 10.0, 0.0, 10.0, 0.1)
     environment = FakeEnvironment(geometry)
     runtime = CutInRuntime(CutInScenarioConfig(), ScenarioParameterSampler(7), difficulty_level=2)
-    state = runtime.reset(environment, seeds=EpisodeSeeds(1, 2, 3))
+    state = runtime.reset(environment, seeds=EpisodeSeeds(1, 2, 3, 4))
 
     with pytest.raises(RuntimeError, match="available adjacent lane"):
         runtime.after_simulator_reset(environment, state)

@@ -163,6 +163,30 @@ def test_actor_manager_applies_lane_pose_command_before_step() -> None:
     assert actor.position_calls == [(42.0, 1.5)]
 
 
+def test_lane_pose_state_derives_observed_kinematics_from_position_delta() -> None:
+    manager = manager_with_fake_engine()
+    manager.spawn_lane_vehicle(LaneVehicleSpawn("cut-in", (">", ">>", 1), 40.0, 0.0, 8.0))
+    actor = manager.engine.get_objects(["cut-in"])["cut-in"]
+
+    manager.command_actor("cut-in", LanePoseCommand((">", ">>", 0), 40.8, -0.5))
+    manager.before_step()
+    manager.after_step()
+
+    first_state = manager.actor_state("cut-in")
+    assert first_state.velocity_xy_mps == pytest.approx((8.0, -5.0))
+    assert first_state.acceleration_xy_mps2 == pytest.approx((0.0, -50.0))
+    assert actor.velocity == (8.0, 0.0)
+
+    manager.command_actor("cut-in", LanePoseCommand((">", ">>", 0), 41.6, -1.2))
+    manager.before_step()
+    manager.after_step()
+
+    second_state = manager.actor_state("cut-in")
+    assert second_state.velocity_xy_mps == pytest.approx((8.0, -7.0))
+    assert second_state.acceleration_xy_mps2 == pytest.approx((0.0, -20.0))
+    assert actor.velocity == (8.0, 0.0)
+
+
 def test_actor_manager_attributes_an_ego_contact_to_the_requested_actor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

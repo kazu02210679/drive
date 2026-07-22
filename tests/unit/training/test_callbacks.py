@@ -15,7 +15,9 @@ from mad_driving.training import callbacks as callbacks_module
 from mad_driving.training.callbacks import CurriculumEvalCallback, RewardComponentsCallback
 from mad_driving.training.curriculum import (
     CurriculumController,
+    CurriculumEpisodeResult,
     CurriculumState,
+    checkpoint_curriculum_sidecar_path,
     read_curriculum_state,
 )
 
@@ -82,11 +84,24 @@ class CurriculumOutcomeEnv(gym.Env[NDArray[np.float32], int]):
     observation_space = spaces.Box(low=-1.0, high=1.0, shape=(4,), dtype=np.float32)
     action_space = spaces.Discrete(2)
 
-    def __init__(self, *, scenario_success: bool, collision_occurred: bool) -> None:
+    def __init__(
+        self,
+        *,
+        scenario_success: bool,
+        collision_occurred: bool,
+        scenario_id: str = "nominal",
+        route_progress: float = 0.25,
+        unnecessary_stop_duration_s: float = 0.0,
+    ) -> None:
         self.scenario_success = scenario_success
         self.collision_occurred = collision_occurred
+        self.scenario_id = scenario_id
+        self.route_progress = route_progress
+        self.unnecessary_stop_duration_s = unnecessary_stop_duration_s
         self.reset_seeds: list[int | None] = []
         self.levels: list[int] = []
+        self.scenario_schedules: list[tuple[str, ...]] = []
+        self._pending_scenarios: list[str] = []
 
     def reset(
         self,
@@ -97,6 +112,8 @@ class CurriculumOutcomeEnv(gym.Env[NDArray[np.float32], int]):
         super().reset(seed=seed)
         del options
         self.reset_seeds.append(seed)
+        if self._pending_scenarios:
+            self.scenario_id = self._pending_scenarios.pop(0)
         return np.zeros(4, dtype=np.float32), {}
 
     def step(
@@ -110,13 +127,20 @@ class CurriculumOutcomeEnv(gym.Env[NDArray[np.float32], int]):
             True,
             False,
             {
+                "scenario_id": self.scenario_id,
                 "scenario_success": self.scenario_success,
                 "collision_occurred": self.collision_occurred,
+                "route_progress": self.route_progress,
+                "unnecessary_stop_duration_s": self.unnecessary_stop_duration_s,
             },
         )
 
     def set_difficulty_level(self, level: int) -> None:
         self.levels.append(level)
+
+    def set_validation_scenario_schedule(self, scenario_ids: tuple[str, ...]) -> None:
+        self.scenario_schedules.append(scenario_ids)
+        self._pending_scenarios = list(scenario_ids)
 
 
 class SequencedCurriculumOutcomeEnv(CurriculumOutcomeEnv):
@@ -138,8 +162,11 @@ class SequencedCurriculumOutcomeEnv(CurriculumOutcomeEnv):
             True,
             False,
             {
+                "scenario_id": self.scenario_id,
                 "scenario_success": scenario_success,
                 "collision_occurred": collision_occurred,
+                "route_progress": self.route_progress,
+                "unnecessary_stop_duration_s": self.unnecessary_stop_duration_s,
             },
         )
 
@@ -152,12 +179,17 @@ class RecordingCurriculumController(CurriculumController):
     def observe(
         self,
         role: str,
-        successes: int,
-        collisions: int,
-        episodes: int,
+        results: tuple[CurriculumEpisodeResult, ...],
     ) -> CurriculumState:
-        self.observations.append((role, successes, collisions, episodes))
-        return super().observe(role, successes, collisions, episodes)  # type: ignore[arg-type]
+        self.observations.append(
+            (
+                role,
+                sum(result.success for result in results),
+                sum(result.collision for result in results),
+                len(results),
+            )
+        )
+        return super().observe(role, results)  # type: ignore[arg-type]
 
 
 class MissingTerminalRecordCallback(CurriculumEvalCallback):
@@ -426,17 +458,41 @@ def test_curriculum_callback_persists_without_broadcast_when_level_is_unchanged(
 
 
 @pytest.mark.parametrize(
-    "info",
+    ("info", "message"),
     [
-        {"collision_occurred": False},
-        {"scenario_success": True},
-        {"scenario_success": 1, "collision_occurred": False},
-        {"scenario_success": True, "collision_occurred": 0},
+        ({"collision_occurred": False}, "scenario_id|scenario_success"),
+        ({"scenario_id": "nominal", "scenario_success": True}, "collision_occurred"),
+        (
+            {
+                "scenario_id": "nominal",
+                "scenario_success": 1,
+                "collision_occurred": False,
+            },
+            "scenario_success",
+        ),
+        (
+            {
+                "scenario_id": "nominal",
+                "scenario_success": True,
+                "collision_occurred": 0,
+            },
+            "collision_occurred",
+        ),
+        (
+            {
+                "scenario_id": "nominal",
+                "scenario_success": True,
+                "collision_occurred": False,
+                "route_progress": 0.25,
+            },
+            "unnecessary_stop_duration_s",
+        ),
     ],
 )
 def test_curriculum_callback_rejects_missing_or_non_boolean_terminal_metrics(
     tmp_path: Path,
     info: dict[str, object],
+    message: str,
 ) -> None:
     eval_env = DummyVecEnv([lambda: SeedRecordingEnv()])
     callback = CurriculumEvalCallback(
@@ -449,7 +505,7 @@ def test_curriculum_callback_rejects_missing_or_non_boolean_terminal_metrics(
         curriculum_state_path=tmp_path / "curriculum_state.yaml",
     )
     try:
-        with pytest.raises(ValueError, match="scenario_success|collision_occurred"):
+        with pytest.raises(ValueError, match=message):
             callback._log_success_callback(
                 {"info": info, "done": True},
                 {},
@@ -534,12 +590,109 @@ def test_curriculum_callback_aggregates_two_schedules_without_stale_records(
         ]
         assert controller.state == CurriculumState(1, 0, 2)
         assert callback.terminal_records == (
-            (True, False),
-            (False, False),
-            (True, False),
+            CurriculumEpisodeResult("nominal", True, False, 0.25, 0.0),
+            CurriculumEpisodeResult("nominal", False, False, 0.25, 0.0),
+            CurriculumEpisodeResult("nominal", True, False, 0.25, 0.0),
         )
         assert training_environment.levels == [1]
         assert evaluation_environment.levels == [1]
+    finally:
+        eval_env.close()
+        train_env.close()
+
+
+def test_curriculum_callback_balances_level_two_validation_scenarios(tmp_path: Path) -> None:
+    training_environment = CurriculumOutcomeEnv(
+        scenario_success=False,
+        collision_occurred=False,
+    )
+    evaluation_environment = CurriculumOutcomeEnv(
+        scenario_success=True,
+        collision_occurred=False,
+    )
+    train_env = DummyVecEnv([lambda: training_environment])
+    eval_env = DummyVecEnv([lambda: evaluation_environment])
+    model = PPO(
+        "MlpPolicy",
+        train_env,
+        n_steps=4,
+        batch_size=4,
+        n_epochs=1,
+        device="cpu",
+    )
+    model.set_logger(configure(str(tmp_path / "balanced-level-two"), []))
+    callback = CurriculumEvalCallback(
+        eval_env,
+        validation_episode_seed=73,
+        controller=CurriculumController(
+            CurriculumConfig(mode="automatic", initial_level=2),
+            CurriculumState(2, 0, 0),
+        ),
+        curriculum_state_path=tmp_path / "curriculum_state.yaml",
+        eval_freq=4,
+        n_eval_episodes=5,
+        deterministic=True,
+        render=False,
+        verbose=0,
+    )
+    try:
+        model.learn(total_timesteps=4, callback=callback)
+
+        expected_schedule = ("lead_brake", "cut_in", "lead_brake", "cut_in", "lead_brake")
+        assert evaluation_environment.scenario_schedules == [expected_schedule]
+        assert (
+            tuple(record.scenario_id for record in callback.terminal_records) == expected_schedule
+        )
+    finally:
+        eval_env.close()
+        train_env.close()
+
+
+def test_curriculum_callback_archives_level_best_and_resets_score_after_advancing(
+    tmp_path: Path,
+) -> None:
+    training_environment = CurriculumOutcomeEnv(
+        scenario_success=False,
+        collision_occurred=False,
+    )
+    evaluation_environment = CurriculumOutcomeEnv(
+        scenario_success=True,
+        collision_occurred=False,
+    )
+    train_env = DummyVecEnv([lambda: training_environment])
+    eval_env = DummyVecEnv([lambda: evaluation_environment])
+    model = PPO(
+        "MlpPolicy",
+        train_env,
+        n_steps=4,
+        batch_size=4,
+        n_epochs=1,
+        device="cpu",
+    )
+    model.set_logger(configure(str(tmp_path / "level-best"), []))
+    best_dir = tmp_path / "best"
+    callback = CurriculumEvalCallback(
+        eval_env,
+        validation_episode_seed=73,
+        controller=CurriculumController(
+            CurriculumConfig(mode="automatic", consecutive_evaluations=1),
+            CurriculumState(0, 0, 0),
+        ),
+        curriculum_state_path=tmp_path / "curriculum_state.yaml",
+        best_model_save_path=str(best_dir),
+        eval_freq=4,
+        n_eval_episodes=1,
+        deterministic=True,
+        render=False,
+        verbose=0,
+    )
+    try:
+        model.learn(total_timesteps=4, callback=callback)
+
+        level_checkpoint = best_dir / "best_model_level_0.zip"
+        assert level_checkpoint.is_file()
+        assert checkpoint_curriculum_sidecar_path(level_checkpoint).is_file()
+        assert callback.best_mean_reward == -math.inf
     finally:
         eval_env.close()
         train_env.close()

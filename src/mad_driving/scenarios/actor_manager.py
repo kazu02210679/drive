@@ -71,7 +71,10 @@ class ScenarioActorManager(BaseManager):  # type: ignore[misc]
         self._engine_override = engine
         self._pending_commands: dict[str, ScenarioActorCommand] = {}
         self._states: dict[str, ScenarioActorState] = {}
+        self._pre_step_positions: dict[str, tuple[float, float]] = {}
         self._pre_step_velocities: dict[str, tuple[float, float]] = {}
+        self._pre_step_state_velocities: dict[str, tuple[float, float]] = {}
+        self._lane_pose_actor_ids: set[str] = set()
         self._lane_reference_indices: dict[str, tuple[str, str, int]] = {}
         if engine is None:
             super().__init__()
@@ -175,10 +178,18 @@ class ScenarioActorManager(BaseManager):  # type: ignore[misc]
         """Apply queued commands immediately before simulator advancement."""
 
         del args, kwargs
+        self._pre_step_positions = {
+            actor_id: self._position_xy(self._require_actor(actor_id))
+            for actor_id in self.actor_ids()
+        }
         self._pre_step_velocities = {
             actor_id: self._velocity_xy(self._require_actor(actor_id))
             for actor_id in self.actor_ids()
         }
+        self._pre_step_state_velocities = {
+            actor_id: self._states[actor_id].velocity_xy_mps for actor_id in self.actor_ids()
+        }
+        self._lane_pose_actor_ids.clear()
         for actor_id, command in tuple(self._pending_commands.items()):
             actor = self._require_actor(actor_id)
             if isinstance(command, ActorCommand):
@@ -198,6 +209,7 @@ class ScenarioActorManager(BaseManager):  # type: ignore[misc]
                 lane = self.engine.current_map.road_network.get_lane(command.lane_index)
                 actor.set_position(lane.position(command.longitudinal_m, command.lateral_m))
                 self._lane_reference_indices[actor_id] = command.lane_index
+                self._lane_pose_actor_ids.add(actor_id)
             else:
                 actor.set_velocity(command.direction_xy, command.speed_mps)
         self._pending_commands.clear()
@@ -208,11 +220,22 @@ class ScenarioActorManager(BaseManager):  # type: ignore[misc]
 
         del args, kwargs
         for actor_id in self.actor_ids():
+            lane_pose_applied = actor_id in self._lane_pose_actor_ids
             self._refresh_state(
                 actor_id,
-                previous_velocity=self._pre_step_velocities.get(actor_id),
+                previous_position=(
+                    self._pre_step_positions.get(actor_id) if lane_pose_applied else None
+                ),
+                previous_velocity=(
+                    self._pre_step_state_velocities.get(actor_id)
+                    if lane_pose_applied
+                    else self._pre_step_velocities.get(actor_id)
+                ),
             )
+        self._pre_step_positions.clear()
         self._pre_step_velocities.clear()
+        self._pre_step_state_velocities.clear()
+        self._lane_pose_actor_ids.clear()
         return {}
 
     def before_reset(self) -> None:
@@ -220,7 +243,10 @@ class ScenarioActorManager(BaseManager):  # type: ignore[misc]
 
         self._pending_commands.clear()
         self._states.clear()
+        self._pre_step_positions.clear()
         self._pre_step_velocities.clear()
+        self._pre_step_state_velocities.clear()
+        self._lane_pose_actor_ids.clear()
         self._lane_reference_indices.clear()
         self.clear_objects(list(self.spawned_objects), force_destroy=True)
         self.spawned_objects = {}
@@ -246,16 +272,23 @@ class ScenarioActorManager(BaseManager):  # type: ignore[misc]
         self,
         actor_id: str,
         *,
+        previous_position: tuple[float, float] | None = None,
         previous_velocity: tuple[float, float] | None = None,
     ) -> None:
         actor = self._require_actor(actor_id)
-        position = tuple(float(value) for value in actor.position[:2])
-        velocity = self._velocity_xy(actor)
+        position = self._position_xy(actor)
+        decision_interval_s = self._decision_interval_s()
+        if previous_position is None:
+            velocity = self._velocity_xy(actor)
+        else:
+            velocity = (
+                (position[0] - previous_position[0]) / decision_interval_s,
+                (position[1] - previous_position[1]) / decision_interval_s,
+            )
         if previous_velocity is None:
             previous = velocity
         else:
             previous = previous_velocity
-        decision_interval_s = self._decision_interval_s()
         self._states[actor_id] = ScenarioActorState(
             actor_id=actor_id,
             position_xy_m=(position[0], position[1]),
@@ -267,6 +300,11 @@ class ScenarioActorManager(BaseManager):  # type: ignore[misc]
             heading_rad=float(actor.heading_theta),
             lane_index=self._lane_reference_indices.get(actor_id),
         )
+
+    @staticmethod
+    def _position_xy(actor: Any) -> tuple[float, float]:
+        position = tuple(float(value) for value in actor.position[:2])
+        return position[0], position[1]
 
     @staticmethod
     def _velocity_xy(actor: Any) -> tuple[float, float]:

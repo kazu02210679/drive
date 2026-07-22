@@ -252,19 +252,26 @@ Configuration supports two modes:
 - `automatic`: begin at a configured level and progress after validation.
 
 Automatic progression uses validation episodes only. Test episodes are rejected
-as curriculum input. After each scheduled validation:
+as curriculum input. Validation produces typed records containing scenario ID,
+success, collision, route progress, and safe unnecessary-STOP duration. After each
+scheduled validation:
 
-1. compute scenario success rate and collision rate from typed episode info;
-2. require success rate >= 0.80 and collision rate <= 0.05 by default;
-3. require the condition for two consecutive scheduled validations by default;
-4. advance by exactly one level, up to level 3;
-5. reset the consecutive-pass counter;
-6. broadcast the new pending level to training and validation VecEnvs;
-7. apply it only on each environment's next reset.
+1. reject a nominal success when safe STOP duration exceeds 1.0 second by default;
+2. compute per-scenario success rates and the overall collision rate;
+3. alternate Lead Brake and Cut-in at level 2 and require both rates >= 0.80;
+4. require overall collision rate <= 0.05;
+5. require the condition for two consecutive scheduled validations by default;
+6. advance by exactly one level, up to level 3;
+7. reset the consecutive-pass counter;
+8. broadcast the new pending level to training and validation VecEnvs;
+9. apply it only on each environment's next reset.
 
 There is no automatic regression in the MVP. The current level and advancement
 decision are written to training metadata so resume restores the exact state.
-Best-checkpoint comparison continues to use the fixed validation seed sequence.
+Best-checkpoint comparison is level-local. Each improvement is archived as
+`best_model_level_<level>.zip`, and the comparison baseline resets after a level
+change. Phase 6 selects the final comparison checkpoint with a fixed all-level
+validation suite.
 
 ## 8. Configuration
 
@@ -282,6 +289,7 @@ scenarios:
     initial_level: 0
     success_rate_threshold: 0.80
     collision_rate_threshold: 0.05
+    maximum_unnecessary_stop_duration_s: 1.0
     consecutive_evaluations: 2
   lead_brake: {...}
   cut_in: {...}

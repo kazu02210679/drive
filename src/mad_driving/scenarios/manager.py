@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from numbers import Integral
 from typing import TYPE_CHECKING
@@ -45,6 +45,7 @@ class ScenarioManagerRuntime:
     ) -> None:
         self._config = config
         self._pending_level = self._initial_level(config)
+        self._scenario_schedule: list[str] = []
         self._active_runtime: ScenarioRuntime | None = None
         self._runtimes = self._default_runtimes() if runtimes is None else dict(runtimes)
 
@@ -65,13 +66,35 @@ class ScenarioManagerRuntime:
             raise ValueError("difficulty level must be an integer from 0 through 3")
         self._pending_level = int(level)
 
+    def set_scenario_schedule(self, scenario_ids: Sequence[str]) -> None:
+        """Replace the finite reset schedule used by deterministic validation."""
+
+        if isinstance(scenario_ids, str | bytes) or not isinstance(scenario_ids, Sequence):
+            raise TypeError("scenario schedule must be a sequence of scenario IDs")
+        schedule = tuple(scenario_ids)
+        if not schedule or not all(isinstance(item, str) and item for item in schedule):
+            raise ValueError("scenario schedule must contain non-empty scenario IDs")
+        allowed = frozenset(_SCENARIOS_BY_LEVEL[self._pending_level])
+        outside_level = set(schedule) - allowed
+        if outside_level:
+            raise ValueError(
+                "scenario schedule contains scenarios outside the pending difficulty level: "
+                f"{sorted(outside_level)!r}"
+            )
+        self._scenario_schedule = list(schedule)
+
     def reset(self, environment: DrivingEnvironment, *, seeds: EpisodeSeeds) -> ScenarioState:
         """Select, create, and initialize one concrete scenario runtime."""
 
         level = self._pending_level
-        sampler = ScenarioParameterSampler(seeds.scenario_parameter_seed)
-        scenario_id = self._select_scenario(level, sampler)
-        runtime = self._create_runtime(scenario_id, level, sampler)
+        selection_sampler = ScenarioParameterSampler(seeds.scenario_selection_seed)
+        parameter_sampler = ScenarioParameterSampler(seeds.scenario_parameter_seed)
+        scenario_id = (
+            self._scenario_schedule.pop(0)
+            if self._scenario_schedule
+            else self._select_scenario(level, selection_sampler)
+        )
+        runtime = self._create_runtime(scenario_id, level, parameter_sampler)
         state = runtime.reset(environment, seeds=seeds)
         parameters = dict(state.parameters)
         parameters["difficulty_level"] = level

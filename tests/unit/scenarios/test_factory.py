@@ -37,6 +37,6 @@ def test_phase5_factory_builds_the_occluded_crossing_runtime() -> None:
 
     runtime = build_scenario_runtime_factory(config)("phase5")
 
-    state = runtime.reset(object(), seeds=EpisodeSeeds(1, 2, 3))
+    state = runtime.reset(object(), seeds=EpisodeSeeds(1, 2, 3, 4))
 
     assert state.scenario_id == "occluded_crossing"
