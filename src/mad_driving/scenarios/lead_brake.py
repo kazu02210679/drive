@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import replace
-from math import ceil
+from math import ceil, hypot
 from typing import TYPE_CHECKING
 
 from mad_driving.config.models import LeadBrakeScenarioConfig
@@ -89,11 +89,9 @@ class LeadBrakeRuntime:
         self._config = config
         self._sampler = sampler
         self._difficulty_level = difficulty_level
-        self._brake_triggered = False
 
     def reset(self, environment: DrivingEnvironment, *, seeds: EpisodeSeeds) -> ScenarioState:
         del environment
-        self._brake_triggered = False
         deceleration_range = (
             self._config.mild_deceleration_mps2
             if self._difficulty_level == 1
@@ -163,12 +161,13 @@ class LeadBrakeRuntime:
         self, environment: DrivingEnvironment, state: ScenarioState, *, step_index: int
     ) -> ScenarioState:
         actor_id = self._require_spawned_actor(environment, state)
-        if not self._brake_triggered and step_index >= self._parameter_int(state, "trigger_step"):
+        actor_state = environment.scenario_actor_state(actor_id)
+        speed_mps = hypot(*actor_state.velocity_xy_mps)
+        if step_index >= self._parameter_int(state, "trigger_step") and speed_mps > 0.0:
             environment.scenario_command_actor(
                 actor_id,
                 ActorCommand.longitudinal(-self._parameter_float(state, "deceleration_mps2")),
             )
-            self._brake_triggered = True
         return state
 
     def after_step(
@@ -181,7 +180,12 @@ class LeadBrakeRuntime:
     ) -> ScenarioTransition:
         self._require_spawned_actor(environment, state)
         collision = bool(raw_info.get("crash_vehicle", False))
-        success = not collision and step_index >= self._parameter_int(state, "success_step")
+        off_road = bool(raw_info.get("out_of_road", False)) or bool(raw_info.get("off_road", False))
+        success = (
+            not collision
+            and not off_road
+            and step_index >= self._parameter_int(state, "success_step")
+        )
         return ScenarioTransition(state, ScenarioStepResult(success=success, failure=collision))
 
     def observation_context(self, state: ScenarioState) -> ScenarioObservationContext:

@@ -8,6 +8,7 @@ from mad_driving.scenarios import (
     EpisodeSeeds,
     LeadBrakeRuntime,
     RoadGeometry,
+    ScenarioActorState,
     ScenarioParameterSampler,
     ScenarioStepResult,
 )
@@ -18,6 +19,7 @@ class FakeEnvironment:
         self.spawns: list[object] = []
         self.commands: list[tuple[str, ActorCommand]] = []
         self.actor_ids = {"lead-brake"}
+        self.lead_speed_mps = 8.0
 
     def scenario_road_geometry(self) -> RoadGeometry:
         return RoadGeometry((">", ">>", 0), 10.0, 0.0, 10.0, 0.1)
@@ -33,6 +35,17 @@ class FakeEnvironment:
 
     def scenario_actor_ids(self) -> tuple[str, ...]:
         return tuple(sorted(self.actor_ids))
+
+    def scenario_actor_state(self, actor_id: str) -> ScenarioActorState:
+        if actor_id not in self.actor_ids:
+            raise RuntimeError(f"missing scenario Actor: {actor_id}")
+        return ScenarioActorState(
+            actor_id=actor_id,
+            position_xy_m=(40.0, 0.0),
+            velocity_xy_mps=(self.lead_speed_mps, 0.0),
+            acceleration_xy_mps2=(0.0, 0.0),
+            heading_rad=0.0,
+        )
 
     def remove(self, actor_id: str) -> None:
         self.actor_ids.remove(actor_id)
@@ -72,6 +85,20 @@ def test_lead_brake_triggers_sampled_deceleration() -> None:
     assert environment.commands[-1] == ("lead-brake", ActorCommand.longitudinal(-4.0))
 
 
+def test_lead_brake_sustains_deceleration_until_the_lead_stops() -> None:
+    runtime, environment, state = reset_lead_brake(trigger_s=1.0, deceleration_mps2=4.0)
+
+    runtime.before_step(environment, state, step_index=10)
+    runtime.before_step(environment, state, step_index=11)
+    environment.lead_speed_mps = 0.0
+    runtime.before_step(environment, state, step_index=12)
+
+    assert environment.commands == [
+        ("lead-brake", ActorCommand.longitudinal(-4.0)),
+        ("lead-brake", ActorCommand.longitudinal(-4.0)),
+    ]
+
+
 def test_lead_brake_succeeds_after_survival_window() -> None:
     runtime, environment, state = reset_lead_brake(trigger_s=1.0, survival_s=4.0)
     transition = runtime.after_step(
@@ -79,6 +106,19 @@ def test_lead_brake_succeeds_after_survival_window() -> None:
     )
 
     assert transition.outcome == ScenarioStepResult(success=True, failure=False)
+
+
+def test_lead_brake_does_not_succeed_when_ego_is_off_road() -> None:
+    runtime, environment, state = reset_lead_brake(trigger_s=1.0, survival_s=4.0)
+
+    transition = runtime.after_step(
+        environment,
+        state,
+        step_index=50,
+        raw_info={"crash_vehicle": False, "out_of_road": True},
+    )
+
+    assert transition.outcome == ScenarioStepResult(success=False, failure=False)
 
 
 def test_lead_brake_fails_on_collision_with_present_actor() -> None:

@@ -72,7 +72,7 @@ class ScenarioSplitsConfig(StrictTypedFrozenModel):
     train: SeedRangeConfig = SeedRangeConfig(seed_start=0, seed_count=10_000)
     validation: SeedRangeConfig = SeedRangeConfig(seed_start=10_000, seed_count=1_000)
     test: SeedRangeConfig = SeedRangeConfig(seed_start=20_000, seed_count=1_000)
-    selection: Literal["nominal", "lead_brake", "cut_in", "occluded_crossing"] = "nominal"
+    selection: Literal["auto", "nominal", "lead_brake", "cut_in", "occluded_crossing"] = "auto"
     curriculum: CurriculumConfig = CurriculumConfig()
     lead_brake: LeadBrakeScenarioConfig = LeadBrakeScenarioConfig()
 

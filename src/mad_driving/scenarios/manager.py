@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from numbers import Integral
 from typing import TYPE_CHECKING
@@ -11,7 +11,6 @@ from mad_driving.config.models import ScenarioSplitsConfig
 from mad_driving.scenarios.lead_brake import LeadBrakeRuntime, NominalScenarioRuntime
 from mad_driving.scenarios.parameters import ScenarioParameterSampler
 from mad_driving.scenarios.runtime import (
-    NoOpScenarioRuntime,
     ScenarioObservationContext,
     ScenarioRuntime,
     ScenarioState,
@@ -30,14 +29,22 @@ _SCENARIOS_BY_LEVEL: dict[int, tuple[str, ...]] = {
     3: ("occluded_crossing",),
 }
 
+ScenarioRuntimeBuilder = Callable[[int, ScenarioParameterSampler], ScenarioRuntime]
+
 
 class ScenarioManagerRuntime:
     """Select deterministic concrete scenarios and delegate their lifecycle."""
 
-    def __init__(self, config: ScenarioSplitsConfig) -> None:
+    def __init__(
+        self,
+        config: ScenarioSplitsConfig,
+        *,
+        runtimes: Mapping[str, ScenarioRuntimeBuilder] | None = None,
+    ) -> None:
         self._config = config
         self._pending_level = self._initial_level(config)
         self._active_runtime: ScenarioRuntime | None = None
+        self._runtimes = self._default_runtimes() if runtimes is None else dict(runtimes)
 
     @staticmethod
     def _initial_level(config: ScenarioSplitsConfig) -> int:
@@ -61,7 +68,7 @@ class ScenarioManagerRuntime:
 
         level = self._pending_level
         sampler = ScenarioParameterSampler(seeds.scenario_parameter_seed)
-        scenario_id = sampler.choose(_SCENARIOS_BY_LEVEL[level])
+        scenario_id = self._select_scenario(level, sampler)
         runtime = self._create_runtime(scenario_id, level, sampler)
         state = runtime.reset(environment, seeds=seeds)
         parameters = dict(state.parameters)
@@ -105,8 +112,30 @@ class ScenarioManagerRuntime:
         level: int,
         sampler: ScenarioParameterSampler,
     ) -> ScenarioRuntime:
-        if scenario_id == "nominal":
-            return NominalScenarioRuntime(survival_s=self._config.lead_brake.survival_s)
-        if scenario_id == "lead_brake":
-            return LeadBrakeRuntime(self._config.lead_brake, sampler, difficulty_level=level)
-        return NoOpScenarioRuntime(scenario_id)
+        builder = self._runtimes.get(scenario_id)
+        if builder is None:
+            raise RuntimeError(f"no registered runtime for selected scenario: {scenario_id}")
+        return builder(level, sampler)
+
+    def _select_scenario(self, level: int, sampler: ScenarioParameterSampler) -> str:
+        allowed = _SCENARIOS_BY_LEVEL[level]
+        selection = self._config.selection
+        if selection == "auto":
+            return sampler.choose(allowed)
+        if selection not in allowed:
+            raise ValueError(
+                f"scenario selection {selection!r} is not allowed at difficulty level {level}"
+            )
+        return selection
+
+    def _default_runtimes(self) -> dict[str, ScenarioRuntimeBuilder]:
+        return {
+            "nominal": lambda level, sampler: NominalScenarioRuntime(
+                survival_s=self._config.lead_brake.survival_s
+            ),
+            "lead_brake": lambda level, sampler: LeadBrakeRuntime(
+                self._config.lead_brake,
+                sampler,
+                difficulty_level=level,
+            ),
+        }
