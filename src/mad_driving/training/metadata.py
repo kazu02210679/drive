@@ -20,7 +20,7 @@ from stable_baselines3.common.utils import ConstantSchedule, FloatSchedule
 
 from mad_driving.config.models import AppConfig
 from mad_driving.config.parsing import load_unique_yaml
-from mad_driving.methods import get_method_profile
+from mad_driving.methods import MethodProfileSnapshot
 from mad_driving.training.curriculum import (
     CHECKPOINT_CURRICULUM_SIDECAR_SCHEMA_VERSION,
     CURRICULUM_STATE_FILENAME,
@@ -209,67 +209,6 @@ class ResumeMetadata:
         if timesteps < 0:
             raise ValueError("start_num_timesteps must be non-negative")
         object.__setattr__(self, "start_num_timesteps", timesteps)
-
-
-@dataclass(frozen=True)
-class MethodProfileSnapshot:
-    """Immutable runtime composition identity recorded with every run."""
-
-    method_id: str
-    policy_kind: str
-    specialist_ids: tuple[str, ...]
-    critic_enabled: bool
-    shield_mode: str
-
-    @classmethod
-    def from_method_id(cls, method_id: str) -> MethodProfileSnapshot:
-        try:
-            profile = get_method_profile(cast(Any, method_id))
-        except (KeyError, TypeError) as error:
-            raise ValueError("method_profile.method_id is unknown") from error
-        return cls(
-            method_id=profile.method_id,
-            policy_kind=profile.policy_kind,
-            specialist_ids=profile.specialist_ids,
-            critic_enabled=profile.critic_enabled,
-            shield_mode=profile.default_shield_mode,
-        )
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.method_id, str) or not self.method_id:
-            raise ValueError("method_profile.method_id must be a non-empty string")
-        if not isinstance(self.policy_kind, str) or not self.policy_kind:
-            raise ValueError("method_profile.policy_kind must be a non-empty string")
-        if (
-            not isinstance(self.specialist_ids, list | tuple)
-            or not all(isinstance(agent_id, str) and agent_id for agent_id in self.specialist_ids)
-        ):
-            raise ValueError("method_profile.specialist_ids must be non-empty strings")
-        if not isinstance(self.critic_enabled, bool):
-            raise ValueError("method_profile.critic_enabled must be boolean")
-        if not isinstance(self.shield_mode, str) or not self.shield_mode:
-            raise ValueError("method_profile.shield_mode must be a non-empty string")
-        try:
-            profile = get_method_profile(cast(Any, self.method_id))
-        except (KeyError, TypeError) as error:
-            raise ValueError("method_profile.method_id is unknown") from error
-        expected = (
-            profile.method_id,
-            profile.policy_kind,
-            profile.specialist_ids,
-            profile.critic_enabled,
-            profile.default_shield_mode,
-        )
-        actual = (
-            self.method_id,
-            self.policy_kind,
-            tuple(self.specialist_ids),
-            self.critic_enabled,
-            self.shield_mode,
-        )
-        if actual != expected:
-            raise ValueError("method_profile must equal the central method profile")
-        object.__setattr__(self, "specialist_ids", profile.specialist_ids)
 
 
 @dataclass(frozen=True)
@@ -800,7 +739,9 @@ def _parse_run_metadata(payload: object) -> RunMetadata:
         action_count=_require_int(values["action_count"], "action_count"),
         action_order=tuple(action_order_value),
         method_profile=MethodProfileSnapshot(
-            method_id=_require_string(method_profile_value["method_id"], "method_profile.method_id"),
+            method_id=_require_string(
+                method_profile_value["method_id"], "method_profile.method_id"
+            ),
             policy_kind=_require_string(
                 method_profile_value["policy_kind"], "method_profile.policy_kind"
             ),

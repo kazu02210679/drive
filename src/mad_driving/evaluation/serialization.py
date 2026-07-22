@@ -1,0 +1,137 @@
+"""Strict YAML and JSONL boundaries for evaluation plans and records."""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Iterable, Mapping
+from pathlib import Path
+from typing import Protocol, TypeVar, cast
+
+import yaml
+from pydantic import ValidationError
+
+from mad_driving.config.parsing import load_unique_yaml
+from mad_driving.evaluation.models import (
+    EvaluationPlanConfig,
+    EvaluationStepRecord,
+)
+
+
+class _StrictRecord(Protocol):
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, object]) -> _StrictRecord: ...
+
+
+T = TypeVar("T", bound=_StrictRecord)
+
+
+def load_evaluation_plan(path: Path) -> EvaluationPlanConfig:
+    """Load one duplicate-safe strict frozen plan model from UTF-8 YAML."""
+
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+        payload = load_unique_yaml(text)
+    except (OSError, UnicodeError, yaml.YAMLError) as error:
+        raise ValueError(f"evaluation plan YAML is unreadable: {path}") from error
+    if not isinstance(payload, Mapping) or not all(isinstance(key, str) for key in payload):
+        raise ValueError("evaluation plan YAML root must be an object with string keys")
+    try:
+        return EvaluationPlanConfig.model_validate(dict(payload))
+    except ValidationError:
+        raise
+
+
+def write_jsonl_strict(path: Path, rows: Iterable[Mapping[str, object]]) -> None:
+    """Create one compact sorted UTF-8 JSON object per line, never overwriting."""
+
+    destination = Path(path)
+    if destination.exists():
+        raise FileExistsError(destination)
+    encoded_rows: list[bytes] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            raise ValueError("JSONL rows must be mappings")
+        encoded_rows.append(
+            (
+                json.dumps(
+                    dict(row),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                )
+                + "\n"
+            ).encode("utf-8")
+        )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with destination.open("xb") as output:
+        for encoded in encoded_rows:
+            output.write(encoded)
+
+
+def read_jsonl_strict(path: Path, model: type[T]) -> tuple[T, ...]:
+    """Read strict records while rejecting malformed JSON and duplicate fields."""
+
+    source = Path(path)
+    try:
+        payload = source.read_bytes()
+        text = payload.decode("utf-8")
+    except (OSError, UnicodeError) as error:
+        raise ValueError(f"JSONL file is unreadable: {source}") from error
+    if payload and not payload.endswith(b"\n"):
+        raise ValueError("JSONL file must end with a trailing newline")
+    if not payload:
+        if model is EvaluationStepRecord:
+            raise ValueError("step JSONL file must not be empty")
+        return ()
+    lines = text.splitlines()
+    blank_line = next((index for index, line in enumerate(lines, start=1) if not line), None)
+    if blank_line is not None:
+        raise ValueError(f"JSONL file contains a blank record at line {blank_line}")
+    records: list[T] = []
+    for line_number, line in enumerate(lines, start=1):
+        try:
+            value = json.loads(
+                line,
+                object_pairs_hook=_strict_json_object,
+                parse_constant=_reject_json_constant,
+            )
+        except json.JSONDecodeError as error:
+            raise ValueError(f"JSONL record is malformed at line {line_number}") from error
+        if not isinstance(value, Mapping):
+            raise ValueError(f"JSONL record must be an object at line {line_number}")
+        try:
+            record = cast(T, model.from_dict(cast(Mapping[str, object], value)))
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"JSONL record is invalid at line {line_number}: {error}") from error
+        records.append(record)
+    result = tuple(records)
+    if model is EvaluationStepRecord:
+        _validate_step_stream(cast(tuple[EvaluationStepRecord, ...], result))
+    return result
+
+
+def _strict_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON field: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(constant: str) -> object:
+    raise ValueError(f"non-finite JSON number: {constant}")
+
+
+def _validate_step_stream(records: tuple[EvaluationStepRecord, ...]) -> None:
+    if not records:
+        raise ValueError("step JSONL file must not be empty")
+    episode_key = records[0].episode_key
+    if any(record.episode_key != episode_key for record in records[1:]):
+        raise ValueError("step JSONL file contains more than one episode key")
+    if any(record.step_index != expected for expected, record in enumerate(records)):
+        raise ValueError("step indices must be contiguous and zero-based")
+
+
+__all__ = ["load_evaluation_plan", "read_jsonl_strict", "write_jsonl_strict"]
