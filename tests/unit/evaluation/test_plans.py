@@ -10,10 +10,14 @@ from mad_driving.evaluation.models import (
     EVALUATION_CASES,
     EvaluationPlanConfig,
     EvaluationRunSpec,
+    Phase6PublicationPlan,
     PpoRunBinding,
 )
 from mad_driving.evaluation.plans import build_formal_plan, build_smoke_plan
-from mad_driving.evaluation.serialization import load_evaluation_plan
+from mad_driving.evaluation.serialization import (
+    load_evaluation_plan,
+    load_phase6_publication_plan,
+)
 
 PPO_METHODS = (
     "b1_nominal",
@@ -24,13 +28,25 @@ PPO_METHODS = (
     "proposed_no_hazard",
 )
 FORMAL_SEEDS = (42, 43, 44, 45, 46)
+SMOKE_RESULT_LABEL = "SMOKE - NOT A RESEARCH RESULT"
+METHOD_OVERLAYS = tuple(
+    Path(f"configs/methods/{method}.yaml")
+    for method in (
+        "b0_rule",
+        *PPO_METHODS,
+    )
+)
 
 
-def make_config(kind: str, seeds: tuple[int, ...], *, episodes: int = 2) -> EvaluationPlanConfig:
+def make_config(kind: str, seeds: tuple[int, ...], *, episodes: int = 1) -> EvaluationPlanConfig:
     return EvaluationPlanConfig(
         plan_kind=kind,
         evaluation_id=f"eval-{kind}",
+        is_formal=kind == "phase6_formal",
+        result_label="" if kind == "phase6_formal" else SMOKE_RESULT_LABEL,
         app_config_path=Path("configs/base.yaml"),
+        method_overlays=METHOD_OVERLAYS,
+        max_episode_steps=32,
         episodes_per_case=episodes,
         test_seed_start=20_000,
         ppo_run_bindings=tuple(
@@ -38,6 +54,7 @@ def make_config(kind: str, seeds: tuple[int, ...], *, episodes: int = 2) -> Eval
                 method_id=method_id,
                 policy_seed=seed,
                 training_run_dir=Path(f"runs/{method_id}/seed-{seed}"),
+                checkpoint_path=Path(f"runs/{method_id}/seed-{seed}/best_model.zip"),
             )
             for method_id in PPO_METHODS
             for seed in seeds
@@ -97,16 +114,14 @@ def test_smoke_plan_has_exact_tracks_shields_cells_seeds_and_order() -> None:
             "proposed_no_hazard",
         ),
     }
-    assert len(plan) == 11 * len(EVALUATION_CASES) * 2
+    assert len(plan) == 11 * len(EVALUATION_CASES)
     assert {row.track for row in plan} == set(expected_methods)
     for track, methods in expected_methods.items():
         assert tuple(dict.fromkeys(row.method_id for row in plan if row.track == track)) == methods
     assert {row.scenario_cell_id for row in plan} == {case.case_id for case in EVALUATION_CASES}
     assert {row.shield_mode for row in plan if row.track == "decision"} == {"monitor"}
     assert {row.shield_mode for row in plan if row.track == "system"} == {"enforce"}
-    assert {
-        row.method_id: row.shield_mode for row in plan if row.track == "ablation"
-    } == {
+    assert {row.method_id: row.shield_mode for row in plan if row.track == "ablation"} == {
         "proposed": "enforce",
         "proposed_no_critic": "enforce",
         "proposed_no_shield": "off",
@@ -126,7 +141,10 @@ def test_smoke_plan_has_exact_tracks_shields_cells_seeds_and_order() -> None:
     for row in plan:
         physical_cells[(row.scenario_cell_id, row.episode_index)].add(row.test_seed)
     assert all(len(seeds) == 1 for seeds in physical_cells.values())
-    assert sorted({row.test_seed for row in plan}) == list(range(20_000, 20_010))
+    assert {row.test_seed for row in plan} == {20_000}
+    assert {row.test_seed for row in plan if row.scenario_cell_id == "level1_lead_brake"} == {
+        20_000
+    }
 
     def sort_key(row: EvaluationRunSpec) -> tuple[int, int, int, int, int]:
         return (
@@ -149,6 +167,36 @@ def test_formal_plan_uses_exact_five_policy_seeds_for_every_ppo_method() -> None
         assert tuple(sorted({row.policy_seed for row in plan if row.method_id == method_id})) == (
             FORMAL_SEEDS
         )
+
+
+def test_builders_reject_incomplete_legacy_publication_plans() -> None:
+    incomplete = EvaluationPlanConfig(
+        plan_kind="phase6_formal",
+        evaluation_id="incomplete",
+        app_config_path=Path("configs/base.yaml"),
+        episodes_per_case=1,
+        test_seed_start=20_000,
+        ppo_run_bindings=tuple(
+            PpoRunBinding(
+                method_id=method_id,
+                policy_seed=seed,
+                training_run_dir=Path(f"runs/{method_id}/seed-{seed}"),
+            )
+            for method_id in PPO_METHODS
+            for seed in FORMAL_SEEDS
+        ),
+        capture_episode_keys=(),
+    )
+
+    with pytest.raises(ValidationError, match="checkpoint_path|is_formal|method_overlays"):
+        build_formal_plan(incomplete, checkpoints(FORMAL_SEEDS))
+
+
+def test_smoke_builder_rejects_more_than_one_episode_per_case() -> None:
+    config = make_config("phase6_smoke", (77,), episodes=2)
+
+    with pytest.raises(ValidationError, match="episodes_per_case"):
+        build_smoke_plan(config, checkpoints((77,)))
 
 
 @pytest.mark.parametrize(
@@ -225,9 +273,9 @@ def test_plan_config_rejects_duplicate_keys_unknown_fields_and_seed_overflow(
     with pytest.raises(ValueError, match="duplicate"):
         load_evaluation_plan(duplicate)
 
-    overflow = make_config("phase6_smoke", (77,), episodes=201)
+    overflow = make_config("phase6_formal", FORMAL_SEEDS, episodes=1001)
     with pytest.raises(ValueError, match=r"\[20000, 21000\)"):
-        build_smoke_plan(overflow, checkpoints((77,)))
+        build_formal_plan(overflow, checkpoints(FORMAL_SEEDS))
 
 
 def test_plan_config_rejects_duplicate_capture_episode_keys() -> None:
@@ -285,3 +333,17 @@ def test_plan_yaml_converts_valid_string_paths_without_numeric_coercion(tmp_path
 
     assert config.app_config_path == Path("configs/base.yaml")
     assert config.ppo_run_bindings[0].training_run_dir == Path("runs/proposed/seed-42")
+
+
+def test_publication_loader_requires_complete_phase6_fields(tmp_path: Path) -> None:
+    legacy = tmp_path / "legacy.yaml"
+    write_plan_yaml(legacy)
+
+    with pytest.raises(ValidationError, match="is_formal|checkpoint_path|method_overlays"):
+        load_phase6_publication_plan(legacy)
+
+    repository = Path(__file__).resolve().parents[3]
+    publication = load_phase6_publication_plan(
+        repository / "configs" / "evaluation" / "phase6_smoke.yaml"
+    )
+    assert isinstance(publication, Phase6PublicationPlan)

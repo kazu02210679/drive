@@ -8,8 +8,19 @@ import os
 import re
 import sys
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from typing import cast
 
+from mad_driving.cli._common import concise_operational_error
+from mad_driving.config.models import MethodId
+from mad_driving.evaluation.models import (
+    EvaluationEpisodeKey,
+    EvaluationStepRecord,
+    EvaluationTrack,
+    ScenarioCellId,
+)
+from mad_driving.evaluation.serialization import parse_jsonl_bytes_strict
 from mad_driving.visualization import (
     _reject_output_in_source_bundle,
     _VerifiedBundle,
@@ -18,19 +29,38 @@ from mad_driving.visualization import (
 
 _EPISODE_KEY_PATTERN = re.compile(r"[a-z0-9_]{1,240}\Z")
 _TRACE_PATTERN = re.compile(r"episode_([0-9]+)_trace\.jsonl\Z")
+_FRAME_PATTERN = re.compile(r"([0-9]{6})\.png\Z")
+
+
+@dataclass(frozen=True)
+class VerifiedArtifactPayload:
+    """Manifest identity and handle-verified immutable bytes for one artifact."""
+
+    relative_path: str
+    size_bytes: int
+    sha256: str
+    payload: bytes
+
+
+@dataclass(frozen=True)
+class VerifiedEpisodeRenderInputs:
+    """All authenticated inputs needed to render one persisted episode offline."""
+
+    episode_key: EvaluationEpisodeKey
+    records: tuple[EvaluationStepRecord, ...]
+    trace: VerifiedArtifactPayload
+    frames: tuple[VerifiedArtifactPayload, ...]
 
 
 def run_render_bundle(
     *,
     evaluation: Path,
-    episode_key: str,
-    step_jsonl: Path,
-    frames_dir: Path,
+    render_inputs: VerifiedEpisodeRenderInputs,
     destination: Path,
 ) -> Path:
     """Injected Task 10 offline render orchestration seam."""
 
-    del evaluation, episode_key, step_jsonl, frames_dir, destination
+    del evaluation, render_inputs, destination
     raise RuntimeError("render bundle orchestration is not installed")
 
 
@@ -55,37 +85,108 @@ def _destination(evaluation: Path, episode_key: str, supplied: str | None) -> Pa
     return evaluation.with_name(f"{evaluation.name}-render-{episode_key}")
 
 
-def _episode_artifacts(bundle: _VerifiedBundle, episode_key: str) -> tuple[Path, Path]:
+def _canonical_non_negative_int(value: str, label: str) -> int:
+    if not value.isascii() or not value.isdecimal():
+        raise ValueError(f"persisted episode {label} is not a canonical integer")
+    parsed = int(value)
+    if str(parsed) != value:
+        raise ValueError(f"persisted episode {label} is not canonical")
+    return parsed
+
+
+def _path_episode_key(parts: tuple[str, ...], seed_text: str) -> EvaluationEpisodeKey:
+    method_id, track, policy_text, case_id = parts[1:5]
+    seed = _canonical_non_negative_int(seed_text, "seed")
+    if policy_text == "rule":
+        policy_seed = None
+    else:
+        policy_seed = _canonical_non_negative_int(policy_text, "policy seed")
+    return EvaluationEpisodeKey(
+        method_id=cast(MethodId, method_id),
+        track=cast(EvaluationTrack, track),
+        role="test",
+        policy_seed=policy_seed,
+        case_id=cast(ScenarioCellId, case_id),
+        episode_rng_seed=seed,
+    )
+
+
+def _episode_key_text(key: EvaluationEpisodeKey) -> str:
+    policy_seed = "rule" if key.policy_seed is None else str(key.policy_seed)
+    return "_".join(
+        (
+            key.method_id,
+            key.track,
+            policy_seed,
+            key.case_id,
+            str(key.episode_rng_seed),
+        )
+    )
+
+
+def _artifact_payload(bundle: _VerifiedBundle, relative: str) -> VerifiedArtifactPayload:
+    identity = bundle.artifacts[relative]
+    payload = bundle.read_bytes(bundle.root / PurePosixPath(relative))
+    return VerifiedArtifactPayload(
+        relative_path=relative,
+        size_bytes=identity.size_bytes,
+        sha256=identity.sha256,
+        payload=payload,
+    )
+
+
+def _verified_render_inputs(
+    bundle: _VerifiedBundle, episode_key: str
+) -> VerifiedEpisodeRenderInputs:
     if _EPISODE_KEY_PATTERN.fullmatch(episode_key) is None:
         raise ValueError("episode key contains invalid characters or length")
-    matches: list[tuple[str, str]] = []
-    artifact_names = frozenset(bundle.artifacts)
-    for relative in sorted(artifact_names):
+    matches: list[tuple[str, str, EvaluationEpisodeKey]] = []
+    artifact_names = tuple(bundle.artifacts)
+    for relative in artifact_names:
         parts = PurePosixPath(relative).parts
         if len(parts) != 6 or parts[0] != "episodes":
             continue
         trace_match = _TRACE_PATTERN.fullmatch(parts[5])
         if trace_match is None:
             continue
-        method_id, track, policy_seed, case_id = parts[1:5]
-        seed = trace_match.group(1)
-        candidate_key = "_".join((method_id, track, policy_seed, case_id, seed))
-        if candidate_key != episode_key:
+        path_key = _path_episode_key(parts, trace_match.group(1))
+        if _episode_key_text(path_key) != episode_key:
             continue
-        frames_relative = "/".join((*parts[:5], f"episode_{seed}_frames"))
-        frame_prefix = f"{frames_relative}/"
-        if not any(name.startswith(frame_prefix) for name in artifact_names):
-            continue
-        matches.append((relative, frames_relative))
+        frames_relative = "/".join((*parts[:5], f"episode_{path_key.episode_rng_seed}_frames"))
+        matches.append((relative, frames_relative, path_key))
     if len(matches) != 1:
         raise ValueError(
-            "episode key must identify exactly one persisted trace/frame set; "
-            f"found {len(matches)}"
+            f"episode key must identify exactly one persisted trace/frame set; found {len(matches)}"
         )
-    trace_relative, frames_relative = matches[0]
-    return (
-        bundle.root / PurePosixPath(trace_relative),
-        bundle.root / PurePosixPath(frames_relative),
+    trace_relative, frames_relative, path_key = matches[0]
+    trace = _artifact_payload(bundle, trace_relative)
+    records = parse_jsonl_bytes_strict(trace.payload, EvaluationStepRecord)
+    if records[0].episode_key != path_key:
+        raise ValueError("persisted trace episode key does not match its canonical path")
+
+    frame_prefix = f"{frames_relative}/"
+    manifested_frames = tuple(
+        relative for relative in artifact_names if relative.startswith(frame_prefix)
+    )
+    expected_frames = tuple(f"{frames_relative}/{record.step_index:06d}.png" for record in records)
+    if manifested_frames != expected_frames:
+        raise ValueError(
+            "persisted frame inventory must be exact, nonempty, and contiguous by step"
+        )
+    if any(
+        _FRAME_PATTERN.fullmatch(PurePosixPath(relative).name) is None
+        for relative in manifested_frames
+    ):
+        raise ValueError("persisted frame inventory contains an invalid frame name")
+    for record, expected in zip(records, expected_frames, strict=True):
+        if record.frame_path != expected:
+            raise ValueError("persisted trace frame path does not match its manifested step")
+    frames = tuple(_artifact_payload(bundle, relative) for relative in manifested_frames)
+    return VerifiedEpisodeRenderInputs(
+        episode_key=path_key,
+        records=records,
+        trace=trace,
+        frames=frames,
     )
 
 
@@ -102,17 +203,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise FileExistsError(f"Output already exists: {destination}")
         bundle = _verify_bundle(evaluation)
         _reject_output_in_source_bundle(bundle.root, destination)
-        step_jsonl, frames_dir = _episode_artifacts(bundle, args.episode_key)
+        render_inputs = _verified_render_inputs(bundle, args.episode_key)
         published = run_render_bundle(
             evaluation=bundle.root,
-            episode_key=args.episode_key,
-            step_jsonl=step_jsonl,
-            frames_dir=frames_dir,
+            render_inputs=render_inputs,
             destination=destination,
         )
         output = {"output": str(published)}
     except Exception as exc:
-        print(f"render failed: {exc}", file=sys.stderr)
+        print(f"render failed: {concise_operational_error(exc)}", file=sys.stderr)
         return 2
     print(json.dumps(output, allow_nan=False, ensure_ascii=False, sort_keys=True))
     return 0

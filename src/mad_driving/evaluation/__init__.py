@@ -22,8 +22,11 @@ from mad_driving.evaluation.models import (
     EvaluationRunSpec,
     EvaluationStepRecord,
     EvaluationTrack,
+    Phase6PpoRunBinding,
+    Phase6PublicationPlan,
     PpoRunBinding,
     ScenarioCellId,
+    require_phase6_publication_plan,
 )
 from mad_driving.evaluation.plans import build_formal_plan, build_smoke_plan
 from mad_driving.evaluation.policies import (
@@ -43,6 +46,7 @@ from mad_driving.evaluation.selection import (
 )
 from mad_driving.evaluation.serialization import (
     load_evaluation_plan,
+    load_phase6_publication_plan,
     parse_jsonl_bytes_strict,
     read_jsonl_strict,
     write_jsonl_strict,
@@ -72,6 +76,8 @@ __all__ = [
     "EvaluationStepRecord",
     "EvaluationTrack",
     "EvaluationWorkspace",
+    "Phase6PpoRunBinding",
+    "Phase6PublicationPlan",
     "PpoPolicyAdapter",
     "PpoRunBinding",
     "ScenarioCellId",
@@ -84,9 +90,11 @@ __all__ = [
     "discover_checkpoint_candidates",
     "extract_training_metrics",
     "load_evaluation_plan",
+    "load_phase6_publication_plan",
     "parse_jsonl_bytes_strict",
     "read_jsonl_strict",
     "reduce_episode",
+    "require_phase6_publication_plan",
     "run_evaluation_episode",
     "select_checkpoint",
     "validate_matched_episodes",

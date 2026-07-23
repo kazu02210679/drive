@@ -305,6 +305,50 @@ class EvaluationPlanConfig(StrictTypedFrozenModel):
         return self
 
 
+class Phase6PpoRunBinding(PpoRunBinding):
+    """Complete PPO source binding required at the Phase 6 publication boundary."""
+
+    checkpoint_path: Path
+
+
+class Phase6PublicationPlan(EvaluationPlanConfig):
+    """Complete strict plan accepted by builders and publication-facing commands."""
+
+    is_formal: bool
+    result_label: str
+    method_overlays: tuple[Path, ...]
+    max_episode_steps: int = Field(gt=0)
+    ppo_run_bindings: tuple[Phase6PpoRunBinding, ...]
+
+    @model_validator(mode="after")
+    def validate_publication_contract(self) -> Self:
+        if not self.method_overlays:
+            raise ValueError("method_overlays must be explicit and non-empty")
+        if self.plan_kind == "phase6_smoke":
+            if self.is_formal:
+                raise ValueError("phase6_smoke requires is_formal=false")
+            if self.result_label != "SMOKE - NOT A RESEARCH RESULT":
+                raise ValueError("phase6_smoke result_label is invalid")
+            if self.episodes_per_case != 1:
+                raise ValueError("phase6_smoke requires episodes_per_case=1")
+        else:
+            if not self.is_formal:
+                raise ValueError("phase6_formal requires is_formal=true")
+            if self.result_label:
+                raise ValueError("phase6_formal requires an empty result_label")
+        return self
+
+
+def require_phase6_publication_plan(
+    config: EvaluationPlanConfig,
+) -> Phase6PublicationPlan:
+    """Convert legacy parsed data only through the explicit strict Phase 6 boundary."""
+
+    if isinstance(config, Phase6PublicationPlan):
+        return config
+    return Phase6PublicationPlan.model_validate(config.model_dump(mode="python"))
+
+
 @dataclass(frozen=True)
 class EvaluationStepRecord:
     """Strict serializable record for one evaluation decision step."""

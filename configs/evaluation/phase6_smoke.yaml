@@ -40,4 +40,4 @@ ppo_run_bindings:
     training_run_dir: runs/phase6_smoke/proposed_no_hazard_seed42
     checkpoint_path: runs/phase6_smoke/proposed_no_hazard_seed42/checkpoints/final_model.zip
 capture_episode_keys:
-  - proposed_system_42_level1_lead_brake_20001
+  - proposed_system_42_level1_lead_brake_20000

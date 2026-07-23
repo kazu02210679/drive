@@ -12,7 +12,9 @@ from mad_driving.evaluation.models import (
     EvaluationPlanConfig,
     EvaluationRunSpec,
     EvaluationTrack,
+    Phase6PublicationPlan,
     ShieldMode,
+    require_phase6_publication_plan,
 )
 
 FORMAL_POLICY_SEEDS = (42, 43, 44, 45, 46)
@@ -45,9 +47,10 @@ def build_smoke_plan(
 ) -> tuple[EvaluationRunSpec, ...]:
     """Build the one-common-PPO-seed non-formal matrix without filesystem access."""
 
-    if config.plan_kind != "phase6_smoke":
+    publication = require_phase6_publication_plan(config)
+    if publication.plan_kind != "phase6_smoke":
         raise ValueError("smoke plan builder requires plan_kind phase6_smoke")
-    seeds_by_method = _binding_seeds_by_method(config)
+    seeds_by_method = _binding_seeds_by_method(publication)
     common_seeds = {seeds for seeds in seeds_by_method.values()}
     if len(common_seeds) != 1:
         raise ValueError("smoke plan requires exactly one common PPO policy seed")
@@ -55,7 +58,7 @@ def build_smoke_plan(
     if len(policy_seeds) != 1:
         raise ValueError("smoke plan requires exactly one common PPO policy seed")
     checkpoints = _validate_checkpoints(checkpoint_paths, policy_seeds)
-    return _build_plan(config, policy_seeds, checkpoints, is_formal=False)
+    return _build_plan(publication, policy_seeds, checkpoints, is_formal=False)
 
 
 def build_formal_plan(
@@ -64,17 +67,18 @@ def build_formal_plan(
 ) -> tuple[EvaluationRunSpec, ...]:
     """Build the exact five-seed formal matrix without filesystem access."""
 
-    if config.plan_kind != "phase6_formal":
+    publication = require_phase6_publication_plan(config)
+    if publication.plan_kind != "phase6_formal":
         raise ValueError("formal plan builder requires plan_kind phase6_formal")
-    seeds_by_method = _binding_seeds_by_method(config)
+    seeds_by_method = _binding_seeds_by_method(publication)
     if any(seeds != FORMAL_POLICY_SEEDS for seeds in seeds_by_method.values()):
         raise ValueError("formal plan requires policy seeds (42, 43, 44, 45, 46)")
     checkpoints = _validate_checkpoints(checkpoint_paths, FORMAL_POLICY_SEEDS)
-    return _build_plan(config, FORMAL_POLICY_SEEDS, checkpoints, is_formal=True)
+    return _build_plan(publication, FORMAL_POLICY_SEEDS, checkpoints, is_formal=True)
 
 
 def _binding_seeds_by_method(
-    config: EvaluationPlanConfig,
+    config: Phase6PublicationPlan,
 ) -> dict[MethodId, tuple[int, ...]]:
     seeds: dict[MethodId, list[int]] = {method_id: [] for method_id in _PPO_METHODS}
     for binding in config.ppo_run_bindings:
@@ -83,18 +87,14 @@ def _binding_seeds_by_method(
         seeds[binding.method_id].append(binding.policy_seed)
     if any(not method_seeds for method_seeds in seeds.values()):
         raise ValueError("plan requires a policy seed binding for every PPO method")
-    return {
-        method_id: tuple(sorted(method_seeds)) for method_id, method_seeds in seeds.items()
-    }
+    return {method_id: tuple(sorted(method_seeds)) for method_id, method_seeds in seeds.items()}
 
 
 def _validate_checkpoints(
     values: Mapping[tuple[str, int], str], policy_seeds: tuple[int, ...]
 ) -> dict[_CheckpointKey, str]:
     expected = {
-        (method_id, policy_seed)
-        for method_id in _PPO_METHODS
-        for policy_seed in policy_seeds
+        (method_id, policy_seed) for method_id in _PPO_METHODS for policy_seed in policy_seeds
     }
     normalized: dict[_CheckpointKey, str] = {}
     for raw_key, path in values.items():
@@ -115,13 +115,13 @@ def _validate_checkpoints(
 
 
 def _build_plan(
-    config: EvaluationPlanConfig,
+    config: Phase6PublicationPlan,
     policy_seeds: tuple[int, ...],
     checkpoints: Mapping[_CheckpointKey, str],
     *,
     is_formal: bool,
 ) -> tuple[EvaluationRunSpec, ...]:
-    required_seed_count = len(EVALUATION_CASES) * config.episodes_per_case
+    required_seed_count = config.episodes_per_case
     if config.test_seed_start + required_seed_count > TEST_SEED_STOP:
         raise ValueError("evaluation test seeds must stay in [20000, 21000)")
     rows: list[EvaluationRunSpec] = []
@@ -131,17 +131,11 @@ def _build_plan(
                 (None,) if method_id == "b0_rule" else policy_seeds
             )
             for policy_seed in method_policy_seeds:
-                for case_index, case in enumerate(EVALUATION_CASES):
+                for case in EVALUATION_CASES:
                     for episode_index in range(config.episodes_per_case):
-                        test_seed = (
-                            config.test_seed_start
-                            + case_index * config.episodes_per_case
-                            + episode_index
-                        )
+                        test_seed = config.test_seed_start + episode_index
                         checkpoint = (
-                            None
-                            if policy_seed is None
-                            else checkpoints[(method_id, policy_seed)]
+                            None if policy_seed is None else checkpoints[(method_id, policy_seed)]
                         )
                         rows.append(
                             EvaluationRunSpec(

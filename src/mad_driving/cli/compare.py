@@ -9,6 +9,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from mad_driving.cli._common import concise_operational_error
 from mad_driving.visualization import _reject_output_in_source_bundle, _verify_bundle
 
 
@@ -56,7 +57,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         output = {"output": str(published)}
     except Exception as exc:
-        print(f"comparison failed: {exc}", file=sys.stderr)
+        print(f"comparison failed: {concise_operational_error(exc)}", file=sys.stderr)
         return 2
     print(json.dumps(output, allow_nan=False, ensure_ascii=False, sort_keys=True))
     return 0

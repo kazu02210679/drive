@@ -8,12 +8,12 @@ from pathlib import Path
 from typing import Protocol, TypeVar, cast
 
 import yaml
-from pydantic import ValidationError
 
 from mad_driving.config.parsing import load_unique_yaml
 from mad_driving.evaluation.models import (
     EvaluationPlanConfig,
     EvaluationStepRecord,
+    Phase6PublicationPlan,
 )
 
 
@@ -25,9 +25,7 @@ class _StrictRecord(Protocol):
 T = TypeVar("T", bound=_StrictRecord)
 
 
-def load_evaluation_plan(path: Path) -> EvaluationPlanConfig:
-    """Load one duplicate-safe strict frozen plan model from UTF-8 YAML."""
-
+def _load_plan_payload(path: Path) -> dict[str, object]:
     try:
         text = Path(path).read_text(encoding="utf-8")
         payload = load_unique_yaml(text)
@@ -35,10 +33,19 @@ def load_evaluation_plan(path: Path) -> EvaluationPlanConfig:
         raise ValueError(f"evaluation plan YAML is unreadable: {path}") from error
     if not isinstance(payload, Mapping) or not all(isinstance(key, str) for key in payload):
         raise ValueError("evaluation plan YAML root must be an object with string keys")
-    try:
-        return EvaluationPlanConfig.model_validate(dict(payload))
-    except ValidationError:
-        raise
+    return dict(payload)
+
+
+def load_evaluation_plan(path: Path) -> EvaluationPlanConfig:
+    """Load one duplicate-safe legacy-compatible frozen plan model."""
+
+    return EvaluationPlanConfig.model_validate(_load_plan_payload(path))
+
+
+def load_phase6_publication_plan(path: Path) -> Phase6PublicationPlan:
+    """Load a complete duplicate-safe Phase 6 publication plan."""
+
+    return Phase6PublicationPlan.model_validate(_load_plan_payload(path))
 
 
 def write_jsonl_strict(path: Path, rows: Iterable[Mapping[str, object]]) -> None:
@@ -156,6 +163,7 @@ def _validate_step_stream(records: tuple[EvaluationStepRecord, ...]) -> None:
 
 __all__ = [
     "load_evaluation_plan",
+    "load_phase6_publication_plan",
     "parse_jsonl_bytes_strict",
     "read_jsonl_strict",
     "write_jsonl_strict",

@@ -27,11 +27,11 @@ def _bundle(root: Path, artifacts: dict[str, bytes] | None = None) -> Path:
     root.joinpath("evaluation_manifest.json").write_bytes(
         (
             json.dumps(
-            {"artifacts": inventory, "schema_version": 1},
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
+                {"artifacts": inventory, "schema_version": 1},
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
             + "\n"
         ).encode("utf-8")
     )
@@ -74,9 +74,7 @@ def test_verified_source_delegates_to_absent_explicit_destination_and_prints_jso
 
     monkeypatch.setattr(compare_module, "run_comparison_bundle", capture)
 
-    assert main(
-        ["--evaluation", str(source), "--output", str(destination)]
-    ) == 0
+    assert main(["--evaluation", str(source), "--output", str(destination)]) == 0
     assert calls == [(source.resolve(), destination.resolve())]
     assert json.loads(capsys.readouterr().out) == {"output": str(destination.resolve())}
     assert source.joinpath("evaluation_manifest.json").read_bytes() == before
@@ -124,9 +122,7 @@ def test_invalid_destination_fails_before_execution(
 
     monkeypatch.setattr(compare_module, "run_comparison_bundle", unexpected)
 
-    assert main(
-        ["--evaluation", str(source), "--output", str(destination)]
-    ) == 2
+    assert main(["--evaluation", str(source), "--output", str(destination)]) == 2
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "Traceback" not in captured.err
@@ -162,11 +158,11 @@ def test_operational_error_is_concise(
     monkeypatch.setattr(
         compare_module,
         "run_comparison_bundle",
-        lambda **kwargs: (_ for _ in ()).throw(ValueError("bad comparison rows")),
+        lambda **kwargs: (_ for _ in ()).throw(ValueError("bad comparison rows\nprivate detail")),
     )
 
     assert main(["--evaluation", str(source)]) == 2
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert "comparison failed: bad comparison rows" in captured.err
+    assert captured.err == "comparison failed: bad comparison rows private detail\n"
     assert "Traceback" not in captured.err
