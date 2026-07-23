@@ -8,6 +8,7 @@ import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from mad_driving.cli._common import concise_operational_error, validate_absent_destination
 from mad_driving.config.loader import load_config
@@ -20,10 +21,22 @@ from mad_driving.evaluation.plans import build_formal_plan, build_smoke_plan
 from mad_driving.evaluation.selection import (
     CheckpointCandidate,
     discover_checkpoint_candidates,
+    validate_ppo_checkpoint_archive,
 )
 from mad_driving.evaluation.serialization import load_phase6_publication_plan
+from mad_driving.evaluation.training_metrics import extract_training_metrics
 from mad_driving.methods import MethodProfileSnapshot
 from mad_driving.visualization import METHOD_ORDER, SMOKE_RESULT_LABEL
+
+if TYPE_CHECKING:
+    from mad_driving.evaluation.bundle import (
+        CheckpointReader,
+        EvaluationEnvironmentFactory,
+        EvaluationPolicyFactory,
+        RgbFrameProvider,
+        TrainingEventReader,
+    )
+    from mad_driving.evaluation.selection import CheckpointScore
 
 
 def run_evaluation_bundle(
@@ -37,21 +50,41 @@ def run_evaluation_bundle(
     authenticated_checkpoints: tuple[CheckpointCandidate, ...],
     destination: Path,
     smoke: bool,
+    environment_factory: EvaluationEnvironmentFactory | None = None,
+    policy_factory: EvaluationPolicyFactory | None = None,
+    frame_provider: RgbFrameProvider | None = None,
+    selection_scores: tuple[CheckpointScore, ...] | None = None,
+    checkpoint_reader: CheckpointReader | None = None,
+    event_reader: TrainingEventReader | None = None,
 ) -> Path:
-    """Injected Task 10 orchestration seam."""
+    """Delegate to the Task 10 orchestrator with Task 11 factories injected later."""
 
-    del (
-        evaluation_config,
-        plan_path,
-        run_plan,
-        method_configs,
-        method_profiles,
-        cli_overlays,
-        authenticated_checkpoints,
-        destination,
-        smoke,
+    from mad_driving.evaluation.bundle import run_evaluation_bundle as implementation
+
+    if (
+        environment_factory is None
+        or policy_factory is None
+        or frame_provider is None
+        or selection_scores is None
+    ):
+        raise RuntimeError("real evaluation factories are not installed until Task 11")
+    return implementation(
+        evaluation_config=evaluation_config,
+        plan_path=plan_path,
+        run_plan=run_plan,
+        method_configs=method_configs,
+        method_profiles=method_profiles,
+        cli_overlays=cli_overlays,
+        authenticated_checkpoints=authenticated_checkpoints,
+        destination=destination,
+        smoke=smoke,
+        environment_factory=environment_factory,
+        policy_factory=policy_factory,
+        frame_provider=frame_provider,
+        selection_scores=selection_scores,
+        checkpoint_reader=checkpoint_reader or validate_ppo_checkpoint_archive,
+        event_reader=event_reader or extract_training_metrics,
     )
-    raise RuntimeError("evaluation bundle orchestration is not installed")
 
 
 def _parser() -> argparse.ArgumentParser:

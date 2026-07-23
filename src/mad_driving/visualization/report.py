@@ -37,7 +37,9 @@ from mad_driving.visualization import (
     METHOD_ORDER,
     PLOT_INVENTORY,
     SMOKE_RESULT_LABEL,
+    _read_stable_regular_file,
     _reject_output_in_source_bundle,
+    _require_regular_directory,
     _unique_json_object,
     _VerifiedBundle,
     _verify_bundle,
@@ -794,7 +796,6 @@ def _required_artifacts(bundle: _VerifiedBundle) -> tuple[Path, ...]:
         "metrics/train_metrics.csv",
         "metrics/eval_metrics.csv",
         "metrics/comparison.csv",
-        *(f"plots/{name}" for name in PLOT_INVENTORY),
     )
     paths = tuple(bundle.root / relative for relative in required)
     for path in paths:
@@ -802,14 +803,13 @@ def _required_artifacts(bundle: _VerifiedBundle) -> tuple[Path, ...]:
     return paths
 
 
-def write_markdown_report(bundle_dir: Path, output_md: Path) -> None:
-    """Write a deterministic report using only a fully verified artifact bundle."""
-
-    output = Path(output_md)
-    bundle = _verify_bundle(Path(bundle_dir))
-    _reject_output_in_source_bundle(bundle.root, output)
-    if output.exists():
-        raise FileExistsError(output)
+def _write_markdown_report(
+    bundle: _VerifiedBundle,
+    *,
+    link_root: Path,
+    renders: tuple[str, ...],
+    output: Path,
+) -> None:
     _required_artifacts(bundle)
     training_rows = _parse_train_metrics_csv(
         bundle.read_bytes(bundle.root / "metrics/train_metrics.csv")
@@ -830,7 +830,7 @@ def write_markdown_report(bundle_dir: Path, output_md: Path) -> None:
     _validate_checkpoint_provenance(eval_rows, checkpoints, smoke=smoke)
 
     def link(relative: str) -> str:
-        return _relative_link(output, bundle.root / relative)
+        return _relative_link(output, link_root / relative)
 
     schema_versions = ", ".join(sorted({row.cells["record_schema_version"] for row in eval_rows}))
     contract_versions = ", ".join(
@@ -924,11 +924,6 @@ def write_markdown_report(bundle_dir: Path, output_md: Path) -> None:
     for plot_name in PLOT_INVENTORY:
         lines.append(f"- [{plot_name}]({link(f'plots/{plot_name}')})")
     lines.extend(("", "## Representative episodes", ""))
-    renders = sorted(
-        relative
-        for relative in bundle.artifacts
-        if relative.startswith("renders/") and relative.endswith(".gif")
-    )
     if renders:
         lines.extend(f"- [{Path(relative).name}]({link(relative)})" for relative in renders)
     else:
@@ -953,4 +948,72 @@ def write_markdown_report(bundle_dir: Path, output_md: Path) -> None:
         destination.write(encoded)
 
 
-__all__ = ["write_markdown_report"]
+def _verified_generated_artifacts(
+    root: Path,
+    *,
+    bundle: _VerifiedBundle | None,
+) -> tuple[str, ...]:
+    for plot_name in PLOT_INVENTORY:
+        relative = f"plots/{plot_name}"
+        path = root / relative
+        if bundle is None:
+            _read_stable_regular_file(path, label=relative)
+        else:
+            bundle.read_bytes(path)
+    renders_dir = root / "renders"
+    _require_regular_directory(renders_dir, "representative renders directory")
+    renders: list[str] = []
+    for path in sorted(renders_dir.iterdir(), key=lambda item: item.name):
+        relative = path.relative_to(root).as_posix()
+        if path.suffix != ".gif":
+            raise ValueError("representative renders directory contains a non-GIF entry")
+        if bundle is None:
+            _read_stable_regular_file(path, label=relative)
+        else:
+            bundle.read_bytes(path)
+        renders.append(relative)
+    return tuple(renders)
+
+
+def write_markdown_report(bundle_dir: Path, output_md: Path) -> None:
+    """Write a deterministic report using only a fully verified artifact bundle."""
+
+    output = Path(output_md)
+    bundle = _verify_bundle(Path(bundle_dir))
+    _reject_output_in_source_bundle(bundle.root, output)
+    if output.exists():
+        raise FileExistsError(output)
+    renders = _verified_generated_artifacts(bundle.root, bundle=bundle)
+    _write_markdown_report(bundle, link_root=bundle.root, renders=renders, output=output)
+
+
+def write_staged_markdown_report(
+    *,
+    source_bundle_dir: Path,
+    staged_bundle_dir: Path,
+    output_md: Path,
+) -> None:
+    """Render from an immutable source snapshot into pre-manifest final staging."""
+
+    source = _verify_bundle(Path(source_bundle_dir))
+    staged = Path(staged_bundle_dir)
+    output = Path(output_md)
+    _require_regular_directory(staged, "final staging directory")
+    expected_output = staged / "comparison_report.md"
+    if Path(os.path.abspath(output)) != Path(os.path.abspath(expected_output)):
+        raise ValueError("staged comparison report must use the canonical bundle path")
+    if output.exists():
+        raise FileExistsError(output)
+    if staged.joinpath("evaluation_manifest.json").exists():
+        raise ValueError("final manifest must be written after the staged report")
+    for relative, identity in source.artifacts.items():
+        _read_stable_regular_file(
+            staged / relative,
+            expected=identity,
+            label=f"staged copy {relative}",
+        )
+    renders = _verified_generated_artifacts(staged, bundle=None)
+    _write_markdown_report(source, link_root=staged, renders=renders, output=output)
+
+
+__all__ = ["write_markdown_report", "write_staged_markdown_report"]

@@ -650,7 +650,6 @@ def write_selection_artifacts(
         if (
             score.validation_plan_rows != reference.validation_plan_rows
             or score.physical_identities != reference.physical_identities
-            or score.validation_track != reference.validation_track
         ):
             raise ValueError("scores use a different scenario/seed matrix or physical identities")
     identities = tuple((score.candidate.path, score.candidate.sha256) for score in values)
