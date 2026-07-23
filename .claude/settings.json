@@ -1,0 +1,13 @@
+{
+  "extraKnownMarketplaces": {
+    "kazu-drive": {
+      "source": {
+        "source": "github",
+        "repo": "kazu02210679/Codex-plugin-Claude-Code"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "codex-plugin@kazu-drive": true
+  }
+}
