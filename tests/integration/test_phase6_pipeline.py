@@ -4,6 +4,7 @@ import csv
 import hashlib
 import io
 import json
+import os
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,7 @@ from mad_driving.evaluation.policies import PpoPolicyAdapter, VisibleTtcRulePoli
 from mad_driving.evaluation.selection import CheckpointCandidate, CheckpointScore
 from mad_driving.evaluation.training_metrics import (
     REQUIRED_TENSORBOARD_TAGS,
+    TensorBoardEventSource,
     TrainingMetricPoint,
 )
 from mad_driving.interfaces import (
@@ -105,6 +107,7 @@ class _FakeEnvironment:
         self._shield_mode: str | None = None
         self._seeds = None
         self.closed = False
+        self.close_calls = 0
 
     def set_difficulty_level(self, level: int) -> None:
         self._level = level
@@ -196,6 +199,7 @@ class _FakeEnvironment:
         return np.ones(24, dtype=np.float32), 1.0, True, False, info
 
     def close(self) -> None:
+        self.close_calls += 1
         self.closed = True
 
     @property
@@ -364,28 +368,35 @@ def _selection_scores(
     return tuple(scores)
 
 
-def _training_points(candidates: Sequence[CheckpointCandidate]) -> tuple[TrainingMetricPoint, ...]:
+def _training_points_from_event_sources(
+    sources: Sequence[TensorBoardEventSource],
+) -> tuple[TrainingMetricPoint, ...]:
     points: list[TrainingMetricPoint] = []
-    for candidate in candidates:
-        for tag in REQUIRED_TENSORBOARD_TAGS:
-            value = -0.5 if tag == "train/entropy_loss" else 1.0
+    for source in sources:
+        payload = json.loads(source.payload)
+        method_id = source.method_id
+        policy_seed = source.policy_seed
+        run_id = source.run_id
+        assert payload["method_id"] == method_id
+        assert payload["policy_seed"] == policy_seed
+        for metric, value in payload["scalars"].items():
             points.append(
                 TrainingMetricPoint(
-                    candidate.path.parents[1].name,
-                    candidate.method_id,
-                    candidate.policy_seed,
-                    candidate.training_timestep,
-                    tag,
+                    run_id,
+                    method_id,
+                    policy_seed,
+                    payload["timestep"],
+                    metric,
                     value,
                 )
             )
-            if tag == "train/entropy_loss":
+            if metric == "train/entropy_loss":
                 points.append(
                     TrainingMetricPoint(
-                        candidate.path.parents[1].name,
-                        candidate.method_id,
-                        candidate.policy_seed,
-                        candidate.training_timestep,
+                        run_id,
+                        method_id,
+                        policy_seed,
+                        payload["timestep"],
                         "policy_entropy",
                         -value,
                     )
@@ -496,6 +507,7 @@ def _normalized_latency_csv(payload: bytes, *, columns: set[str]) -> bytes:
 @pytest.fixture
 def phase6_inputs(tmp_path: Path) -> Mapping[str, object]:
     training_dirs: dict[str, Path] = {}
+    event_paths: list[Path] = []
     candidates: list[CheckpointCandidate] = []
     for index, method_id in enumerate(_PPO_METHODS, start=1):
         run_dir = tmp_path / "training" / f"{method_id}-42"
@@ -504,7 +516,24 @@ def phase6_inputs(tmp_path: Path) -> Mapping[str, object]:
         checkpoint.write_bytes(f"fake checkpoint {method_id}\n".encode())
         event = run_dir / "tensorboard" / "events.out.tfevents.fake"
         event.parent.mkdir()
-        event.write_bytes(f"fake events {method_id}\n".encode())
+        event.write_text(
+            json.dumps(
+                {
+                    "method_id": method_id,
+                    "policy_seed": 42,
+                    "scalars": {
+                        tag: -0.5 if tag == "train/entropy_loss" else 1.0
+                        for tag in REQUIRED_TENSORBOARD_TAGS
+                    },
+                    "timestep": 100 + index,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        event_paths.append(event)
         digest = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
         training_dirs[method_id] = run_dir
         candidates.append(
@@ -566,7 +595,7 @@ def phase6_inputs(tmp_path: Path) -> Mapping[str, object]:
         "cli_overlays": (),
         "authenticated_checkpoints": tuple(candidates),
         "selection_scores": _selection_scores(candidates),
-        "training_points": _training_points(candidates),
+        "event_paths": tuple(event_paths),
     }
 
 
@@ -576,23 +605,46 @@ def _run(
     *,
     fail_after: int | None = None,
     checkpoint_reads: list[Path] | None = None,
+    mutate_events_before_read: bool = False,
+    environments: list[_FakeEnvironment] | None = None,
+    policy_factory_raises: bool = False,
+    fail_on_checkpoint_read: bool = False,
 ) -> Path:
     environment_calls = 0
 
     def environment_factory(spec: EvaluationRunSpec, config: AppConfig) -> _FakeEnvironment:
         nonlocal environment_calls
         environment_calls += 1
-        return _FakeEnvironment(spec, config, fail=environment_calls == fail_after)
+        environment = _FakeEnvironment(spec, config, fail=environment_calls == fail_after)
+        if environments is not None:
+            environments.append(environment)
+        return environment
+
+    def policy_factory(
+        spec: EvaluationRunSpec,
+        config: AppConfig,
+        candidate: CheckpointCandidate | None,
+    ) -> VisibleTtcRulePolicy | PpoPolicyAdapter:
+        if policy_factory_raises:
+            raise RuntimeError("injected policy factory failure")
+        return _policy(spec, config, candidate)
 
     def checkpoint_reader(path: Path) -> str:
         if checkpoint_reads is not None:
             checkpoint_reads.append(path)
+        if fail_on_checkpoint_read:
+            raise AssertionError("checkpoint reader must not be touched")
         return hashlib.sha256(path.read_bytes()).hexdigest()
 
-    def event_reader(run_dirs: Sequence[Path], *, smoke: bool) -> tuple[TrainingMetricPoint, ...]:
+    def event_reader(
+        sources: Sequence[TensorBoardEventSource], *, smoke: bool
+    ) -> tuple[TrainingMetricPoint, ...]:
         assert smoke is True
-        assert run_dirs
-        return inputs["training_points"]  # type: ignore[return-value]
+        assert sources
+        if mutate_events_before_read:
+            for path in inputs["event_paths"]:  # type: ignore[union-attr]
+                path.write_bytes(b"mutated original event bytes\n")
+        return _training_points_from_event_sources(sources)
 
     def frame_provider(spec: EvaluationRunSpec, record_count: int) -> tuple[bytes, ...]:
         assert spec.episode_key == EvaluationEpisodeKey(
@@ -611,12 +663,108 @@ def _run(
         destination=destination,
         smoke=True,
         environment_factory=environment_factory,
-        policy_factory=_policy,
+        policy_factory=policy_factory,
         checkpoint_reader=checkpoint_reader,
         event_reader=event_reader,
         frame_provider=frame_provider,
         selection_scores=inputs["selection_scores"],  # type: ignore[arg-type]
     )
+
+
+def test_training_metrics_remain_bound_to_copied_event_bytes_after_source_drift(
+    tmp_path: Path, phase6_inputs: Mapping[str, object]
+) -> None:
+    published = _run(
+        phase6_inputs,
+        tmp_path / "event-drift",
+        mutate_events_before_read=True,
+    )
+
+    copied_events = tuple(published.glob("sources/**/events.out.tfevents.fake"))
+    assert len(copied_events) == len(_PPO_METHODS)
+    assert all(b"mutated original" not in path.read_bytes() for path in copied_events)
+    assert all(
+        path.read_bytes() == b"mutated original event bytes\n"
+        for path in phase6_inputs["event_paths"]  # type: ignore[union-attr]
+    )
+    with published.joinpath("metrics", "train_metrics.csv").open(
+        encoding="utf-8", newline=""
+    ) as source:
+        rows = tuple(csv.DictReader(source))
+    assert {row["method_id"] for row in rows} == set(_PPO_METHODS)
+    assert all(row["value"] != "" for row in rows)
+
+
+def test_policy_factory_failure_closes_unowned_environment_once_and_cleans_stages(
+    tmp_path: Path, phase6_inputs: Mapping[str, object]
+) -> None:
+    destination = tmp_path / "policy-factory-failure"
+    environments: list[_FakeEnvironment] = []
+
+    with pytest.raises(RuntimeError, match="injected policy factory failure"):
+        _run(
+            phase6_inputs,
+            destination,
+            environments=environments,
+            policy_factory_raises=True,
+        )
+
+    assert len(environments) == 1
+    assert environments[0].close_calls == 1
+    assert not destination.exists()
+    assert not tuple(tmp_path.glob(".policy-factory-failure.staging-*"))
+
+
+@pytest.mark.parametrize(
+    "destination_kind",
+    ("existing", "dangling", "non-directory-parent", "linked-parent", "inside-source"),
+)
+def test_evaluation_preflight_rejects_unsafe_destination_before_any_input_or_stage_touch(
+    tmp_path: Path,
+    phase6_inputs: Mapping[str, object],
+    destination_kind: str,
+) -> None:
+    if destination_kind == "existing":
+        destination = tmp_path / "existing"
+        destination.mkdir()
+    elif destination_kind == "dangling":
+        destination = tmp_path / "dangling"
+        try:
+            os.symlink(tmp_path / "missing-target", destination, target_is_directory=True)
+        except OSError as error:
+            pytest.skip(f"symlink creation unavailable: {error}")
+    elif destination_kind == "non-directory-parent":
+        parent = tmp_path / "not-a-directory"
+        parent.write_bytes(b"file\n")
+        destination = parent / "evaluation"
+    elif destination_kind == "linked-parent":
+        real_parent = tmp_path / "real-parent"
+        real_parent.mkdir()
+        linked_parent = tmp_path / "linked-parent"
+        try:
+            os.symlink(real_parent, linked_parent, target_is_directory=True)
+        except OSError as error:
+            pytest.skip(f"symlink creation unavailable: {error}")
+        destination = linked_parent / "evaluation"
+    else:
+        plan = phase6_inputs["evaluation_config"]
+        assert isinstance(plan, Phase6PublicationPlan)
+        destination = Path(plan.ppo_run_bindings[0].training_run_dir) / "evaluation"
+
+    checkpoint_reads: list[Path] = []
+    environments: list[_FakeEnvironment] = []
+    with pytest.raises((FileExistsError, ValueError)):
+        _run(
+            phase6_inputs,
+            destination,
+            checkpoint_reads=checkpoint_reads,
+            environments=environments,
+            fail_on_checkpoint_read=True,
+        )
+
+    assert checkpoint_reads == []
+    assert environments == []
+    assert not tuple(tmp_path.rglob(".*.staging-*"))
 
 
 def test_fake_phase6_pipeline_is_strict_repeatable_and_failure_atomic(

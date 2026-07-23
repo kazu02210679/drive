@@ -28,6 +28,7 @@ from mad_driving.evaluation.models import (
     ScenarioCellId,
     require_phase6_publication_plan,
 )
+from mad_driving.evaluation.paths import validate_absent_destination
 from mad_driving.evaluation.plans import build_formal_plan, build_smoke_plan
 from mad_driving.evaluation.policies import (
     EvaluationPolicy,
@@ -52,8 +53,10 @@ from mad_driving.evaluation.serialization import (
     write_jsonl_strict,
 )
 from mad_driving.evaluation.training_metrics import (
+    TensorBoardEventSource,
     TrainingMetricPoint,
     extract_training_metrics,
+    extract_training_metrics_from_event_sources,
     write_training_metrics_csv,
 )
 from mad_driving.evaluation.workspace import EvaluationWorkspace
@@ -81,6 +84,7 @@ __all__ = [
     "PpoPolicyAdapter",
     "PpoRunBinding",
     "ScenarioCellId",
+    "TensorBoardEventSource",
     "TrainingMetricPoint",
     "ValidationPhysicalIdentity",
     "VisibleTtcRulePolicy",
@@ -89,6 +93,7 @@ __all__ = [
     "build_smoke_plan",
     "discover_checkpoint_candidates",
     "extract_training_metrics",
+    "extract_training_metrics_from_event_sources",
     "load_evaluation_plan",
     "load_phase6_publication_plan",
     "parse_jsonl_bytes_strict",
@@ -97,6 +102,7 @@ __all__ = [
     "require_phase6_publication_plan",
     "run_evaluation_episode",
     "select_checkpoint",
+    "validate_absent_destination",
     "validate_matched_episodes",
     "validate_ppo_checkpoint_archive",
     "write_comparison_csv",

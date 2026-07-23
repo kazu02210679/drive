@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import subprocess
 import sys
 from collections.abc import Callable
@@ -13,7 +14,9 @@ from mad_driving.evaluation.selection import CheckpointCandidate
 from mad_driving.evaluation.training_metrics import (
     REQUIRED_TENSORBOARD_TAGS,
     TRAIN_METRICS_CSV_COLUMNS,
+    TensorBoardEventSource,
     extract_training_metrics,
+    extract_training_metrics_from_event_sources,
     write_training_metrics_csv,
 )
 
@@ -89,6 +92,33 @@ def test_extracts_verified_offline_scalars_with_original_tags_and_entropy(
     assert any(point.metric == "train/entropy_loss" and point.value == -0.75 for point in points)
     assert any(point.metric == "policy_entropy" and point.value == 0.75 for point in points)
     assert all(point.value is not None for point in points)
+
+
+def test_event_source_extraction_remains_bound_to_authenticated_copied_bytes(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run-42"
+    _write_events(run_dir)
+    tensorboard_dir = run_dir / "tensorboard"
+    event_files = tuple(tensorboard_dir.rglob("events.out.tfevents.*"))
+    sources = tuple(
+        TensorBoardEventSource(
+            run_id=run_dir.name,
+            method_id="proposed",
+            policy_seed=42,
+            event_relative_path=event.relative_to(tensorboard_dir).as_posix(),
+            payload=(payload := event.read_bytes()),
+            sha256=hashlib.sha256(payload).hexdigest(),
+        )
+        for event in event_files
+    )
+    for event in event_files:
+        event.write_bytes(b"source drift after private copy\n")
+
+    points = extract_training_metrics_from_event_sources(sources, smoke=False)
+
+    assert any(point.metric == "rollout/ep_rew_mean" and point.value == 2.5 for point in points)
+    assert any(point.metric == "policy_entropy" and point.value == 0.75 for point in points)
 
 
 def test_formal_missing_tag_fails_and_unverified_run_is_rejected_before_events(

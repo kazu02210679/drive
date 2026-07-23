@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import math
 import os
 import stat
+import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Final
 
 from mad_driving.evaluation.models import REWARD_COMPONENT_KEYS
@@ -71,6 +73,47 @@ class TrainingMetricPoint:
             if not math.isfinite(numeric):
                 raise ValueError("value must be finite when available")
             object.__setattr__(self, "value", numeric)
+
+
+@dataclass(frozen=True)
+class TensorBoardEventSource:
+    """Authenticated immutable TensorBoard bytes copied into the source snapshot."""
+
+    run_id: str
+    method_id: str
+    policy_seed: int
+    event_relative_path: str
+    payload: bytes
+    sha256: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.run_id, str) or not self.run_id:
+            raise ValueError("run_id must be a non-empty string")
+        if not isinstance(self.method_id, str) or not self.method_id:
+            raise ValueError("method_id must be a non-empty string")
+        if type(self.policy_seed) is not int or self.policy_seed < 0:
+            raise ValueError("policy_seed must be a non-negative integer")
+        if not isinstance(self.event_relative_path, str) or not self.event_relative_path:
+            raise ValueError("event_relative_path must be a non-empty string")
+        relative = PurePosixPath(self.event_relative_path)
+        if (
+            relative.is_absolute()
+            or relative.as_posix() != self.event_relative_path
+            or "\\" in self.event_relative_path
+            or any(part in {"", ".", ".."} for part in relative.parts)
+            or not relative.name.startswith(_EVENT_FILE_PREFIX)
+        ):
+            raise ValueError("event_relative_path must identify a relative TensorBoard event")
+        if type(self.payload) is not bytes:
+            raise TypeError("payload must be bytes")
+        if not isinstance(self.sha256, str) or len(self.sha256) != 64:
+            raise ValueError("sha256 must be a lowercase SHA-256 digest")
+        if self.sha256 != self.sha256.lower() or any(
+            character not in "0123456789abcdef" for character in self.sha256
+        ):
+            raise ValueError("sha256 must be a lowercase SHA-256 digest")
+        if hashlib.sha256(self.payload).hexdigest() != self.sha256:
+            raise ValueError("payload does not match its SHA-256 binding")
 
 
 def _is_reparse(entry_stat: os.stat_result) -> bool:
@@ -153,8 +196,8 @@ def _verified_run_provenance(run_dir: Path) -> tuple[str, int]:
     return final_candidate.method_id, final_candidate.policy_seed
 
 
-def _read_run_points(
-    run_dir: Path,
+def _read_event_points(
+    event_files: Sequence[Path],
     *,
     run_id: str,
     method_id: str,
@@ -165,7 +208,6 @@ def _read_run_points(
         EventAccumulator,
     )
 
-    event_files = _event_files(run_dir / "tensorboard")
     scalars: dict[str, list[tuple[int, float]]] = {tag: [] for tag in REQUIRED_TENSORBOARD_TAGS}
     seen: set[tuple[str, int]] = set()
     for event_file in event_files:
@@ -239,6 +281,23 @@ def _read_run_points(
     return points
 
 
+def _read_run_points(
+    run_dir: Path,
+    *,
+    run_id: str,
+    method_id: str,
+    policy_seed: int,
+    smoke: bool,
+) -> list[TrainingMetricPoint]:
+    return _read_event_points(
+        _event_files(run_dir / "tensorboard"),
+        run_id=run_id,
+        method_id=method_id,
+        policy_seed=policy_seed,
+        smoke=smoke,
+    )
+
+
 def extract_training_metrics(
     run_dirs: Sequence[Path],
     *,
@@ -268,6 +327,73 @@ def extract_training_metrics(
                 smoke=smoke,
             )
         )
+    return tuple(
+        sorted(
+            points,
+            key=lambda point: (
+                point.run_id,
+                point.timestep,
+                _METRIC_ORDER[point.metric],
+            ),
+        )
+    )
+
+
+def extract_training_metrics_from_event_sources(
+    sources: Sequence[TensorBoardEventSource],
+    *,
+    smoke: bool,
+) -> tuple[TrainingMetricPoint, ...]:
+    """Read metrics solely from authenticated bytes in a private source snapshot."""
+
+    if type(smoke) is not bool:
+        raise TypeError("smoke must be a bool")
+    values = tuple(sources)
+    if not values:
+        raise ValueError("sources must be non-empty")
+    if any(type(source) is not TensorBoardEventSource for source in values):
+        raise TypeError("sources must contain TensorBoardEventSource values")
+
+    grouped: dict[tuple[str, str, int], list[TensorBoardEventSource]] = {}
+    run_provenance: dict[str, tuple[str, int]] = {}
+    for source in values:
+        provenance = (source.method_id, source.policy_seed)
+        previous = run_provenance.setdefault(source.run_id, provenance)
+        if previous != provenance:
+            raise ValueError("event sources disagree on authenticated run provenance")
+        grouped.setdefault((source.run_id, *provenance), []).append(source)
+
+    points: list[TrainingMetricPoint] = []
+    with tempfile.TemporaryDirectory(prefix="mad-driving-tensorboard-") as temporary:
+        temporary_root = Path(temporary)
+        for run_index, ((run_id, method_id, policy_seed), run_sources) in enumerate(
+            sorted(grouped.items())
+        ):
+            relative_paths = [source.event_relative_path for source in run_sources]
+            if len(relative_paths) != len(set(relative_paths)):
+                raise ValueError(f"event sources contain a duplicate path in run {run_id}")
+            event_files: list[Path] = []
+            for event_index, source in enumerate(
+                sorted(run_sources, key=lambda item: item.event_relative_path)
+            ):
+                if hashlib.sha256(source.payload).hexdigest() != source.sha256:
+                    raise ValueError("event source payload changed after authentication")
+                destination = temporary_root.joinpath(
+                    f"run-{run_index}", f"{_EVENT_FILE_PREFIX}{event_index}"
+                )
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                with destination.open("xb") as output:
+                    output.write(source.payload)
+                event_files.append(destination)
+            points.extend(
+                _read_event_points(
+                    event_files,
+                    run_id=run_id,
+                    method_id=method_id,
+                    policy_seed=policy_seed,
+                    smoke=smoke,
+                )
+            )
     return tuple(
         sorted(
             points,
@@ -323,7 +449,9 @@ def write_training_metrics_csv(
 __all__ = [
     "REQUIRED_TENSORBOARD_TAGS",
     "TRAIN_METRICS_CSV_COLUMNS",
+    "TensorBoardEventSource",
     "TrainingMetricPoint",
     "extract_training_metrics",
+    "extract_training_metrics_from_event_sources",
     "write_training_metrics_csv",
 ]

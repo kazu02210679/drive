@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -21,6 +22,7 @@ from mad_driving.evaluation.compare import (
 )
 from mad_driving.evaluation.metrics import EpisodeMetricRecord, reduce_episode
 from mad_driving.evaluation.models import EvaluationRunSpec, Phase6PublicationPlan
+from mad_driving.evaluation.paths import validate_absent_destination
 from mad_driving.evaluation.plans import build_formal_plan, build_smoke_plan
 from mad_driving.evaluation.policies import EvaluationPolicy
 from mad_driving.evaluation.runner import EvaluationEnvironment, run_evaluation_episode
@@ -35,9 +37,10 @@ from mad_driving.evaluation.serialization import (
     write_jsonl_strict,
 )
 from mad_driving.evaluation.training_metrics import (
+    TensorBoardEventSource,
     TrainingMetricPoint,
     _event_files,
-    extract_training_metrics,
+    extract_training_metrics_from_event_sources,
     write_training_metrics_csv,
 )
 from mad_driving.evaluation.workspace import EvaluationWorkspace
@@ -68,7 +71,7 @@ class EvaluationPolicyFactory(Protocol):
 
 class TrainingEventReader(Protocol):
     def __call__(
-        self, run_dirs: Sequence[Path], *, smoke: bool
+        self, sources: Sequence[TensorBoardEventSource], *, smoke: bool
     ) -> tuple[TrainingMetricPoint, ...]: ...
 
 
@@ -77,13 +80,6 @@ class RgbFrameProvider(Protocol):
 
 
 CheckpointReader = Callable[[Path], str]
-
-
-def _preflight_destination(destination: Path) -> Path:
-    final = Path(destination)
-    if final.exists():
-        raise FileExistsError(final)
-    return final
 
 
 def _profile_payload(profile: MethodProfileSnapshot) -> dict[str, object]:
@@ -270,15 +266,14 @@ def _write_source_provenance(
 
 def _copy_tensorboard_sources(
     root: Path, evaluation_config: Phase6PublicationPlan
-) -> tuple[Path, ...]:
-    run_dirs: list[Path] = []
+) -> tuple[TensorBoardEventSource, ...]:
+    copied_sources: list[TensorBoardEventSource] = []
     bindings = sorted(
         evaluation_config.ppo_run_bindings,
         key=lambda binding: (METHOD_ORDER.index(binding.method_id), binding.policy_seed),
     )
     for binding in bindings:
         run_dir = Path(binding.training_run_dir)
-        run_dirs.append(run_dir)
         tensorboard_dir = run_dir / "tensorboard"
         for source in _event_files(tensorboard_dir):
             relative = source.relative_to(tensorboard_dir)
@@ -289,11 +284,19 @@ def _copy_tensorboard_sources(
                 "tensorboard",
                 relative,
             )
-            _write_bytes(
-                destination,
-                _read_stable_regular_file(source, label=source.as_posix()),
+            payload = _read_stable_regular_file(source, label=source.as_posix())
+            _write_bytes(destination, payload)
+            copied_sources.append(
+                TensorBoardEventSource(
+                    run_id=run_dir.name,
+                    method_id=binding.method_id,
+                    policy_seed=binding.policy_seed,
+                    event_relative_path=relative.as_posix(),
+                    payload=payload,
+                    sha256=hashlib.sha256(payload).hexdigest(),
+                )
             )
-    return tuple(run_dirs)
+    return tuple(copied_sources)
 
 
 def _validate_training_points(
@@ -335,10 +338,19 @@ def _write_online_outputs(
             None if spec.policy_seed is None else candidates[(spec.method_id, spec.policy_seed)]
         )
         private_episode = online_root / f"{index:04d}-{_episode_key_text(spec)}"
+        environment = environment_factory(spec, config)
+        try:
+            policy = policy_factory(spec, config, candidate)
+        except BaseException as error:
+            try:
+                environment.close()
+            except BaseException as close_error:
+                error.add_note(f"environment cleanup also failed: {close_error!r}")
+            raise
         result = run_evaluation_episode(
             spec,
-            environment=environment_factory(spec, config),
-            policy=policy_factory(spec, config, candidate),
+            environment=environment,
+            policy=policy,
             config=config,
             destination=private_episode,
             checkpoint_sha256=None if candidate is None else candidate.sha256,
@@ -453,11 +465,16 @@ def run_evaluation_bundle(
     frame_provider: RgbFrameProvider,
     selection_scores: tuple[CheckpointScore, ...],
     checkpoint_reader: CheckpointReader = validate_ppo_checkpoint_archive,
-    event_reader: TrainingEventReader = extract_training_metrics,
+    event_reader: TrainingEventReader = extract_training_metrics_from_event_sources,
 ) -> Path:
     """Build, verify, and atomically publish a complete Phase 6 artifact bundle."""
 
-    final_destination = _preflight_destination(destination)
+    final_destination = validate_absent_destination(
+        destination,
+        source_roots=tuple(
+            Path(binding.training_run_dir) for binding in evaluation_config.ppo_run_bindings
+        ),
+    )
     source_workspace: EvaluationWorkspace | None = None
     final_workspace: EvaluationWorkspace | None = None
     try:
@@ -483,8 +500,8 @@ def run_evaluation_bundle(
             cli_overlays=cli_overlays,
         )
         write_selection_artifacts(source_root, selection_scores)
-        run_dirs = _copy_tensorboard_sources(source_root, evaluation_config)
-        points = event_reader(run_dirs, smoke=smoke)
+        event_sources = _copy_tensorboard_sources(source_root, evaluation_config)
+        points = event_reader(event_sources, smoke=smoke)
         _validate_training_points(points, evaluation_config)
         write_training_metrics_csv(
             source_root / "metrics" / "train_metrics.csv", points, smoke=smoke

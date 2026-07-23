@@ -24,7 +24,7 @@ from mad_driving.evaluation.selection import (
     validate_ppo_checkpoint_archive,
 )
 from mad_driving.evaluation.serialization import load_phase6_publication_plan
-from mad_driving.evaluation.training_metrics import extract_training_metrics
+from mad_driving.evaluation.training_metrics import extract_training_metrics_from_event_sources
 from mad_driving.methods import MethodProfileSnapshot
 from mad_driving.visualization import METHOD_ORDER, SMOKE_RESULT_LABEL
 
@@ -83,7 +83,7 @@ def run_evaluation_bundle(
         frame_provider=frame_provider,
         selection_scores=selection_scores,
         checkpoint_reader=checkpoint_reader or validate_ppo_checkpoint_archive,
-        event_reader=event_reader or extract_training_metrics,
+        event_reader=event_reader or extract_training_metrics_from_event_sources,
     )
 
 
