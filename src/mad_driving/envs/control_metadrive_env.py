@@ -4,6 +4,9 @@ from collections.abc import Mapping
 from numbers import Integral
 from typing import Any, cast
 
+import numpy as np
+from numpy.typing import NDArray
+
 from mad_driving.config.models import ControlConfig
 from mad_driving.control import LaneKeepingLongitudinalPolicy
 from mad_driving.envs.multi_agent_speed_env import DrivingEnvironment
@@ -145,6 +148,26 @@ def create_control_metadrive_env(
 
         def scenario_ego_collided_with(self, actor_id: str) -> bool:
             return self._scenario_actor_manager().ego_collided_with(self.vehicle, actor_id)
+
+        def scenario_capture_rgb(self) -> NDArray[np.uint8]:
+            frame = np.asarray(
+                self.render(
+                    mode="topdown",
+                    window=False,
+                    film_size=(2_000, 2_000),
+                    screen_size=(640, 480),
+                    target_agent_heading_up=True,
+                )
+            )
+            if (
+                frame.dtype != np.dtype(np.uint8)
+                or frame.ndim != 3
+                or frame.shape[0] <= 0
+                or frame.shape[1] <= 0
+                or frame.shape[2] != 3
+            ):
+                raise ValueError("MetaDrive top-down renderer returned an invalid uint8 image")
+            return np.ascontiguousarray(frame)
 
         def _scenario_actor_manager(self) -> ScenarioActorManager:
             manager = self.engine.scenario_actor_manager

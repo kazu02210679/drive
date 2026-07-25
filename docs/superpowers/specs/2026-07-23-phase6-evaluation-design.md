@@ -421,6 +421,14 @@ speed limit, target speed, Shield status, each present Agent's severity and reco
 maximum speed, and Critic conflict score. GIF generation consumes saved frames plus
 strict JSONL records and never reruns MetaDrive.
 
+MetaDrive 0.4.3 compatibility note: `image_observation=True` changes MetaDrive's
+observation construction and requires an explicitly registered image sensor. On this
+Windows workspace, its 3D asset-path conversion also cannot open assets below a
+non-ASCII user path. Phase 6 therefore captures visualization-only RGB frames through
+MetaDrive's standard headless top-down renderer (`window=False`). This adapter does
+not enable image observation, does not feed pixels to any policy, and leaves the
+24-dimensional PPO observation unchanged.
+
 The Markdown report is deterministic and contains:
 
 - provenance and the exact method/seed/scenario matrix;

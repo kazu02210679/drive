@@ -14,10 +14,36 @@ from mad_driving.visualization import _reject_output_in_source_bundle, _verify_b
 
 
 def run_comparison_bundle(*, evaluation: Path, destination: Path) -> Path:
-    """Injected Task 10 offline comparison orchestration seam."""
+    """Regenerate comparison plots and Markdown from one verified source bundle."""
 
-    del evaluation, destination
-    raise RuntimeError("comparison bundle orchestration is not installed")
+    from mad_driving.evaluation.bundle import _cleanup_workspace
+    from mad_driving.evaluation.workspace import EvaluationWorkspace
+    from mad_driving.visualization import (
+        write_learning_curve,
+        write_safety_efficiency_plots,
+    )
+    from mad_driving.visualization.report import write_markdown_report
+
+    workspace: EvaluationWorkspace | None = None
+    try:
+        workspace = EvaluationWorkspace.stage(destination)
+        write_learning_curve(
+            evaluation / "metrics" / "train_metrics.csv",
+            workspace.path / "plots" / "learning_curve.png",
+        )
+        write_safety_efficiency_plots(
+            evaluation / "metrics" / "eval_metrics.csv",
+            workspace.path / "plots",
+        )
+        write_markdown_report(
+            evaluation,
+            workspace.path / "comparison_report.md",
+        )
+        workspace.write_manifest()
+        return workspace.publish()
+    except BaseException:
+        _cleanup_workspace(workspace)
+        raise
 
 
 def _parser() -> argparse.ArgumentParser:

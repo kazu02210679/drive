@@ -58,10 +58,25 @@ def run_render_bundle(
     render_inputs: VerifiedEpisodeRenderInputs,
     destination: Path,
 ) -> Path:
-    """Injected Task 10 offline render orchestration seam."""
+    """Render one authenticated trace/frame set into a fresh manifest bundle."""
 
-    del evaluation, render_inputs, destination
-    raise RuntimeError("render bundle orchestration is not installed")
+    from mad_driving.evaluation.bundle import _cleanup_workspace
+    from mad_driving.evaluation.workspace import EvaluationWorkspace
+    from mad_driving.visualization import write_episode_gif
+
+    workspace: EvaluationWorkspace | None = None
+    try:
+        workspace = EvaluationWorkspace.stage(destination)
+        trace = evaluation / PurePosixPath(render_inputs.trace.relative_path)
+        first_frame = evaluation / PurePosixPath(render_inputs.frames[0].relative_path)
+        frames = first_frame.parent
+        output = workspace.path / "render.gif"
+        write_episode_gif(trace, frames, output)
+        workspace.write_manifest()
+        return workspace.publish()
+    except BaseException:
+        _cleanup_workspace(workspace)
+        raise
 
 
 def _parser() -> argparse.ArgumentParser:

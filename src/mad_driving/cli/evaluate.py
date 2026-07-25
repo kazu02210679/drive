@@ -57,17 +57,28 @@ def run_evaluation_bundle(
     checkpoint_reader: CheckpointReader | None = None,
     event_reader: TrainingEventReader | None = None,
 ) -> Path:
-    """Delegate to the Task 10 orchestrator with Task 11 factories injected later."""
+    """Delegate to the Task 10 orchestrator with production runtime factories."""
 
     from mad_driving.evaluation.bundle import run_evaluation_bundle as implementation
 
-    if (
-        environment_factory is None
-        or policy_factory is None
-        or frame_provider is None
-        or selection_scores is None
-    ):
-        raise RuntimeError("real evaluation factories are not installed until Task 11")
+    factory_values = (environment_factory, policy_factory, frame_provider)
+    if all(factory is None for factory in factory_values):
+        from mad_driving.evaluation.metadrive import MetaDriveEvaluationRuntime
+
+        runtime = MetaDriveEvaluationRuntime(
+            capture_episode_keys=evaluation_config.capture_episode_keys,
+            max_episode_steps=evaluation_config.max_episode_steps,
+        )
+        environment_factory = runtime.environment_factory
+        policy_factory = runtime.policy_factory
+        frame_provider = runtime.frame_provider
+    elif any(factory is None for factory in factory_values):
+        raise ValueError("evaluation runtime factories must be supplied together")
+    if selection_scores is None:
+        raise RuntimeError("authenticated checkpoint-selection scores are required")
+    assert environment_factory is not None
+    assert policy_factory is not None
+    assert frame_provider is not None
     return implementation(
         evaluation_config=evaluation_config,
         plan_path=plan_path,

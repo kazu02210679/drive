@@ -101,6 +101,8 @@ class DrivingEnvironment(Protocol):
 
     def scenario_ego_collided_with(self, actor_id: str) -> bool: ...
 
+    def scenario_capture_rgb(self) -> NDArray[np.uint8]: ...
+
 
 class EnvironmentFactory(Protocol):
     def __call__(self, config: dict[str, object]) -> DrivingEnvironment: ...
@@ -339,6 +341,26 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
             raise ValueError("scene evaluation reads require a validation or test environment")
         self._require_active_episode()
         return cast(SceneFrame, self._frame).observation
+
+    def capture_rgb_frame_for_evaluation(self) -> NDArray[np.uint8]:
+        """Return one copied RGB simulator frame for an initialized evaluation episode."""
+
+        if self._role not in {"validation", "test"}:
+            raise ValueError("RGB evaluation capture requires a validation or test environment")
+        environment = self._environment
+        if environment is None or self._frame is None:
+            raise RuntimeError("reset() must be called before RGB evaluation capture")
+        frame = environment.scenario_capture_rgb()
+        if (
+            not isinstance(frame, np.ndarray)
+            or frame.dtype != np.dtype(np.uint8)
+            or frame.ndim != 3
+            or frame.shape[0] <= 0
+            or frame.shape[1] <= 0
+            or frame.shape[2] != 3
+        ):
+            raise ValueError("simulator RGB frame must be a non-empty HWC uint8 array")
+        return np.ascontiguousarray(frame).copy()
 
     def reset(
         self,

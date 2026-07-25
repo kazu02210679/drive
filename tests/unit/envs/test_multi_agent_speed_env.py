@@ -182,6 +182,10 @@ class FakeSimulator:
         if self.fail_on_close:
             raise RuntimeError("simulator close failure")
 
+    @staticmethod
+    def scenario_capture_rgb() -> NDArray[np.uint8]:
+        return np.full((12, 16, 3), (17, 34, 51), dtype=np.uint8)
+
 
 class RecordingEnvironmentFactory:
     def __init__(
@@ -2067,6 +2071,22 @@ def test_evaluation_scene_read_requires_active_episode_and_returns_current_visib
     assert initial.step_index == 0
     assert current.step_index == 1
     assert not hasattr(current, "privileged")
+
+
+def test_test_environment_exposes_a_copied_rgb_frame_only_during_an_active_episode() -> None:
+    harness = make_env(role="test")
+
+    with pytest.raises(RuntimeError, match="reset"):
+        harness.env.capture_rgb_frame_for_evaluation()
+
+    harness.env.reset(seed=20_001)
+    frame = harness.env.capture_rgb_frame_for_evaluation()
+    frame[0, 0] = 0
+    second = harness.env.capture_rgb_frame_for_evaluation()
+
+    assert frame.shape == (12, 16, 3)
+    assert frame.dtype == np.uint8
+    assert second[0, 0].tolist() == [17, 34, 51]
 
 
 def test_reset_and_step_info_include_scenario_metadata() -> None:
