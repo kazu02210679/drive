@@ -700,9 +700,8 @@ def run_training(
             dummy_vec_env_factory=dummy_vec_env_factory,
             subproc_vec_env_factory=subproc_vec_env_factory,
         )
-        if resume_source is not None:
-            _broadcast_difficulty_level(train_env, curriculum_state.level)
-            _broadcast_difficulty_level(eval_env, curriculum_state.level)
+        _broadcast_difficulty_level(train_env, curriculum_state.level)
+        _broadcast_difficulty_level(eval_env, curriculum_state.level)
 
         if resume_source is None:
             model = ppo_factory(

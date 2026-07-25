@@ -638,10 +638,18 @@ def test_curriculum_callback_balances_level_two_validation_scenarios(tmp_path: P
     try:
         model.learn(total_timesteps=4, callback=callback)
 
-        expected_schedule = ("lead_brake", "cut_in", "lead_brake", "cut_in", "lead_brake")
-        assert evaluation_environment.scenario_schedules == [expected_schedule]
+        expected_episode_schedule = (
+            "lead_brake",
+            "cut_in",
+            "lead_brake",
+            "cut_in",
+            "lead_brake",
+        )
+        expected_reset_schedule = (*expected_episode_schedule, "cut_in")
+        assert evaluation_environment.scenario_schedules == [expected_reset_schedule]
         assert (
-            tuple(record.scenario_id for record in callback.terminal_records) == expected_schedule
+            tuple(record.scenario_id for record in callback.terminal_records)
+            == expected_episode_schedule
         )
     finally:
         eval_env.close()
