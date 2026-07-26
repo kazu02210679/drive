@@ -300,6 +300,7 @@
       font-size: 10px;
       line-height: 1.5;
     }
+    .source-list li { overflow-wrap: anywhere; }
 
     .relation-list { display: grid; gap: 6px; }
     .relation-button {
@@ -438,7 +439,7 @@
           <div class="brand-subtitle">Architecture, contracts, and delivery path</div>
         </div>
       </div>
-      <div class="status-badge"><span class="status-dot"></span>Specification map</div>
+      <div class="status-badge"><span class="status-dot"></span>Phase 6 implemented</div>
       <div class="top-meta" id="topMeta">Loading architecture…</div>
       <div class="toolbar" aria-label="Map controls">
         <label class="sr-only" for="nodeSearch">ノードを検索</label>
@@ -453,7 +454,7 @@
         <div class="map-summary">
           <p class="eyebrow">Single source of architectural truth</p>
           <h1 id="mapTitle">車内マルチエージェント運転シミュレーション</h1>
-          <p>同じSceneSnapshotから独立分析し、PPOで統合、Safety Shieldで最終防護する意思決定フロー。</p>
+          <p>意思決定から、固定評価、比較、可視化、SHA-256検証付きatomic publicationまでを追跡する実装マップ。</p>
           <div class="legend" id="legend" aria-label="ノードの色分け"></div>
         </div>
         <div id="cy" role="application" aria-label="アーキテクチャ依存関係マップ。マウスでパン・ズームし、ノードを選択すると詳細が表示されます。"></div>
@@ -470,7 +471,7 @@
           <div class="node-meta" id="nodeMeta"></div>
         </div>
         <div class="inspector-body" id="inspectorBody">
-          <p class="empty-inspector">マップ上のノードを選ぶと、責務・入出力・安全条件・予定ソースパスを確認できます。</p>
+          <p class="empty-inspector">マップ上のノードを選ぶと、責務・入出力・安全条件・実装ソースパスを確認できます。</p>
         </div>
       </aside>
     </main>
@@ -625,7 +626,7 @@
           <section class="detail-section"><h3>Flow contract</h3><div class="contract-grid">${contractRows}</div></section>
           <section class="detail-section"><h3>Journey stages</h3><div class="flow-route">${stageMarkup}</div></section>
           ${listSection('Safety & recovery', flow.safetyChecks)}
-          ${listSection('Specification evidence', flow.evidence, 'source-list')}
+          ${listSection('Implementation / specification evidence', flow.evidence, 'source-list')}
           <section class="detail-section"><h3>Coverage gap</h3><p class="coverage-note">${escapeHtml(flow.coverageNote)}</p></section>
         `;
       }
@@ -638,9 +639,9 @@
         inspectorTitle.textContent = 'すべての関係';
         nodeMeta.innerHTML = `<span class="meta-chip">${escapeHtml(architecture.flows.length)} flows</span><span class="meta-chip">${escapeHtml(architecture.nodes.length)} modules</span>`;
         inspectorBody.innerHTML = `
-          <p class="description">仕様書から抽出したモジュールとData contractの全体像です。上の選択肢からFlowを選ぶと対象経路へ寄り、その下に段階別のservice blueprintが表示されます。</p>
+          <p class="description">仕様由来の構成とPhase 6で実装・検証した評価Data contractの全体像です。上の選択肢からFlowを選ぶと対象経路へ寄り、その下に段階別のservice blueprintが表示されます。</p>
           <section class="detail-section"><h3>Map contents</h3><div class="contract-grid">
-            <div class="contract-row"><span>Modules</span><strong>${escapeHtml(architecture.nodes.length)} planned components</strong></div>
+            <div class="contract-row"><span>Modules</span><strong>${escapeHtml(architecture.nodes.length)} planned / implemented components</strong></div>
             <div class="contract-row"><span>Contracts</span><strong>${escapeHtml(architecture.edges.length)} directed relationships</strong></div>
             <div class="contract-row"><span>Flows</span><strong>${escapeHtml(architecture.flows.length)} executable views</strong></div>
           </div></section>
