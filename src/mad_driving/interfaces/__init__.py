@@ -29,6 +29,7 @@ def __getattr__(name: str) -> object:
         return ShieldResult
     raise AttributeError(name)
 
+
 __all__ = [
     "ActorState",
     "CollisionKind",

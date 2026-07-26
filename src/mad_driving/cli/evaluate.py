@@ -61,6 +61,8 @@ def run_evaluation_bundle(
 
     from mad_driving.evaluation.bundle import run_evaluation_bundle as implementation
 
+    if selection_scores is None and not smoke:
+        raise RuntimeError("formal evaluation requires authenticated checkpoint-selection scores")
     factory_values = (environment_factory, policy_factory, frame_provider)
     if all(factory is None for factory in factory_values):
         from mad_driving.evaluation.metadrive import MetaDriveEvaluationRuntime
@@ -74,8 +76,6 @@ def run_evaluation_bundle(
         frame_provider = runtime.frame_provider
     elif any(factory is None for factory in factory_values):
         raise ValueError("evaluation runtime factories must be supplied together")
-    if selection_scores is None:
-        raise RuntimeError("authenticated checkpoint-selection scores are required")
     assert environment_factory is not None
     assert policy_factory is not None
     assert frame_provider is not None

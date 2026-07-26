@@ -30,9 +30,7 @@ _METHOD_PROFILES: dict[MethodId, MethodProfile] = {
     "b2_multi_no_review": MethodProfile(
         "b2_multi_no_review", "ppo", ("nominal", "hazard", "rule"), False, "enforce"
     ),
-    "proposed": MethodProfile(
-        "proposed", "ppo", ("nominal", "hazard", "rule"), True, "enforce"
-    ),
+    "proposed": MethodProfile("proposed", "ppo", ("nominal", "hazard", "rule"), True, "enforce"),
     "proposed_no_critic": MethodProfile(
         "proposed_no_critic", "ppo", ("nominal", "hazard", "rule"), False, "enforce"
     ),
@@ -82,9 +80,8 @@ class MethodProfileSnapshot:
             raise ValueError("method_profile.method_id must be a non-empty string")
         if not isinstance(self.policy_kind, str) or not self.policy_kind:
             raise ValueError("method_profile.policy_kind must be a non-empty string")
-        if (
-            not isinstance(self.specialist_ids, list | tuple)
-            or not all(isinstance(agent_id, str) and agent_id for agent_id in self.specialist_ids)
+        if not isinstance(self.specialist_ids, list | tuple) or not all(
+            isinstance(agent_id, str) and agent_id for agent_id in self.specialist_ids
         ):
             raise ValueError("method_profile.specialist_ids must be non-empty strings")
         if not isinstance(self.critic_enabled, bool):

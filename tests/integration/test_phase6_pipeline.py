@@ -16,6 +16,7 @@ from PIL import Image
 
 from mad_driving.cli.evaluate import run_evaluation_bundle
 from mad_driving.config.models import AppConfig
+from mad_driving.evaluation import bundle as bundle_module
 from mad_driving.evaluation.metrics import EpisodeMetricRecord, EpisodeMetrics
 from mad_driving.evaluation.models import (
     EVALUATION_CASES,
@@ -596,6 +597,95 @@ def phase6_inputs(tmp_path: Path) -> Mapping[str, object]:
         "authenticated_checkpoints": tuple(candidates),
         "selection_scores": _selection_scores(candidates),
         "event_paths": tuple(event_paths),
+    }
+
+
+def test_bundle_preflight_rejects_each_cross_artifact_mismatch(
+    phase6_inputs: Mapping[str, object],
+) -> None:
+    plan = phase6_inputs["evaluation_config"]
+    assert isinstance(plan, Phase6PublicationPlan)
+    candidates = phase6_inputs["authenticated_checkpoints"]
+    assert isinstance(candidates, tuple)
+    profiles = phase6_inputs["method_profiles"]
+    configs = phase6_inputs["method_configs"]
+    run_plan = phase6_inputs["run_plan"]
+    scores = phase6_inputs["selection_scores"]
+    plan_path = phase6_inputs["plan_path"]
+    assert isinstance(plan_path, Path)
+
+    def validate(**overrides: object) -> None:
+        arguments: dict[str, object] = {
+            "evaluation_config": plan,
+            "plan_path": plan_path,
+            "run_plan": run_plan,
+            "method_configs": configs,
+            "method_profiles": profiles,
+            "authenticated_checkpoints": candidates,
+            "checkpoint_reader": lambda path: hashlib.sha256(path.read_bytes()).hexdigest(),
+            "selection_scores": scores,
+            "smoke": True,
+        }
+        arguments.update(overrides)
+        bundle_module._validated_inputs(**arguments)  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="plan path"):
+        validate(evaluation_config=plan.model_copy(update={"evaluation_id": "other"}))
+    with pytest.raises(ValueError, match="smoke mode"):
+        validate(smoke=False)
+    with pytest.raises(ValueError, match="method profiles"):
+        validate(method_profiles=())
+    with pytest.raises(ValueError, match="method configs"):
+        validate(method_configs=())
+    with pytest.raises(ValueError, match="duplicate"):
+        validate(authenticated_checkpoints=(*candidates, candidates[0]))
+    with pytest.raises(ValueError, match="SHA-256"):
+        validate(checkpoint_reader=lambda path: "0" * 64)
+    with pytest.raises(ValueError, match="plan bindings"):
+        validate(authenticated_checkpoints=candidates[:-1])
+    with pytest.raises(ValueError, match="run plan"):
+        validate(run_plan=run_plan[:-1])
+    with pytest.raises(ValueError, match="selection scores"):
+        validate(selection_scores=())
+
+
+def test_bundle_preflight_accepts_portable_relative_checkpoint_bindings(
+    phase6_inputs: Mapping[str, object],
+) -> None:
+    plan = phase6_inputs["evaluation_config"]
+    assert isinstance(plan, Phase6PublicationPlan)
+    candidates = phase6_inputs["authenticated_checkpoints"]
+    assert isinstance(candidates, tuple)
+    relative_bindings = tuple(
+        binding.model_copy(
+            update={"checkpoint_path": Path(os.path.relpath(binding.checkpoint_path, Path.cwd()))}
+        )
+        for binding in plan.ppo_run_bindings
+    )
+    relative_plan = plan.model_copy(update={"ppo_run_bindings": relative_bindings})
+    original_plan_path = phase6_inputs["plan_path"]
+    assert isinstance(original_plan_path, Path)
+    plan_path = original_plan_path.with_name("relative-plan.yaml")
+    plan_path.write_text(
+        yaml.safe_dump(relative_plan.model_dump(mode="json"), sort_keys=True),
+        encoding="utf-8",
+    )
+
+    configs, authenticated = bundle_module._validated_inputs(
+        evaluation_config=relative_plan,
+        plan_path=plan_path,
+        run_plan=phase6_inputs["run_plan"],  # type: ignore[arg-type]
+        method_configs=phase6_inputs["method_configs"],  # type: ignore[arg-type]
+        method_profiles=phase6_inputs["method_profiles"],  # type: ignore[arg-type]
+        authenticated_checkpoints=candidates,
+        checkpoint_reader=lambda path: hashlib.sha256(path.read_bytes()).hexdigest(),
+        selection_scores=phase6_inputs["selection_scores"],  # type: ignore[arg-type]
+        smoke=True,
+    )
+
+    assert tuple(configs) == METHOD_ORDER
+    assert set(authenticated) == {
+        (candidate.method_id, candidate.policy_seed) for candidate in candidates
     }
 
 

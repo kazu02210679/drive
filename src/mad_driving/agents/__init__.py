@@ -14,8 +14,8 @@ __all__ = [
     "CriticAgent",
     "DrivingAgent",
     "HazardAgent",
-    "NominalMotionAgent",
     "NoOpCritic",
+    "NominalMotionAgent",
     "RuleAgent",
     "analyze_safely",
 ]

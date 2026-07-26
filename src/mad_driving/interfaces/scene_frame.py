@@ -44,9 +44,8 @@ def stopping_margin_m(
         return None
     require_non_negative("minimum_actual_ttc_s", minimum_actual_ttc_s)
     available_distance_m = ego_speed_mps * minimum_actual_ttc_s
-    required_distance_m = (
-        ego_speed_mps * reaction_delay_s
-        + ego_speed_mps**2 / (2.0 * safe_deceleration_mps2)
+    required_distance_m = ego_speed_mps * reaction_delay_s + ego_speed_mps**2 / (
+        2.0 * safe_deceleration_mps2
     )
     return available_distance_m - required_distance_m
 

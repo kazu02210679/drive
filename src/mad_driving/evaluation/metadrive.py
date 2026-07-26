@@ -119,9 +119,7 @@ class _EvaluationEnvironmentAdapter:
     def current_scene_observation_for_evaluation(self) -> SceneObservation:
         return self._environment.current_scene_observation_for_evaluation()
 
-    def step(
-        self, action: int
-    ) -> tuple[NDArray[np.float32], float, bool, bool, dict[str, object]]:
+    def step(self, action: int) -> tuple[NDArray[np.float32], float, bool, bool, dict[str, object]]:
         observation, reward, terminated, truncated, raw_info = self._environment.step(action)
         info = dict(raw_info)
         if self._capture:
@@ -129,11 +127,7 @@ class _EvaluationEnvironmentAdapter:
             self._frames.append(_encode_png(frame))
             info["frame_path"] = _frame_path(self._spec, self._step_index)
         self._step_index += 1
-        if (
-            self._step_index >= self._max_episode_steps
-            and not terminated
-            and not truncated
-        ):
+        if self._step_index >= self._max_episode_steps and not terminated and not truncated:
             truncated = True
         return observation, reward, terminated, truncated, info
 
@@ -244,9 +238,7 @@ class MetaDriveEvaluationRuntime:
             checkpoint_metadata=metadata,
         )
 
-    def frame_provider(
-        self, spec: EvaluationRunSpec, record_count: int
-    ) -> tuple[bytes, ...]:
+    def frame_provider(self, spec: EvaluationRunSpec, record_count: int) -> tuple[bytes, ...]:
         key = _episode_key_text(spec)
         if key not in self._capture_episode_keys:
             raise ValueError("frame provider was requested for an uncaptured episode")

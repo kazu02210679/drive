@@ -816,14 +816,17 @@ Curriculumの進行は、直近評価のsuccess rateとcollision rateに基づ�
 ### ファイル出力
 
 ```text
-runs/<run_id>/
+evaluations/<evaluation_id>/
+├─ evaluation_plan.yaml
 ├─ config_resolved.yaml
-├─ run_metadata.json
-├─ checkpoints/
-├─ tensorboard/
-├─ episodes/
-│  ├─ episode_<id>_trace.jsonl
-│  └─ episode_<id>_summary.json
+├─ evaluation_manifest.json
+├─ model_selection.csv
+├─ selected_checkpoints.json
+├─ sources/<method>/<policy_seed>/tensorboard/...
+├─ episodes/<method>/<track>/<policy_seed>/<case>/
+│  ├─ episode_<seed>_trace.jsonl
+│  ├─ episode_<seed>_summary.json
+│  └─ episode_<seed>_frames/*.png
 ├─ metrics/
 │  ├─ train_metrics.csv
 │  ├─ eval_metrics.csv
@@ -831,13 +834,15 @@ runs/<run_id>/
 ├─ plots/
 │  ├─ learning_curve.png
 │  ├─ collision_rate.png
+│  ├─ success_route_completion.png
 │  ├─ unnecessary_braking.png
+│  ├─ comfort.png
 │  └─ agent_disagreement.png
-└─ renders/
-   └─ episode_<id>.gif
+├─ renders/*.gif
+└─ comparison_report.md
 ```
 
-新規学習は必須の`--run-dir`で、存在しない、または空のrun destinationを明示した場合だけ受け付ける。`training.run_root`へのgeneric fallback、非空directoryの再利用、overwrite optionは設けない。Resumeもsource runとは別の新しい空destinationへ書き、source checkpointのSHA-256、source hostで正規化したpath、親run/config、current configとの差分、開始`num_timesteps`、Observation/Action schemaを記録する。current resume sourceはcurrent hostでcanonicalize/dereferenceするが、既存metadata内のhistorical parent pathはcross-host provenance文字列として保持し、current hostのPath flavorで再解釈しない。全runは`research_contract_version=4`と`observation_schema_version=1`を持つ。旧contractのcheckpointを正式比較へ混在させない。
+新規学習の`--run-dir`は省略可能で、省略時は`training.run_root`の下に衝突しない新規directoryを予約する。明示した場合も既存の非空directoryは再利用せず、overwrite optionは設けない。Resumeはsource runとは別の新しいdestinationへ書き、source checkpointのSHA-256、親run/config、current configとの差分、開始`num_timesteps`、Observation/Action schemaを記録する。全current runは`research_contract_version=7`、`observation_schema_version=1`、`action_schema_version=1`を持つ。旧contractのcheckpointを正式比較へ混在させない。評価bundleは全artifactのrelative path、size、SHA-256をmanifestへ記録し、既存出力を上書きしない。
 
 ### GIF Overlay
 
@@ -877,24 +882,29 @@ python -m mad_driving.cli.train \
   --run-dir runs/<new_run_id> \
   --resume-from runs/<parent_run_id>/checkpoints/final_model.zip
 
-# 評価
+# Phase 6 smoke評価
 python -m mad_driving.cli.evaluate \
-  --config configs/eval.yaml \
-  --checkpoint runs/<run_id>/checkpoints/best_model.zip
+  --plan configs/evaluation/phase6_smoke.yaml \
+  --output evaluations/phase6_smoke \
+  --smoke
 
-# 1エピソードを可視化
-python -m mad_driving.cli.render_episode \
-  --config configs/eval.yaml \
-  --checkpoint runs/<run_id>/checkpoints/best_model.zip \
-  --scenario lead_brake \
-  --seed 10001
-
-# 比較実験
+# manifest検証後、シミュレータなしで比較表・plot・reportを再生成
 python -m mad_driving.cli.compare \
-  --config configs/compare.yaml
+  --evaluation evaluations/phase6_smoke \
+  --output evaluations/phase6_smoke_comparison
+
+# 保存済みtraceとframeだけから1エピソードを再描画
+python -m mad_driving.cli.render_episode \
+  --evaluation evaluations/phase6_smoke \
+  --episode-key proposed_system_42_level1_lead_brake_20000 \
+  --output evaluations/phase6_smoke_render
 ```
 
 すべてのCLIは`--help`を持ち、不正なパス・設定値に明確なエラーを返すこと。
+`--smoke`では認証済みだが未選択のcheckpointを許可し、成果物を
+`SMOKE - NOT A RESEARCH RESULT`と表示する。正式評価では固定all-level validationに
+よるcheckpoint選択記録を必須とし、test seedを選択へ使用しない。Coordinator
+ObservationはPhase 6でも24次元のままである。
 
 ---
 
@@ -1122,11 +1132,10 @@ multi-agent-driving/
 
 ### Phase 6: 評価
 
-- baselines・ablations
-- metrics
-- plots
-- GIF overlay
-- Markdown comparison report
+- 実装済み：B0/B1/B2/Proposedと3 ablationの固定比較表
+- 実装済み：実MetaDrive評価、metrics、plots、GIF、Markdown comparison report
+- 実装済み：manifest検証付きatomic bundleとオフラインcompare/render
+- 未実施：policy seed 42〜46を使う正式benchmark（smoke結果とは区別する）
 
 各Phase終了時にテストを実行し、独立したcommitを作ること。
 

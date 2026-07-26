@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pytest
 from PIL import Image
 
 from mad_driving.config.models import AppConfig
@@ -132,8 +133,7 @@ def test_runtime_captures_canonical_rgb_pngs_and_applies_the_smoke_step_limit() 
     assert first[3] is False
     assert second[3] is True
     assert first[4]["frame_path"] == (
-        "episodes/proposed/system/42/level1_lead_brake/"
-        "episode_20000_frames/000000.png"
+        "episodes/proposed/system/42/level1_lead_brake/episode_20000_frames/000000.png"
     )
     assert second[4]["frame_path"].endswith("/000001.png")
     assert created[0][1].closed is True
@@ -177,3 +177,61 @@ def test_runtime_uses_visible_rule_policy_or_bound_ppo_loader(tmp_path: Path) ->
 
     assert isinstance(policy, PpoPolicyAdapter)
     assert loaded == [checkpoint]
+
+
+@pytest.mark.parametrize("value", (True, 0, -1, 1.5))
+def test_runtime_rejects_invalid_episode_limit(value: object) -> None:
+    with pytest.raises(ValueError, match="max_episode_steps"):
+        MetaDriveEvaluationRuntime(
+            capture_episode_keys=(),
+            max_episode_steps=value,  # type: ignore[arg-type]
+            environment_builder=lambda *args, **kwargs: FakeEvaluationEnvironment(),
+        )
+
+
+@pytest.mark.parametrize(
+    "keys",
+    ([], ("",), ("same", "same"), ("valid", 1)),
+)
+def test_runtime_rejects_invalid_capture_keys(keys: object) -> None:
+    with pytest.raises(ValueError, match="capture_episode_keys"):
+        MetaDriveEvaluationRuntime(
+            capture_episode_keys=keys,  # type: ignore[arg-type]
+            max_episode_steps=1,
+            environment_builder=lambda *args, **kwargs: FakeEvaluationEnvironment(),
+        )
+
+
+def test_runtime_policy_and_frame_factories_fail_closed(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "checkpoint.zip"
+    checkpoint.write_bytes(b"checkpoint")
+    candidate = CheckpointCandidate(
+        checkpoint,
+        hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
+        "proposed",
+        42,
+        "final",
+        1,
+        8,
+    )
+    runtime = MetaDriveEvaluationRuntime(
+        capture_episode_keys=("proposed_system_42_level1_lead_brake_20000",),
+        max_episode_steps=1,
+        environment_builder=lambda *args, **kwargs: FakeEvaluationEnvironment(),
+        model_loader=lambda path: FakePpoModel(),
+    )
+
+    with pytest.raises(ValueError, match="B0"):
+        runtime.policy_factory(_spec("b0_rule"), _config("b0_rule"), candidate)
+    with pytest.raises(ValueError, match="requires"):
+        runtime.policy_factory(_spec(), _config(), None)
+    with pytest.raises(ValueError, match="does not match"):
+        runtime.policy_factory(
+            replace(_spec(), checkpoint_path=str(checkpoint)),
+            _config(),
+            replace(candidate, policy_seed=43),
+        )
+    with pytest.raises(ValueError, match="uncaptured"):
+        runtime.frame_provider(_spec("b0_rule"), 0)
+    with pytest.raises(ValueError, match="count"):
+        runtime.frame_provider(_spec(), 1)

@@ -31,6 +31,7 @@ from mad_driving.evaluation.selection import (
     CheckpointScore,
     validate_ppo_checkpoint_archive,
     write_selection_artifacts,
+    write_unselected_smoke_checkpoint_artifacts,
 )
 from mad_driving.evaluation.serialization import (
     load_phase6_publication_plan,
@@ -182,7 +183,7 @@ def _validated_inputs(
     method_profiles: tuple[MethodProfileSnapshot, ...],
     authenticated_checkpoints: tuple[CheckpointCandidate, ...],
     checkpoint_reader: CheckpointReader,
-    selection_scores: tuple[CheckpointScore, ...],
+    selection_scores: tuple[CheckpointScore, ...] | None,
     smoke: bool,
 ) -> tuple[dict[str, AppConfig], dict[tuple[str, int], CheckpointCandidate]]:
     loaded_plan = load_phase6_publication_plan(plan_path)
@@ -208,11 +209,12 @@ def _validated_inputs(
             raise ValueError("authenticated checkpoint bytes do not match their SHA-256 binding")
         candidates[key] = candidate
     expected_bindings: dict[tuple[str, int], Path] = {
-        (binding.method_id, binding.policy_seed): Path(binding.checkpoint_path)
+        (binding.method_id, binding.policy_seed): Path(os.path.abspath(binding.checkpoint_path))
         for binding in evaluation_config.ppo_run_bindings
     }
     if set(candidates) != set(expected_bindings) or any(
-        candidate.path != expected_bindings[key] for key, candidate in candidates.items()
+        Path(os.path.abspath(candidate.path)) != expected_bindings[key]
+        for key, candidate in candidates.items()
     ):
         raise ValueError("authenticated checkpoints do not exactly match plan bindings")
 
@@ -225,9 +227,13 @@ def _validated_inputs(
     if run_plan != expected_plan:
         raise ValueError("run plan does not match the complete validated Phase 6 matrix")
 
-    score_candidates = tuple(score.candidate for score in selection_scores)
-    if set(score_candidates) != set(authenticated_checkpoints):
-        raise ValueError("selection scores do not exactly bind authenticated checkpoints")
+    if selection_scores is None:
+        if not smoke:
+            raise ValueError("formal evaluation requires authenticated checkpoint-selection scores")
+    else:
+        score_candidates = tuple(score.candidate for score in selection_scores)
+        if set(score_candidates) != set(authenticated_checkpoints):
+            raise ValueError("selection scores do not exactly bind authenticated checkpoints")
     return configs, candidates
 
 
@@ -463,7 +469,7 @@ def run_evaluation_bundle(
     environment_factory: EvaluationEnvironmentFactory,
     policy_factory: EvaluationPolicyFactory,
     frame_provider: RgbFrameProvider,
-    selection_scores: tuple[CheckpointScore, ...],
+    selection_scores: tuple[CheckpointScore, ...] | None,
     checkpoint_reader: CheckpointReader = validate_ppo_checkpoint_archive,
     event_reader: TrainingEventReader = extract_training_metrics_from_event_sources,
 ) -> Path:
@@ -499,7 +505,10 @@ def run_evaluation_bundle(
             method_profiles=method_profiles,
             cli_overlays=cli_overlays,
         )
-        write_selection_artifacts(source_root, selection_scores)
+        if selection_scores is None:
+            write_unselected_smoke_checkpoint_artifacts(source_root, tuple(candidates.values()))
+        else:
+            write_selection_artifacts(source_root, selection_scores)
         event_sources = _copy_tensorboard_sources(source_root, evaluation_config)
         points = event_reader(event_sources, smoke=smoke)
         _validate_training_points(points, evaluation_config)

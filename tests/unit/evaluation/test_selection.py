@@ -26,6 +26,7 @@ from mad_driving.evaluation.selection import (
     discover_checkpoint_candidates,
     select_checkpoint,
     write_selection_artifacts,
+    write_unselected_smoke_checkpoint_artifacts,
 )
 from mad_driving.methods import MethodProfileSnapshot
 from mad_driving.training.curriculum import (
@@ -1105,3 +1106,52 @@ def test_selection_artifacts_reject_cross_group_validation_mismatches(
         write_selection_artifacts(output_dir, (first, second))
     assert not (output_dir / "model_selection.csv").exists()
     assert not (output_dir / "selected_checkpoints.json").exists()
+
+
+def test_unselected_smoke_checkpoint_artifacts_are_explicit_and_metric_free(
+    tmp_path: Path,
+) -> None:
+    first = score(
+        tmp_path,
+        digest="a" * 64,
+        name="first.zip",
+        timestep=100,
+        reward=1.0,
+        collisions=0,
+        successes=1,
+        route_completion=0.5,
+    ).candidate
+    second = score(
+        tmp_path,
+        digest="b" * 64,
+        name="second.zip",
+        timestep=200,
+        reward=2.0,
+        collisions=0,
+        successes=1,
+        route_completion=0.7,
+        policy_seed=43,
+    ).candidate
+    output_dir = tmp_path / "unselected-smoke"
+    output_dir.mkdir()
+
+    csv_path, json_path = write_unselected_smoke_checkpoint_artifacts(output_dir, (second, first))
+
+    rows = list(csv.DictReader(csv_path.open(encoding="utf-8", newline="")))
+    assert [(row["policy_seed"], row["checkpoint_sha256"]) for row in rows] == [
+        ("42", "a" * 64),
+        ("43", "b" * 64),
+    ]
+    assert all(
+        row["validation_plan_sha256"] == ""
+        and row["mean_episode_reward"] == ""
+        and row["collision_rate"] == ""
+        and row["success_rate"] == ""
+        and row["mean_route_completion"] == ""
+        and row["selected"] == "false"
+        for row in rows
+    )
+    assert json.loads(json_path.read_text(encoding="utf-8")) == {
+        "schema_version": 1,
+        "selected_checkpoints": [],
+    }

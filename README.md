@@ -4,6 +4,102 @@ MetaDrive上の1台の自車内部に、複数の決定論的な専門Agentと�
 
 最上位要件は [`docs/multi_agent_driving_mvp_spec.md`](docs/multi_agent_driving_mvp_spec.md) です。
 
+## Phase 6 evaluation workflow
+
+Phase 6の評価パイプラインは実装済みです。実MetaDriveで固定比較表を走行し、
+JSONL・CSV・PNG・GIF・Markdownレポートを、改変検知用manifest付きの新規directoryへ
+まとめます。評価用RGB画像はheadless top-down rendererから保存するだけで、Policy入力には
+使いません。Coordinator Observationは引き続きshape `(24,)`の`float32`です。
+
+比較方式は次のとおりです。
+
+| track | methods | Shield |
+|---|---|---|
+| decision | B1 Nominal、B2 Multi-no-review、Proposed | 全方式`monitor` |
+| system | B0 Rule、B1、B2、Proposed | 全方式`enforce` |
+| ablation | Proposed、no-Critic、no-Shield、no-Hazard | no-Shieldだけ`off`、他は`enforce` |
+
+各方式は同じ5セル（Level 0 Nominal、Level 1 Lead Brake、Level 2 Lead Brake、
+Level 2 Cut-in、Level 3 Occluded Crossing）で比較します。train、validation、testの
+scenario rangeはそれぞれ`[0, 10000)`、`[10000, 11000)`、`[20000, 21000)`です。
+test seedは学習、Curriculum進行、checkpoint選択には使いません。
+
+正式評価では、各PPO候補を固定all-level validationへ通し、平均reward、collision rate、
+success rate、route completion、学習step、SHA-256の順でcheckpointを選びます。
+`--smoke`は配線確認なので、completed-run metadataとSHA-256で認証したfinal checkpointを
+未選択のまま使い、`SMOKE - NOT A RESEARCH RESULT`と明記します。架空のvalidation scoreは
+生成しません。
+
+まず、smoke用の6方式をpolicy seed 42で短時間学習します。出力先は評価planに固定されて
+いるため、既に存在する場合は別名へ変えず、不要な旧smokeを退避してから実行してください。
+
+```powershell
+$methods = @(
+  "b1_nominal",
+  "b2_multi_no_review",
+  "proposed",
+  "proposed_no_critic",
+  "proposed_no_shield",
+  "proposed_no_hazard"
+)
+foreach ($method in $methods) {
+  .venv\Scripts\python.exe -m mad_driving.cli.train `
+    --config configs/base.yaml `
+    --overlay "configs/methods/$method.yaml" `
+    --smoke `
+    --run-dir "runs/phase6_smoke/${method}_seed42"
+}
+```
+
+次の3コマンドで、実走行bundle、オフライン再集計、1 episodeのGIFを作成します。
+どのコマンドも既存の出力先を上書きしません。
+
+```powershell
+.venv\Scripts\python.exe -m mad_driving.cli.evaluate `
+  --plan configs/evaluation/phase6_smoke.yaml `
+  --output evaluations/phase6_smoke `
+  --smoke
+
+.venv\Scripts\python.exe -m mad_driving.cli.compare `
+  --evaluation evaluations/phase6_smoke `
+  --output evaluations/phase6_smoke_comparison
+
+.venv\Scripts\python.exe -m mad_driving.cli.render_episode `
+  --evaluation evaluations/phase6_smoke `
+  --episode-key proposed_system_42_level1_lead_brake_20000 `
+  --output evaluations/phase6_smoke_render
+```
+
+中心となる成果物は次の構成です。`compare`と`render_episode`は検証済みbundleだけを読み、
+MetaDrive、Stable-Baselines3、TensorBoardを起動せずに再生成します。
+
+```text
+evaluations/phase6_smoke/
+├─ evaluation_plan.yaml
+├─ config_resolved.yaml
+├─ evaluation_manifest.json
+├─ model_selection.csv
+├─ selected_checkpoints.json
+├─ sources/<method>/<policy-seed>/tensorboard/...
+├─ episodes/<method>/<track>/<policy-seed>/<case>/...
+├─ metrics/
+│  ├─ train_metrics.csv
+│  ├─ eval_metrics.csv
+│  └─ comparison.csv
+├─ plots/
+│  ├─ learning_curve.png
+│  ├─ collision_rate.png
+│  ├─ success_route_completion.png
+│  ├─ unnecessary_braking.png
+│  ├─ comfort.png
+│  └─ agent_disagreement.png
+├─ renders/proposed_42_level1_lead_brake_20000.gif
+└─ comparison_report.md
+```
+
+正式な5 policy seed（42～46）比較は計算量の大きい次の実験として未実施です。
+smoke結果を研究結果として扱ってはいけません。
+
 ## Phase 5 scenarios and curriculum
 
 Phase 5 adds deterministic Lead Brake, Cut-in, and Occluded Crossing hazards plus
@@ -82,7 +178,7 @@ fixed all-level validation suite.
 `curriculum_state.yaml` is atomically replaced with flush/`fsync` semantics. Every
 periodic, best, and final `*.zip` also has an adjacent `*.zip.curriculum.yaml`
 sidecar containing the exact curriculum state at that checkpoint's lifecycle point
-and the checkpoint SHA-256. Research contract v6 inventories both checkpoint and
+and the checkpoint SHA-256. Research contract v7 inventories both checkpoint and
 sidecar hashes in `run_metadata.json`. Resume resolves the sidecar bound to the
 selected checkpoint, reads and hashes one immutable byte snapshot, rejects path
 replacement races and malformed/duplicate-key data, and restores that exact state
@@ -214,7 +310,7 @@ a unique empty destination under `training.run_root`; if supplied, it must still
 absent or empty and is never overwritten. Resume authenticates one immutable checkpoint
 byte snapshot, restores the curriculum sidecar bound to that checkpoint, and records the
 parent checkpoint/config/diff/start step in the new run. Current runs use
-`research_contract_version=6` and `observation_schema_version=1`. Per-worker schema-v4
+`research_contract_version=7` and `observation_schema_version=1`. Per-worker schema-v4
 episode seed JSONL artifacts retain descriptor-bound identity, exact counts, and SHA-256
 digests in `run_metadata.json`.
 
@@ -225,7 +321,7 @@ digests in `run_metadata.json`.
 ```text
 <run-dir>/
 ├── config_resolved.yaml
-├── run_metadata.json              # research contract v6 and artifact digests
+├── run_metadata.json              # research contract v7 and artifact digests
 ├── curriculum_state.yaml          # final run curriculum state
 ├── episode_seeds/
 │   ├── train-worker-000.jsonl

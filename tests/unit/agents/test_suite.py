@@ -6,8 +6,8 @@ from mad_driving.agents import NoOpCritic
 from mad_driving.agents.claim_factory import neutral_claim
 from mad_driving.agents.suite import AgentAnalysisResult, AgentSuite, analyze_safely
 from mad_driving.config.models import AgentsConfig
-from mad_driving.methods import build_method_suite
 from mad_driving.interfaces import CriticReview, RiskClaim, SceneSnapshot
+from mad_driving.methods import build_method_suite
 from tests.unit.agents.factories import make_actor, make_analysis, make_claim, make_snapshot
 
 

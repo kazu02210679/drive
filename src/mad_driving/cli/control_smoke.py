@@ -85,9 +85,7 @@ def run_control_smoke(
         if builder_factory is None:
             builder = SceneSnapshotBuilder(
                 reaction_delay_s=config.agents.hazard.reaction_delay_s,
-                safe_deceleration_mps2=abs(
-                    config.agents.hazard.ego_max_safe_deceleration_mps2
-                ),
+                safe_deceleration_mps2=abs(config.agents.hazard.ego_max_safe_deceleration_mps2),
             )
         else:
             builder = builder_factory()

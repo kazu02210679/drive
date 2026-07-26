@@ -726,6 +726,77 @@ def write_selection_artifacts(
     return csv_path, json_path
 
 
+def write_unselected_smoke_checkpoint_artifacts(
+    output_dir: Path,
+    candidates: Sequence[CheckpointCandidate],
+) -> tuple[Path, Path]:
+    """Record authenticated smoke checkpoints without inventing validation metrics."""
+
+    directory = _validated_directory(Path(output_dir), "selection output directory")
+    values = tuple(candidates)
+    if not values:
+        raise ValueError("smoke checkpoint candidates must be non-empty")
+    if any(type(candidate) is not CheckpointCandidate for candidate in values):
+        raise TypeError("candidates must contain CheckpointCandidate values")
+    identities = tuple(
+        (candidate.method_id, candidate.policy_seed, candidate.path, candidate.sha256)
+        for candidate in values
+    )
+    if len(identities) != len(set(identities)):
+        raise ValueError("smoke checkpoint candidates contain a duplicate identity")
+    method_seeds = tuple((candidate.method_id, candidate.policy_seed) for candidate in values)
+    if len(method_seeds) != len(set(method_seeds)):
+        raise ValueError("smoke checkpoint candidates contain a duplicate method/policy seed")
+
+    csv_path = directory / "model_selection.csv"
+    json_path = directory / "selected_checkpoints.json"
+    if csv_path.exists() or json_path.exists():
+        raise FileExistsError("selection artifacts already exist")
+    ordered = sorted(
+        values,
+        key=lambda candidate: (
+            candidate.method_id,
+            candidate.policy_seed,
+            candidate.training_timestep,
+            candidate.sha256,
+        ),
+    )
+    with csv_path.open("x", encoding="utf-8", newline="") as output:
+        writer = csv.DictWriter(
+            output,
+            fieldnames=_MODEL_SELECTION_COLUMNS,
+            lineterminator="\n",
+        )
+        writer.writeheader()
+        for candidate in ordered:
+            writer.writerow(
+                {
+                    "method_id": candidate.method_id,
+                    "policy_seed": candidate.policy_seed,
+                    "checkpoint_path": str(candidate.path),
+                    "checkpoint_sha256": candidate.sha256,
+                    "training_timestep": candidate.training_timestep,
+                    "validation_plan_sha256": "",
+                    "mean_episode_reward": "",
+                    "collision_rate": "",
+                    "success_rate": "",
+                    "mean_route_completion": "",
+                    "selected": "false",
+                }
+            )
+    with json_path.open("x", encoding="utf-8", newline="\n") as output:
+        json.dump(
+            {"schema_version": 1, "selected_checkpoints": []},
+            output,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+            allow_nan=False,
+        )
+        output.write("\n")
+    return csv_path, json_path
+
+
 __all__ = [
     "CheckpointCandidate",
     "CheckpointScore",
@@ -734,4 +805,5 @@ __all__ = [
     "select_checkpoint",
     "validate_ppo_checkpoint_archive",
     "write_selection_artifacts",
+    "write_unselected_smoke_checkpoint_artifacts",
 ]

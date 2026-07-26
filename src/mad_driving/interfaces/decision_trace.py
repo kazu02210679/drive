@@ -105,9 +105,7 @@ class DecisionTrace:
         require_non_negative("shield_latency_ms", self.shield_latency_ms)
         shield_reasons = tuple(self.shield_reasons)
         claims = tuple(self.claims)
-        expected_agent_ids = canonical_string_tuple(
-            "expected_agent_ids", self.expected_agent_ids
-        )
+        expected_agent_ids = canonical_string_tuple("expected_agent_ids", self.expected_agent_ids)
         failed_agent_ids = tuple(self.failed_agent_ids)
         errors = tuple(self.errors)
         if not all(isinstance(value, str) for value in shield_reasons):

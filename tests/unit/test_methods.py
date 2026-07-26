@@ -13,7 +13,6 @@ from mad_driving.config.models import AgentsConfig, MethodConfig
 from mad_driving.methods import MethodId, MethodProfile, build_method_suite, get_method_profile
 from tests.unit.agents.factories import make_snapshot
 
-
 EXPECTED_PROFILES = {
     "b0_rule": ("rule", (), False, "enforce"),
     "b1_nominal": ("ppo", ("nominal",), False, "enforce"),

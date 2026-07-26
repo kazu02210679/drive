@@ -96,9 +96,7 @@ class AgentSuite:
     critic: ReviewingAgent
 
     @classmethod
-    def from_config(
-        cls, config: AgentsConfig, method_id: MethodId = "proposed"
-    ) -> AgentSuite:
+    def from_config(cls, config: AgentsConfig, method_id: MethodId = "proposed") -> AgentSuite:
         from mad_driving.methods import build_method_suite
 
         return build_method_suite(config, method_id)
@@ -116,7 +114,9 @@ class AgentSuite:
         failed_agent_ids: list[str] = []
         errors: list[str] = []
         seen_claim_ids: set[str] = set()
-        agents = tuple(agent for agent in (self.nominal, self.hazard, self.rule) if agent is not None)
+        agents = tuple(
+            agent for agent in (self.nominal, self.hazard, self.rule) if agent is not None
+        )
         expected_agent_ids = self.expected_agent_ids
         for agent in agents:
             try:

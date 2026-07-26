@@ -29,7 +29,6 @@ from mad_driving.methods import MethodProfileSnapshot
 from mad_driving.scenarios import EpisodeSeedAllocator
 from mad_driving.training.metadata import RESEARCH_CONTRACT_VERSION
 from mad_driving.visualization import METHOD_ORDER, _verify_bundle
-from tests.integration.test_phase6_pipeline import _selection_scores
 
 PPO_METHODS = tuple(method_id for method_id in METHOD_ORDER if method_id != "b0_rule")
 
@@ -66,7 +65,7 @@ def phase6_smoke_checkpoints(
                     "checkpoint_interval_steps": 8,
                     "eval_interval_steps": 8,
                     "eval_episodes": 1,
-                }
+                },
             },
             sort_keys=True,
         ),
@@ -238,18 +237,14 @@ def test_real_task10_smoke_bundle_publishes_all_methods_and_documented_render(
     method_configs = tuple(
         (
             proposed_config.model_copy(
-                update={
-                    "method": proposed_config.method.model_copy(update={"id": method_id})
-                }
+                update={"method": proposed_config.method.model_copy(update={"id": method_id})}
             )
             if method_id == "b0_rule"
             else phase6_smoke_checkpoints[method_id].config
         )
         for method_id in METHOD_ORDER
     )
-    candidates = tuple(
-        phase6_smoke_checkpoints[method_id].candidate for method_id in PPO_METHODS
-    )
+    candidates = tuple(phase6_smoke_checkpoints[method_id].candidate for method_id in PPO_METHODS)
     plan = Phase6PublicationPlan.model_validate(
         {
             "plan_kind": "phase6_smoke",
@@ -257,9 +252,7 @@ def test_real_task10_smoke_bundle_publishes_all_methods_and_documented_render(
             "is_formal": False,
             "result_label": "SMOKE - NOT A RESEARCH RESULT",
             "app_config_path": "configs/base.yaml",
-            "method_overlays": [
-                f"configs/methods/{method_id}.yaml" for method_id in METHOD_ORDER
-            ],
+            "method_overlays": [f"configs/methods/{method_id}.yaml" for method_id in METHOD_ORDER],
             "max_episode_steps": 2,
             "episodes_per_case": 1,
             "test_seed_start": 20_000,
@@ -267,16 +260,12 @@ def test_real_task10_smoke_bundle_publishes_all_methods_and_documented_render(
                 {
                     "method_id": candidate.method_id,
                     "policy_seed": candidate.policy_seed,
-                    "training_run_dir": str(
-                        phase6_smoke_checkpoints[candidate.method_id].run_dir
-                    ),
+                    "training_run_dir": str(phase6_smoke_checkpoints[candidate.method_id].run_dir),
                     "checkpoint_path": str(candidate.path),
                 }
                 for candidate in candidates
             ],
-            "capture_episode_keys": [
-                "proposed_system_42_level1_lead_brake_20000"
-            ],
+            "capture_episode_keys": ["proposed_system_42_level1_lead_brake_20000"],
         }
     )
     plan_path = tmp_path / "phase6-real-smoke.yaml"
@@ -309,7 +298,7 @@ def test_real_task10_smoke_bundle_publishes_all_methods_and_documented_render(
         environment_factory=runtime.environment_factory,
         policy_factory=runtime.policy_factory,
         frame_provider=runtime.frame_provider,
-        selection_scores=_selection_scores(candidates),
+        selection_scores=None,
     )
 
     verified = _verify_bundle(published)
@@ -328,6 +317,8 @@ def test_real_task10_smoke_bundle_publishes_all_methods_and_documented_render(
     assert verified.root == published.resolve()
     assert len(run_plan) == len(traces) == 55
     assert documented_trace.is_file()
+    selection = json.loads((published / "selected_checkpoints.json").read_text(encoding="utf-8"))
+    assert selection["selected_checkpoints"] == []
     assert len(renders) == 1
     with Image.open(renders[0]) as image:
         assert image.format == "GIF"

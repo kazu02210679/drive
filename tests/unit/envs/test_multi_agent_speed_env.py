@@ -2012,6 +2012,18 @@ def test_evaluation_schedule_is_forwarded_for_non_training_roles(role: str) -> N
     assert factory.schedules == [("lead_brake", "cut_in")]
 
 
+def test_evaluation_schedule_allows_scheduled_scenario_to_replace_configured_id() -> None:
+    context = ScenarioObservationContext(scenario_id="lead_brake")
+    runtime = RecordingRuntime(context=context)
+    factory = EvaluationScheduleRecordingRuntimeFactory(runtime)
+    harness = make_env(role="test", runtime=runtime, runtime_factory=factory)
+
+    harness.env.set_evaluation_scenario_schedule(("lead_brake",))
+    _, info = harness.env.reset(seed=20_000)
+
+    assert info["scenario_id"] == "lead_brake"
+
+
 def test_training_environment_rejects_evaluation_schedule_installation() -> None:
     runtime = RecordingRuntime()
     factory = EvaluationScheduleRecordingRuntimeFactory(runtime)

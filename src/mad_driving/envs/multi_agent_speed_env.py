@@ -295,6 +295,7 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
         self._episode_seeds: EpisodeSeeds | None = None
         self._actual_scenario_index: int | None = None
         self._unnecessary_stop_duration_s = 0.0
+        self._evaluation_scenario_schedule_active = False
         self._episode_active = False
         self._gym_rng_initialized = False
         self._closed = False
@@ -319,6 +320,7 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
         if not callable(setter):
             raise RuntimeError("scenario runtime factory does not support scenario schedules")
         setter(scenario_ids)
+        self._evaluation_scenario_schedule_active = True
 
     def set_evaluation_shield_mode(self, mode: Literal["off", "monitor", "enforce"]) -> None:
         """Install the evaluation-only Shield mode used on the next reset."""
@@ -864,7 +866,11 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
     ) -> None:
         if state.seeds != expected_seeds:
             raise RuntimeError("ScenarioState seeds mismatch for current episode")
-        if self._config.scenario_id != "phase5" and state.scenario_id != self._config.scenario_id:
+        if (
+            self._config.scenario_id != "phase5"
+            and not self._evaluation_scenario_schedule_active
+            and state.scenario_id != self._config.scenario_id
+        ):
             raise RuntimeError(
                 "ScenarioState scenario_id mismatch: "
                 f"expected {self._config.scenario_id!r}, returned {state.scenario_id!r}"
@@ -932,7 +938,11 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
                 "observation context scenario_id mismatch: "
                 f"state {state.scenario_id!r}, returned {context.scenario_id!r}"
             )
-        if self._config.scenario_id != "phase5" and context.scenario_id != self._config.scenario_id:
+        if (
+            self._config.scenario_id != "phase5"
+            and not self._evaluation_scenario_schedule_active
+            and context.scenario_id != self._config.scenario_id
+        ):
             raise RuntimeError("observation context scenario_id does not match configured scenario")
         return context
 

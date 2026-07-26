@@ -10,5 +10,6 @@ __pycache__/
 dist/
 build/
 runs/
+evaluations/
 .worktrees/
 .superpowers/

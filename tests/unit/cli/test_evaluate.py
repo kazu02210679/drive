@@ -531,6 +531,40 @@ def test_orchestration_error_is_traceback_free(
     assert not destination.exists()
 
 
+def test_smoke_runtime_delegates_without_fabricating_checkpoint_scores(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = _plan(tmp_path)
+    destination = tmp_path / "evaluation"
+    captured: list[dict[str, object]] = []
+
+    def implementation(**kwargs: object) -> Path:
+        captured.append(kwargs)
+        return destination
+
+    monkeypatch.setattr("mad_driving.evaluation.bundle.run_evaluation_bundle", implementation)
+
+    published = evaluate_module.run_evaluation_bundle(
+        evaluation_config=plan,
+        plan_path=tmp_path / "plan.yaml",
+        run_plan=(),
+        method_configs=(),
+        method_profiles=(),
+        cli_overlays=(),
+        authenticated_checkpoints=(),
+        destination=destination,
+        smoke=True,
+        environment_factory=lambda spec, config: pytest.fail("must not execute"),
+        policy_factory=lambda spec, config, candidate: pytest.fail("must not execute"),
+        frame_provider=lambda spec, count: (),
+    )
+
+    assert published == destination
+    assert len(captured) == 1
+    assert captured[0]["selection_scores"] is None
+
+
 def test_phase6_smoke_config_is_explicit_short_and_exact() -> None:
     repository = Path(__file__).resolve().parents[3]
     config = load_evaluation_plan(repository / "configs" / "evaluation" / "phase6_smoke.yaml")
