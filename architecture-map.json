@@ -9,7 +9,7 @@
     "objective": "MetaDrive上の単一自車で、独立した専門Agentの判断をPPO Coordinatorが統合し、Safety Shieldを通して安全な速度行動を実行する。",
     "researchHypothesis": "単一予測器より、異なる根拠を持つ複数Agentの独立分析と相互検証の方が、危険見逃しを減らしつつ過剰停止を抑えられる。",
     "learnedComponent": "PPO Coordinator only",
-    "implementationStatusNote": "Phase 6まで実装済み。planned表記の既存ノードは初期仕様由来で、Phase 6カードのimplementedノードとパスは実装ブランチ e719ba1 時点を表す。"
+    "implementationStatusNote": "Phase 6まで実装済み。planned表記の既存ノードは初期仕様由来で、Phase 6カードのimplementedノードとパスは実装ブランチ 2a9cb4d 時点を表す。"
   },
   "categories": [
     {"id": "orchestration", "label": "Orchestration", "color": "#7c82ff"},
@@ -816,7 +816,7 @@
       "outcome": "方式・track・scenario・seedが拘束されたEpisode Metricsと、formal時は選抜済みcheckpointを得る。",
       "evidenceStatus": "Implemented + smoke-verified",
       "evidence": [
-        "Phase 6 implementation commit e719ba1",
+        "Phase 6 implementation commit 2a9cb4d",
         "src/mad_driving/methods.py and src/mad_driving/agents/suite.py",
         "src/mad_driving/evaluation/{plans,policies,runner,metrics,selection}.py",
         "Real MetaDrive smoke: 55 matched episodes; full suite 1687 passed"
@@ -875,7 +875,7 @@
       "outcome": "comparison CSV、training metrics、PNG、GIF、Markdown reportをSHA-256 manifest付きでno-replace公開する。",
       "evidenceStatus": "Implemented + smoke-verified",
       "evidence": [
-        "Phase 6 implementation commit e719ba1",
+        "Phase 6 implementation commit 2a9cb4d",
         "src/mad_driving/evaluation/{compare,training_metrics,bundle,workspace}.py",
         "src/mad_driving/visualization/{plots,overlay,report}.py",
         "Smoke bundles verified: 4 CSV, 114 JSON/JSONL, 46 images, 32-frame GIF"
