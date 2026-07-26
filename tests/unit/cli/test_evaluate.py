@@ -10,13 +10,14 @@ import pytest
 
 from mad_driving.cli import evaluate as evaluate_module
 from mad_driving.cli.evaluate import main
+from mad_driving.config.loader import load_config
 from mad_driving.evaluation.models import (
     EvaluationPlanConfig,
     Phase6PublicationPlan,
     PpoRunBinding,
 )
 from mad_driving.evaluation.plans import build_smoke_plan
-from mad_driving.evaluation.selection import CheckpointCandidate
+from mad_driving.evaluation.selection import CheckpointCandidate, resolved_config_sha256
 from mad_driving.evaluation.serialization import load_evaluation_plan
 from mad_driving.visualization import SMOKE_RESULT_LABEL
 
@@ -39,11 +40,12 @@ METHOD_OVERLAYS = (
 )
 
 
-def _candidate(binding: PpoRunBinding) -> CheckpointCandidate:
+def _candidate(binding: PpoRunBinding, resolved_config_hash: str = "e" * 64) -> CheckpointCandidate:
     assert binding.checkpoint_path is not None
     return CheckpointCandidate(
         path=binding.checkpoint_path.resolve(),
         sha256=hashlib.sha256(binding.checkpoint_path.read_bytes()).hexdigest(),
+        resolved_config_sha256=resolved_config_hash,
         method_id=binding.method_id,
         policy_seed=binding.policy_seed,
         checkpoint_kind="final",
@@ -56,7 +58,16 @@ def _install_authenticated_discovery(
     monkeypatch: pytest.MonkeyPatch,
     plan: EvaluationPlanConfig,
 ) -> tuple[CheckpointCandidate, ...]:
-    candidates = tuple(_candidate(binding) for binding in plan.ppo_run_bindings)
+    configs = {
+        overlay.stem: load_config(plan.app_config_path, overlay) for overlay in plan.method_overlays
+    }
+    candidates = tuple(
+        _candidate(
+            binding,
+            resolved_config_sha256(configs[binding.method_id].model_dump(mode="json")),
+        )
+        for binding in plan.ppo_run_bindings
+    )
     by_run = {
         binding.training_run_dir.resolve(): candidate
         for binding, candidate in zip(plan.ppo_run_bindings, candidates, strict=True)

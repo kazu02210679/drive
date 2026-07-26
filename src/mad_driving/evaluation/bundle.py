@@ -29,6 +29,7 @@ from mad_driving.evaluation.runner import EvaluationEnvironment, run_evaluation_
 from mad_driving.evaluation.selection import (
     CheckpointCandidate,
     CheckpointScore,
+    resolved_config_sha256,
     validate_ppo_checkpoint_archive,
     write_selection_artifacts,
     write_unselected_smoke_checkpoint_artifacts,
@@ -205,6 +206,17 @@ def _validated_inputs(
         key = (candidate.method_id, candidate.policy_seed)
         if key in candidates:
             raise ValueError("authenticated checkpoints contain a duplicate method/policy seed")
+        base_config = configs[candidate.method_id]
+        expected_config = base_config.model_copy(
+            update={
+                "training": base_config.training.model_copy(update={"seed": candidate.policy_seed})
+            }
+        )
+        expected_config_sha256 = resolved_config_sha256(expected_config.model_dump(mode="json"))
+        if candidate.resolved_config_sha256 != expected_config_sha256:
+            raise ValueError(
+                "authenticated checkpoint resolved config does not match evaluation config"
+            )
         if checkpoint_reader(candidate.path) != candidate.sha256:
             raise ValueError("authenticated checkpoint bytes do not match their SHA-256 binding")
         candidates[key] = candidate

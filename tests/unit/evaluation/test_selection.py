@@ -24,6 +24,7 @@ from mad_driving.evaluation.selection import (
     CheckpointScore,
     ValidationPhysicalIdentity,
     discover_checkpoint_candidates,
+    resolved_config_sha256,
     select_checkpoint,
     write_selection_artifacts,
     write_unselected_smoke_checkpoint_artifacts,
@@ -211,6 +212,7 @@ def candidate(
     return CheckpointCandidate(
         path=tmp_path / "checkpoints" / name,
         sha256=digest,
+        resolved_config_sha256="e" * 64,
         method_id="proposed",
         policy_seed=policy_seed,
         checkpoint_kind="periodic",
@@ -695,6 +697,10 @@ def test_discovery_accepts_only_supported_candidates_from_verified_inventory(
     assert tuple(candidate.training_timestep for candidate in candidates) == (2_000, 5_000, 2_500)
     assert {candidate.method_id for candidate in candidates} == {"proposed"}
     assert {candidate.policy_seed for candidate in candidates} == {42}
+    resolved_config = yaml.safe_load((run_dir / "config_resolved.yaml").read_text("utf-8"))
+    assert {candidate.resolved_config_sha256 for candidate in candidates} == {
+        resolved_config_sha256(resolved_config)
+    }
     assert all(candidate.path.is_absolute() for candidate in candidates)
 
 

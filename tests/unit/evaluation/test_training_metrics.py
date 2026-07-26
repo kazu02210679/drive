@@ -25,6 +25,7 @@ def _candidate(run_dir: Path) -> CheckpointCandidate:
     return CheckpointCandidate(
         path=run_dir / "checkpoints" / "final_model.zip",
         sha256="a" * 64,
+        resolved_config_sha256="e" * 64,
         method_id="proposed",
         policy_seed=42,
         checkpoint_kind="final",
@@ -37,6 +38,7 @@ def _periodic_candidate(run_dir: Path) -> CheckpointCandidate:
     return CheckpointCandidate(
         path=run_dir / "checkpoints" / "ppo_checkpoint_100_steps.zip",
         sha256="b" * 64,
+        resolved_config_sha256="e" * 64,
         method_id="proposed",
         policy_seed=42,
         checkpoint_kind="periodic",

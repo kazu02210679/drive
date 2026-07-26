@@ -51,6 +51,7 @@ _MODEL_SELECTION_COLUMNS = (
 class CheckpointCandidate:
     path: Path
     sha256: str
+    resolved_config_sha256: str
     method_id: str
     policy_seed: int
     checkpoint_kind: CheckpointKind
@@ -63,6 +64,11 @@ class CheckpointCandidate:
             raise ValueError("candidate path must identify a ZIP checkpoint")
         if not isinstance(self.sha256, str) or _SHA256_PATTERN.fullmatch(self.sha256) is None:
             raise ValueError("candidate sha256 must be a lowercase SHA-256 digest")
+        if (
+            not isinstance(self.resolved_config_sha256, str)
+            or _SHA256_PATTERN.fullmatch(self.resolved_config_sha256) is None
+        ):
+            raise ValueError("candidate resolved_config_sha256 must be a lowercase SHA-256 digest")
         try:
             profile = MethodProfileSnapshot.from_method_id(self.method_id)
         except ValueError as error:
@@ -86,6 +92,19 @@ def _plain_json(value: object) -> object:
     if isinstance(value, list | tuple):
         return [_plain_json(item) for item in value]
     return value
+
+
+def resolved_config_sha256(config: Mapping[str, object]) -> str:
+    """Return the canonical identity of one fully resolved training configuration."""
+
+    encoded = json.dumps(
+        _plain_json(config),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -508,6 +527,7 @@ def discover_checkpoint_candidates(
         raise ValueError("resolved training policy seed mismatch")
     if not _json_equivalent(config_payload, metadata.resolved_config):
         raise ValueError("resolved training config does not match run metadata")
+    config_sha256 = resolved_config_sha256(config_payload)
 
     try:
         seed_descriptors = tuple(
@@ -584,6 +604,7 @@ def discover_checkpoint_candidates(
             CheckpointCandidate(
                 path=run_dir / Path(relative_path),
                 sha256=checkpoint_sha256,
+                resolved_config_sha256=config_sha256,
                 method_id=metadata_method,
                 policy_seed=metadata_seed,
                 checkpoint_kind=kind,
@@ -802,6 +823,7 @@ __all__ = [
     "CheckpointScore",
     "ValidationPhysicalIdentity",
     "discover_checkpoint_candidates",
+    "resolved_config_sha256",
     "select_checkpoint",
     "validate_ppo_checkpoint_archive",
     "write_selection_artifacts",

@@ -151,6 +151,7 @@ def test_runtime_uses_visible_rule_policy_or_bound_ppo_loader(tmp_path: Path) ->
     candidate = CheckpointCandidate(
         checkpoint,
         digest,
+        "e" * 64,
         "proposed",
         42,
         "final",
@@ -208,6 +209,7 @@ def test_runtime_policy_and_frame_factories_fail_closed(tmp_path: Path) -> None:
     candidate = CheckpointCandidate(
         checkpoint,
         hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
+        "e" * 64,
         "proposed",
         42,
         "final",

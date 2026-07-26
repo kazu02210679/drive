@@ -6,6 +6,7 @@ import io
 import json
 import os
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +30,11 @@ from mad_driving.evaluation.models import (
 )
 from mad_driving.evaluation.plans import build_smoke_plan
 from mad_driving.evaluation.policies import PpoPolicyAdapter, VisibleTtcRulePolicy
-from mad_driving.evaluation.selection import CheckpointCandidate, CheckpointScore
+from mad_driving.evaluation.selection import (
+    CheckpointCandidate,
+    CheckpointScore,
+    resolved_config_sha256,
+)
 from mad_driving.evaluation.training_metrics import (
     REQUIRED_TENSORBOARD_TAGS,
     TensorBoardEventSource,
@@ -541,6 +546,9 @@ def phase6_inputs(tmp_path: Path) -> Mapping[str, object]:
             CheckpointCandidate(
                 path=checkpoint,
                 sha256=digest,
+                resolved_config_sha256=resolved_config_sha256(
+                    _app_config(method_id).model_dump(mode="json")
+                ),
                 method_id=method_id,
                 policy_seed=42,
                 checkpoint_kind="final",
@@ -641,6 +649,12 @@ def test_bundle_preflight_rejects_each_cross_artifact_mismatch(
         validate(authenticated_checkpoints=(*candidates, candidates[0]))
     with pytest.raises(ValueError, match="SHA-256"):
         validate(checkpoint_reader=lambda path: "0" * 64)
+    mismatched_config = (
+        replace(candidates[0], resolved_config_sha256="f" * 64),
+        *candidates[1:],
+    )
+    with pytest.raises(ValueError, match="resolved config"):
+        validate(authenticated_checkpoints=mismatched_config)
     with pytest.raises(ValueError, match="plan bindings"):
         validate(authenticated_checkpoints=candidates[:-1])
     with pytest.raises(ValueError, match="run plan"):

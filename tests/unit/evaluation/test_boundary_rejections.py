@@ -409,6 +409,7 @@ def test_training_metric_csv_rejects_invalid_mode_points_and_destination(
     (
         {"path": Path("model.txt")},
         {"sha256": "A" * 64},
+        {"resolved_config_sha256": "A" * 64},
         {"method_id": "b0_rule"},
         {"policy_seed": True},
         {"checkpoint_kind": "unknown"},
@@ -420,6 +421,7 @@ def test_checkpoint_candidate_rejects_invalid_identity(kwargs: dict[str, object]
     values: dict[str, object] = {
         "path": Path("model.zip"),
         "sha256": "a" * 64,
+        "resolved_config_sha256": "e" * 64,
         "method_id": "proposed",
         "policy_seed": 42,
         "checkpoint_kind": "final",
@@ -443,6 +445,7 @@ def test_unselected_smoke_writer_rejects_empty_wrong_and_duplicate_candidates(
     candidate = CheckpointCandidate(
         Path("model.zip"),
         "a" * 64,
+        "e" * 64,
         "proposed",
         42,
         "final",
@@ -609,6 +612,7 @@ def test_selection_writers_refuse_existing_artifacts_and_duplicate_smoke_keys(
     first = CheckpointCandidate(
         Path("first.zip"),
         "1" * 64,
+        "e" * 64,
         "proposed",
         42,
         "final",
@@ -618,6 +622,7 @@ def test_selection_writers_refuse_existing_artifacts_and_duplicate_smoke_keys(
     duplicate_key = CheckpointCandidate(
         Path("second.zip"),
         "2" * 64,
+        "e" * 64,
         "proposed",
         42,
         "periodic",
