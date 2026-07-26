@@ -24,7 +24,7 @@ jobs:
         run: python -m pip install uv==0.8.0
 
       - name: Sync dependencies
-        run: uv sync --frozen --no-editable --group dev --extra training --extra evaluation
+        run: uv sync --frozen --group dev --extra training --extra evaluation
 
       - name: Ruff check
         run: uv run --no-sync ruff check .

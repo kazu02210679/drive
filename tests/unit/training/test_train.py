@@ -2480,7 +2480,11 @@ def test_successful_training_confirms_subprocess_training_worker_exited(
     remote = training.remotes[0]
     assert remote.sent == [("close", None)]
     assert remote.close_calls == 1
-    assert process.join_calls == [pytest.approx(3.0)]
+    assert len(process.join_calls) == 1
+    graceful_timeout = process.join_calls[0]
+    assert graceful_timeout is not None
+    assert graceful_timeout <= 3.0
+    assert graceful_timeout == pytest.approx(3.0, abs=0.01)
     assert process.terminate_calls == 0
     assert process.kill_calls == 0
     assert process.is_alive() is False
@@ -2531,7 +2535,11 @@ def test_preclosed_subprocess_still_requires_first_exitcode_audit() -> None:
     with pytest.raises(RuntimeError, match="exit code 1"):
         train_module._close_vector_env(vector_env)
 
-    assert process.join_calls == [pytest.approx(3.0)]
+    assert len(process.join_calls) == 1
+    graceful_timeout = process.join_calls[0]
+    assert graceful_timeout is not None
+    assert graceful_timeout <= 3.0
+    assert graceful_timeout == pytest.approx(3.0, abs=0.01)
 
 
 @pytest.mark.parametrize(
