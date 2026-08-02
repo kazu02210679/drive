@@ -68,6 +68,23 @@ def test_shield_config_requires_missing_agent_monotonicity() -> None:
 @pytest.mark.parametrize(
     "payload",
     [
+        {"missing_agent_action": 0},
+        {"missing_agent_action": 1},
+        {"multiple_missing_action": 0},
+        {"multiple_missing_action": 1},
+        {"multiple_missing_action": 2},
+    ],
+)
+def test_shield_config_rejects_agent_failure_actions_below_spec_floor(
+    payload: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        ShieldConfig.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
         {"imminent_ttc_s": 4.0, "caution_ttc_s": 3.0},
         {"emergency_margin_m": 6.0, "caution_margin_m": 5.0},
         {"mode": "unknown"},

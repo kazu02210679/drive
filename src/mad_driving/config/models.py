@@ -281,8 +281,8 @@ class ShieldConfig(StrictTypedFrozenModel):
     caution_ttc_s: FiniteFloat = Field(default=3.0, gt=0.0)
     emergency_margin_m: FiniteFloat = 0.0
     caution_margin_m: FiniteFloat = 5.0
-    missing_agent_action: int = Field(default=2, ge=0, le=3)
-    multiple_missing_action: int = Field(default=3, ge=0, le=3)
+    missing_agent_action: int = Field(default=2, ge=2, le=3)
+    multiple_missing_action: int = Field(default=3, ge=3, le=3)
 
     @model_validator(mode="after")
     def validate_threshold_order(self) -> Self:
