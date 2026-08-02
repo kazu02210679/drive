@@ -1,7 +1,7 @@
 """Deterministic worst-case braking, crossing, and occlusion analysis."""
 
 from dataclasses import dataclass
-from math import exp
+from math import exp, sqrt
 
 from mad_driving.agents.claim_factory import claim_id, neutral_claim, ordered_claims
 from mad_driving.agents.kinematics import (
@@ -16,6 +16,37 @@ from mad_driving.interfaces import ActorState, RiskClaim, SceneObservation
 @dataclass(frozen=True)
 class _Candidate:
     claim: RiskClaim
+
+
+def _lead_braking_ttc(
+    *,
+    bumper_gap_m: float,
+    ego_speed_mps: float,
+    lead_speed_mps: float,
+    lead_deceleration_mps2: float,
+) -> float | None:
+    """Return TTC for a constant-speed ego and a maximally braking lead."""
+
+    if bumper_gap_m <= 0.0:
+        return 0.0
+    if ego_speed_mps <= 0.0:
+        return None
+
+    braking = abs(lead_deceleration_mps2)
+    lead_stop_time = lead_speed_mps / braking
+    closing_speed = ego_speed_mps - lead_speed_mps
+    collision_time_while_braking = (
+        -closing_speed + sqrt(closing_speed**2 + 2.0 * braking * bumper_gap_m)
+    ) / braking
+    if collision_time_while_braking <= lead_stop_time:
+        return max(collision_time_while_braking, 0.0)
+
+    remaining_gap = (
+        bumper_gap_m
+        + stopping_distance(lead_speed_mps, lead_deceleration_mps2)
+        - ego_speed_mps * lead_stop_time
+    )
+    return lead_stop_time + max(remaining_gap, 0.0) / ego_speed_mps
 
 
 class HazardAgent:
@@ -55,13 +86,12 @@ class HazardAgent:
         lead_stop_distance = stopping_distance(lead_speed, self._config.lead_max_deceleration_mps2)
         available_distance = bumper_gap + lead_stop_distance - self._config.safety_buffer_m
         margin = available_distance - self._ego_required_distance(observation)
-        closing_speed = observation.ego.speed_mps - lead_speed
-        if bumper_gap <= 0.0:
-            ttc = 0.0
-        elif closing_speed > 0.0:
-            ttc = bumper_gap / closing_speed
-        else:
-            ttc = None
+        ttc = _lead_braking_ttc(
+            bumper_gap_m=bumper_gap,
+            ego_speed_mps=observation.ego.speed_mps,
+            lead_speed_mps=lead_speed,
+            lead_deceleration_mps2=self._config.lead_max_deceleration_mps2,
+        )
         claim = self._finite_margin_claim(
             observation=observation,
             event_type="hazard_lead_braking",
@@ -73,7 +103,11 @@ class HazardAgent:
                 f"bumper_gap_m={bumper_gap:.6f}",
                 f"lead_stop_distance_m={lead_stop_distance:.6f}",
             ),
-            assumptions=("lead_maximum_braking", "ego_reaction_then_safe_braking"),
+            assumptions=(
+                "lead_maximum_braking",
+                "ego_constant_speed_for_ttc",
+                "ego_reaction_then_safe_braking_for_margin",
+            ),
         )
         return _Candidate(claim)
 

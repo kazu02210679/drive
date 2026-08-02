@@ -1,5 +1,7 @@
 import math
 
+import pytest
+
 from mad_driving.agents.hazard import HazardAgent
 from mad_driving.config.models import HazardAgentConfig
 from mad_driving.interfaces import RoadContext
@@ -43,6 +45,29 @@ def test_hazard_positive_margin_is_advisory_and_below_half_severity() -> None:
     assert claim.stopping_margin_m is not None and claim.stopping_margin_m > 0.0
     assert 0.0 <= claim.severity < 0.5
     assert claim.recommended_max_speed_mps == 15.0
+
+
+def test_hazard_ttc_accounts_for_lead_braking_until_after_lead_stops() -> None:
+    actor = make_actor("lead", longitudinal_m=14.5, longitudinal_speed_mps=10.0)
+
+    (claim,) = HazardAgent(HazardAgentConfig()).analyze(
+        make_snapshot(ego_speed_mps=10.0, actors=(actor,))
+    )
+
+    # The 10 m bumper gap falls to 3.75 m while the lead stops in 1.25 s,
+    # then the constant-speed ego covers the remainder in 0.375 s.
+    assert claim.min_ttc_s == pytest.approx(1.625)
+
+
+def test_hazard_ttc_detects_collision_while_lead_is_still_braking() -> None:
+    actor = make_actor("lead", longitudinal_m=5.5, longitudinal_speed_mps=2.0)
+
+    (claim,) = HazardAgent(HazardAgentConfig()).analyze(
+        make_snapshot(ego_speed_mps=10.0, actors=(actor,))
+    )
+
+    # Solve 1 - 8t - 4t^2 = 0 for the positive root under -8 m/s^2 lead braking.
+    assert claim.min_ttc_s == pytest.approx(0.11803398875)
 
 
 def test_hazard_evaluates_crossing_actor_arrival() -> None:
