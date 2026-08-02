@@ -1,7 +1,7 @@
 """Validated configuration models."""
 
 from math import isclose
-from typing import Any, Literal, Self
+from typing import Annotated, Any, Literal, Self
 
 from pydantic import (
     BaseModel,
@@ -23,6 +23,8 @@ MethodId = Literal[
     "proposed_no_shield",
     "proposed_no_hazard",
 ]
+
+NormalizedActionValue = Annotated[FiniteFloat, Field(ge=-1.0, le=1.0)]
 
 
 class StrictFrozenModel(BaseModel):
@@ -397,7 +399,7 @@ class AppConfig(StrictFrozenModel):
     seed: int = Field(ge=0)
     scenario_id: str = Field(min_length=1)
     decision_steps: PositiveInt
-    fixed_action: tuple[FiniteFloat, FiniteFloat]
+    fixed_action: tuple[NormalizedActionValue, NormalizedActionValue]
     metadrive: MetaDriveConfig
     scenarios: ScenarioSplitsConfig = Field(default_factory=ScenarioSplitsConfig)
     method: MethodConfig = Field(default_factory=MethodConfig)
