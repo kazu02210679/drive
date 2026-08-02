@@ -27,6 +27,10 @@ class SceneSnapshotBuilder:
         seed: int,
         previous_action: int,
         previous_shield_intervention: bool,
+        stop_required: bool = False,
+        occlusion_present: bool = False,
+        distance_to_conflict_point_m: float | None = None,
+        intersection_entry_prohibited: bool = False,
     ) -> SceneSnapshot:
         config = self._config(env)
         interval_s = decision_interval_s(config)
@@ -61,12 +65,33 @@ class SceneSnapshotBuilder:
             seed=seed,
             ego=ego,
             actors=actors,
-            stop_required=False,
-            occlusion_present=False,
-            distance_to_conflict_point_m=None,
+            stop_required=stop_required,
+            occlusion_present=occlusion_present,
+            distance_to_conflict_point_m=distance_to_conflict_point_m,
             previous_action=previous_action,
             previous_shield_intervention=previous_shield_intervention,
+            collision_occurred=self._collision_occurred(ego_vehicle),
+            off_road=self._off_road(ego_vehicle),
+            intersection_entry_prohibited=intersection_entry_prohibited,
         )
+
+    @staticmethod
+    def _collision_occurred(vehicle: Any) -> bool:
+        return any(
+            bool(getattr(vehicle, attribute, False))
+            for attribute in (
+                "crash_vehicle",
+                "crash_human",
+                "crash_object",
+                "crash_sidewalk",
+                "crash_building",
+            )
+        )
+
+    @staticmethod
+    def _off_road(vehicle: Any) -> bool:
+        on_lane = getattr(vehicle, "on_lane", None)
+        return on_lane is not None and not bool(on_lane)
 
     @staticmethod
     def _config(env: Any) -> ConfigReader:

@@ -45,6 +45,12 @@ class FakeVehicle:
         self.lane = lane
         self.lane_index = lane.index if lane is not None else None
         self.max_speed_m_s = 20.0
+        self.crash_vehicle = False
+        self.crash_human = False
+        self.crash_object = False
+        self.crash_sidewalk = False
+        self.crash_building = False
+        self.on_lane = True
 
     @property
     def speed(self) -> float:
@@ -189,3 +195,54 @@ def test_prefers_current_agent_api_without_accessing_deprecated_vehicle() -> Non
             raise AssertionError("deprecated env.vehicle was accessed")
 
     assert build(AgentApiEnv()).ego.speed_mps == pytest.approx(10.0)  # type: ignore[arg-type]
+
+
+def test_builder_accepts_scenario_flags() -> None:
+    snapshot = SceneSnapshotBuilder().build(
+        make_env(),
+        step_index=1,
+        scenario_id="scenario_flags",
+        seed=42,
+        previous_action=0,
+        previous_shield_intervention=False,
+        stop_required=True,
+        occlusion_present=True,
+        distance_to_conflict_point_m=12.0,
+        intersection_entry_prohibited=True,
+    )
+
+    assert snapshot.stop_required is True
+    assert snapshot.occlusion_present is True
+    assert snapshot.distance_to_conflict_point_m == 12.0
+    assert snapshot.intersection_entry_prohibited is True
+    assert snapshot.collision_occurred is False
+    assert snapshot.off_road is False
+
+
+@pytest.mark.parametrize(
+    "collision_flag",
+    (
+        "crash_vehicle",
+        "crash_human",
+        "crash_object",
+        "crash_sidewalk",
+        "crash_building",
+    ),
+)
+def test_builder_maps_any_metadrive_collision_flag(collision_flag: str) -> None:
+    env = make_env()
+    setattr(env.vehicle, collision_flag, True)
+
+    assert build(env).collision_occurred is True
+
+
+def test_builder_maps_explicit_outside_lane_state_only() -> None:
+    env = make_env()
+    env.vehicle.on_lane = False
+    assert build(env).off_road is True
+
+    env.vehicle.on_lane = True
+    assert build(env).off_road is False
+
+    del env.vehicle.on_lane
+    assert build(env).off_road is False

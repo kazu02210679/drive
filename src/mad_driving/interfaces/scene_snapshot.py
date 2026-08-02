@@ -46,6 +46,9 @@ class SceneSnapshot:
     distance_to_conflict_point_m: float | None
     previous_action: int
     previous_shield_intervention: bool
+    collision_occurred: bool
+    off_road: bool
+    intersection_entry_prohibited: bool
 
     def __post_init__(self) -> None:
         if self.step_index < 0:

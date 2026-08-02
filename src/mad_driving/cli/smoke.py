@@ -8,6 +8,7 @@ import sys
 from collections.abc import Sequence
 from dataclasses import asdict
 
+from mad_driving.agents.suite import AgentSuite, SuiteFactory
 from mad_driving.config.loader import load_config
 from mad_driving.config.models import AppConfig
 from mad_driving.envs.multi_agent_speed_env import (
@@ -21,15 +22,19 @@ from mad_driving.world_model import SceneSnapshotBuilder
 def run_smoke(
     config: AppConfig,
     env_factory: EnvironmentFactory = create_metadrive_env,
+    suite_factory: SuiteFactory = AgentSuite.from_config,
 ) -> SmokeResult:
     """Run fixed controls and return the final typed simulator snapshot."""
 
     env = env_factory(config.metadrive_dict())
     snapshot_builder = SceneSnapshotBuilder()
+    suite = suite_factory(config.agents)
     action = (float(config.fixed_action[0]), float(config.fixed_action[1]))
     terminated = False
     truncated = False
     final_snapshot = None
+    final_claims = None
+    final_review = None
     steps_completed = 0
 
     try:
@@ -47,18 +52,21 @@ def run_smoke(
                 previous_action=0,
                 previous_shield_intervention=False,
             )
+            final_claims, final_review = suite.analyze(final_snapshot)
             if terminated or truncated:
                 break
     finally:
         env.close()
 
-    if final_snapshot is None:
+    if final_snapshot is None or final_claims is None or final_review is None:
         raise RuntimeError("Smoke run completed without a simulator step")
     return SmokeResult(
         steps_completed=steps_completed,
         terminated=terminated,
         truncated=truncated,
         final_snapshot=final_snapshot,
+        final_claims=final_claims,
+        final_review=final_review,
     )
 
 
