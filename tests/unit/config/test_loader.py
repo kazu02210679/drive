@@ -223,6 +223,23 @@ def test_fixed_action_rejects_values_outside_metadrive_action_space(
 
 
 @pytest.mark.parametrize(
+    ("fixed_action", "expected"),
+    [
+        ("[-1.0, 0.0]", (-1.0, 0.0)),
+        ("[1.0, 0.0]", (1.0, 0.0)),
+        ("[0.0, -1.0]", (0.0, -1.0)),
+        ("[0.0, 1.0]", (0.0, 1.0)),
+    ],
+)
+def test_fixed_action_accepts_metadrive_action_space_boundaries(
+    tmp_path: Path, fixed_action: str, expected: tuple[float, float]
+) -> None:
+    text = VALID_CONFIG.replace("[0.0, 0.25]", fixed_action)
+
+    assert load_config(write_config(tmp_path, text)).fixed_action == expected
+
+
+@pytest.mark.parametrize(
     ("field", "bad_value"),
     [("num_scenarios", 0), ("traffic_density", -0.1), ("traffic_density", 1.1), ("horizon", 0)],
 )
