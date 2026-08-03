@@ -1,6 +1,6 @@
 """Validated configuration models."""
 
-from typing import Any, Self
+from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, PositiveInt, model_validator
 
@@ -9,6 +9,12 @@ class StrictFrozenModel(BaseModel):
     """Base class that rejects unknown settings and runtime mutation."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class StrictTypedFrozenModel(StrictFrozenModel):
+    """Frozen model that also rejects Pydantic scalar type coercion."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
 
 class MetaDriveConfig(StrictFrozenModel):
@@ -78,6 +84,74 @@ class AgentsConfig(StrictFrozenModel):
     critic: CriticAgentConfig = Field(default_factory=CriticAgentConfig)
 
 
+class CoordinatorConfig(StrictTypedFrozenModel):
+    """Thresholds for the deterministic Phase 3 baseline Coordinator."""
+
+    conflict_min_action: int = Field(default=1, ge=0, le=3)
+    severe_min_action: int = Field(default=2, ge=0, le=3)
+    severe_threshold: FiniteFloat = Field(default=0.75, ge=0.0, le=1.0)
+
+
+class ShieldConfig(StrictTypedFrozenModel):
+    """Modes and physical thresholds for the deterministic Safety Shield."""
+
+    mode: Literal["off", "monitor", "enforce"] = "enforce"
+    imminent_ttc_s: FiniteFloat = Field(default=1.0, gt=0.0)
+    caution_ttc_s: FiniteFloat = Field(default=3.0, gt=0.0)
+    emergency_margin_m: FiniteFloat = 0.0
+    caution_margin_m: FiniteFloat = 5.0
+    missing_agent_action: int = Field(default=2, ge=0, le=3)
+    multiple_missing_action: int = Field(default=3, ge=0, le=3)
+
+    @model_validator(mode="after")
+    def validate_threshold_order(self) -> Self:
+        if self.imminent_ttc_s > self.caution_ttc_s:
+            raise ValueError("imminent_ttc_s must not exceed caution_ttc_s")
+        if self.emergency_margin_m > self.caution_margin_m:
+            raise ValueError("emergency_margin_m must not exceed caution_margin_m")
+        if self.multiple_missing_action < self.missing_agent_action:
+            raise ValueError("multiple_missing_action must not be less than missing_agent_action")
+        return self
+
+
+class SpeedPIDConfig(StrictTypedFrozenModel):
+    """Longitudinal PID gains and acceleration command limits."""
+
+    kp: FiniteFloat = Field(default=0.50, ge=0.0)
+    ki: FiniteFloat = Field(default=0.05, ge=0.0)
+    kd: FiniteFloat = Field(default=0.10, ge=0.0)
+    integral_limit: FiniteFloat = Field(default=10.0, gt=0.0)
+    max_acceleration_mps2: FiniteFloat = Field(default=2.5, gt=0.0)
+    normal_deceleration_mps2: FiniteFloat = Field(default=-3.0, lt=0.0)
+    emergency_deceleration_mps2: FiniteFloat = Field(default=-6.0, lt=0.0)
+
+    @model_validator(mode="after")
+    def validate_deceleration_order(self) -> Self:
+        if self.emergency_deceleration_mps2 > self.normal_deceleration_mps2:
+            raise ValueError("emergency_deceleration_mps2 must not exceed normal_deceleration_mps2")
+        return self
+
+
+class SteeringPIDConfig(StrictTypedFrozenModel):
+    """Heading and lateral lane-centering PID settings."""
+
+    heading_kp: FiniteFloat = Field(default=1.7, ge=0.0)
+    heading_ki: FiniteFloat = Field(default=0.01, ge=0.0)
+    heading_kd: FiniteFloat = Field(default=3.5, ge=0.0)
+    lateral_kp: FiniteFloat = Field(default=0.3, ge=0.0)
+    lateral_ki: FiniteFloat = Field(default=0.002, ge=0.0)
+    lateral_kd: FiniteFloat = Field(default=0.05, ge=0.0)
+    integral_limit: FiniteFloat = Field(default=5.0, gt=0.0)
+    lookahead_m: FiniteFloat = Field(default=1.0, gt=0.0)
+
+
+class ControlConfig(StrictTypedFrozenModel):
+    """Complete low-level lane and speed control configuration."""
+
+    speed: SpeedPIDConfig = Field(default_factory=SpeedPIDConfig)
+    steering: SteeringPIDConfig = Field(default_factory=SteeringPIDConfig)
+
+
 class AppConfig(StrictFrozenModel):
     """Root configuration for a deterministic Phase 1 smoke run."""
 
@@ -87,6 +161,9 @@ class AppConfig(StrictFrozenModel):
     fixed_action: tuple[FiniteFloat, FiniteFloat]
     metadrive: MetaDriveConfig
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
+    coordinator: CoordinatorConfig = Field(default_factory=CoordinatorConfig)
+    shield: ShieldConfig = Field(default_factory=ShieldConfig)
+    control: ControlConfig = Field(default_factory=ControlConfig)
 
     def metadrive_dict(self) -> dict[str, Any]:
         """Return a plain dictionary accepted by MetaDrive."""
