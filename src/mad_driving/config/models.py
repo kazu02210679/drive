@@ -1,6 +1,6 @@
 """Validated configuration models."""
 
-from math import isclose
+from math import ceil, isclose
 from typing import Annotated, Any, Literal, Self
 
 from pydantic import (
@@ -413,41 +413,44 @@ class AppConfig(StrictFrozenModel):
 
     @model_validator(mode="after")
     def validate_scenario_durations_fit_horizon(self) -> Self:
-        capacity_s = self.metadrive.horizon * self.metadrive.decision_dt_s
+        decision_dt_s = self.metadrive.decision_dt_s
         crossing = self.scenarios.occluded_crossing
-        required_durations_s = {
+        required_steps = {
             "lead_brake": (
-                self.scenarios.lead_brake.trigger_s.maximum + self.scenarios.lead_brake.survival_s
+                ceil(self.scenarios.lead_brake.trigger_s.maximum / decision_dt_s)
+                + ceil(self.scenarios.lead_brake.survival_s / decision_dt_s)
             ),
             "cut_in": (
-                self.scenarios.cut_in.trigger_s.maximum
-                + self.scenarios.cut_in.merge_duration_s.maximum
-                + self.scenarios.cut_in.survival_s
+                ceil(self.scenarios.cut_in.trigger_s.maximum / decision_dt_s)
+                + ceil(self.scenarios.cut_in.merge_duration_s.maximum / decision_dt_s)
+                + ceil(self.scenarios.cut_in.survival_s / decision_dt_s)
             ),
             "occluded_crossing": (
-                crossing.trigger_s.maximum
-                + (
-                    crossing.crossing_start_offset_m.maximum
-                    + self.metadrive.lane_width_m / 2.0
-                    + OCCLUDED_CROSSING_ACTOR_HALF_WIDTH_M
+                ceil(crossing.trigger_s.maximum / decision_dt_s)
+                + ceil(
+                    (
+                        crossing.crossing_start_offset_m.maximum
+                        + self.metadrive.lane_width_m / 2.0
+                        + OCCLUDED_CROSSING_ACTOR_HALF_WIDTH_M
+                    )
+                    / crossing.crossing_speed_mps.minimum
+                    / decision_dt_s
                 )
-                / crossing.crossing_speed_mps.minimum
-                + crossing.survival_s
+                + ceil(crossing.survival_s / decision_dt_s)
             ),
         }
         over_capacity = {
-            scenario_id: duration_s
-            for scenario_id, duration_s in required_durations_s.items()
-            if duration_s > capacity_s
+            scenario_id: steps
+            for scenario_id, steps in required_steps.items()
+            if steps > self.metadrive.horizon
         }
         if over_capacity:
             details = ", ".join(
-                f"{scenario_id}={duration_s:.6g}s"
-                for scenario_id, duration_s in over_capacity.items()
+                f"{scenario_id}={steps} steps" for scenario_id, steps in over_capacity.items()
             )
             raise ValueError(
                 "scenario worst-case duration exceeds MetaDrive horizon "
-                f"({capacity_s:.6g}s): {details}"
+                f"({self.metadrive.horizon} steps): {details}"
             )
         return self
 

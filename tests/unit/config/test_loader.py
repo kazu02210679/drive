@@ -283,6 +283,21 @@ def test_scenario_worst_case_duration_accepts_the_exact_configured_capacity() ->
     assert config.metadrive.horizon == 120
 
 
+def test_scenario_worst_case_duration_rejects_segment_rounding_beyond_horizon() -> None:
+    payload = load_config("configs/base.yaml").model_dump(mode="python")
+    payload["metadrive"]["horizon"] = 120
+    payload["scenarios"]["cut_in"].update(
+        {
+            "trigger_s": {"minimum": 3.95, "maximum": 3.95},
+            "merge_duration_s": {"minimum": 3.95, "maximum": 3.95},
+            "survival_s": 4.1,
+        }
+    )
+
+    with pytest.raises(ValidationError, match="cut_in"):
+        AppConfig.model_validate(payload)
+
+
 @pytest.mark.parametrize(
     ("scenario", "field", "maximum"),
     [
