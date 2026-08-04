@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 
-from mad_driving.interfaces._validation import require_probability
+from mad_driving.interfaces._validation import canonical_string_tuple, require_probability
 
 
 @dataclass(frozen=True)
@@ -17,3 +17,14 @@ class CriticReview:
     def __post_init__(self) -> None:
         require_probability("conflict_score", self.conflict_score)
         require_probability("max_severity", self.max_severity)
+        object.__setattr__(
+            self,
+            "supported_agent_ids",
+            canonical_string_tuple("supported_agent_ids", self.supported_agent_ids),
+        )
+        object.__setattr__(
+            self,
+            "challenged_claim_ids",
+            canonical_string_tuple("challenged_claim_ids", self.challenged_claim_ids),
+        )
+        object.__setattr__(self, "reasons", canonical_string_tuple("reasons", self.reasons))

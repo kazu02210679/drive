@@ -10,7 +10,7 @@
 
 MVPでは外部LLM API、VLM、自然言語による自由討論を使用しない。「Agent」は独立した認識・予測・検証ロジックを持つPythonモジュールを意味する。Agent間の通信は構造化データのみとする。
 
-学習中も、1エピソードの途中ではモデルの重みを更新しない。走行データを一定ステップ収集した後、PPOのrollout単位でCoordinatorを更新する。
+学習にはStable-Baselines3の標準PPOを使用する。`n_steps * num_envs`件のtransitionを収集するたびにCoordinatorを更新し、更新時点をエピソード境界へ同期しない。
 
 最初からステアリング学習、画像認識、経路探索、複数自車、実車接続を実装しない。MVPの学習対象は速度判断を統合するCoordinatorだけとする。
 
@@ -40,7 +40,7 @@ MetaDrive上の1台の自車に、複数の専門Agentを持つ判断系を実�
 - Simulatorの正解状態から作成するScene Snapshot
 - 車線追従用の固定・決定論的な横方向制御
 - 4段階の速度判断
-- 4つの専門Agent
+- 3つの専門Agentと1つのCritic
 - Agent間の矛盾検出
 - PPOで学習するCoordinator
 - Safety Shield
@@ -58,7 +58,6 @@ MetaDrive上の1台の自車に、複数の専門Agentを持つ判断系を実�
 - クラウド経路探索、渋滞予測
 - V2X通信
 - 複数の学習対象車両
-- エピソード途中のニューラルネットワーク更新
 - 実車安全規格への適合証明
 
 ### 2.3 MVPシナリオ
@@ -72,7 +71,7 @@ MetaDrive上の1台の自車に、複数の専門Agentを持つ判断系を実�
 3. **Occluded Crossing Actor**  
    遮蔽物の背後から、交差方向へ交通Actorが進入する。MVPでは手続き生成環境で制御しやすい車両または小型Actorを使用する。歩行者Actorは拡張フェーズで追加する。
 
-各シナリオは、距離、速度、発生時刻、減速度、遮蔽位置をseedに基づいて変化させる。
+各シナリオは、距離、速度、発生時刻、減速度、遮蔽位置をseedに基づいて変化させる。Phase 4.1は`ScenarioRuntime`境界とseed分離だけを実装し、これら3種類の専用ActorとCurriculumはPhase 5へ残す。
 
 ---
 
@@ -114,6 +113,9 @@ MetaDrive Simulation
         ▼
 SceneSnapshotBuilder
         │
+        ▼
+SceneFrame = scenario metadata + SceneObservation + PrivilegedWorldState
+        │
         ├───────────────┬────────────────┬───────────────┐
         ▼               ▼                ▼               ▼
 NominalMotionAgent  HazardAgent      RuleAgent       CriticAgent
@@ -143,10 +145,12 @@ NominalMotionAgent  HazardAgent      RuleAgent       CriticAgent
 
 ### 更新周期
 
-- Simulator step: MetaDrive設定に従う
+- physics step: `physics_dt_s=0.02 s`
+- decision repeat: `5`
+- decision step: `decision_dt_s=0.10 s`。`decision_dt_s == physics_dt_s * decision_repeat`を起動時とruntime境界で検証する
 - Agent分析: 各decision stepで1回
 - Coordinator推論: 各decision stepで1回
-- PPO更新: rollout収集後のみ
+- PPO更新: 標準Stable-Baselines3 PPOに従い、`n_steps * num_envs`のrollout収集後に実行する。エピソード境界へ同期しない
 - Agentは同一Snapshotを読み、互いの内部状態を直接変更しない
 
 ---
@@ -189,23 +193,43 @@ class EgoState:
     speed_limit_mps: float
 ```
 
-### 5.3 SceneSnapshot
+### 5.3 SceneObservation、PrivilegedWorldState、SceneFrame
 
 ```python
 @dataclass(frozen=True)
-class SceneSnapshot:
+class SceneObservation:
     step_index: int
     sim_time_s: float
-    scenario_id: str
-    seed: int
     ego: EgoState
-    actors: tuple[ActorState, ...]
-    stop_required: bool
-    occlusion_present: bool
-    distance_to_conflict_point_m: float | None
-    previous_action: int
+    visible_actors: tuple[ActorState, ...]
+    occlusion_regions: tuple[OcclusionRegion, ...]
+    road_context: RoadContext
+    previous_executed_action: int
     previous_shield_intervention: bool
+
+
+@dataclass(frozen=True)
+class PrivilegedWorldState:
+    all_actors: tuple[ActorState, ...]
+    collision_occurred: bool
+    collision_kind: Literal[
+        "vehicle", "crossing_actor", "object", "sidewalk", "building"
+    ] | None
+    off_road: bool
+    arrived: bool
+    scenario_success: bool
+    scenario_failure: bool
+
+
+@dataclass(frozen=True)
+class SceneFrame:
+    scenario_id: str
+    seeds: EpisodeSeeds
+    observation: SceneObservation
+    privileged: PrivilegedWorldState
 ```
+
+Nominal、Hazard、Rule、Critic、Coordinator、Safety Shieldが受け取れるのは`SceneObservation`だけとする。`scenario_id`と`EpisodeSeeds`はAgent入力ではなく`SceneFrame`の運用metadataとする。遮蔽されたActorは`visible_actors`へ入れず、`visible=False`のActorを運動学情報付きでAgent可視構造へ残してはならない。`PrivilegedWorldState.all_actors`では可視Actorを`visible=True, occluded=False`、非可視Actorを`visible=False, occluded=True`としてtruth上の可視性を保持する。`PrivilegedWorldState`はReward、評価、debugログだけが使用できる。
 
 ### 5.4 RiskClaim
 
@@ -257,14 +281,34 @@ class CriticReview:
 class DecisionTrace:
     step_index: int
     raw_action: int
+    required_action: int
     executed_action: int
     target_speed_mps: float
+    intervention_required: bool
     shield_intervened: bool
     shield_reasons: tuple[str, ...]
+    control_fail_safe: bool
+    control_fail_safe_reason: str | None
     claims: tuple[RiskClaim, ...]
     review: CriticReview
     reward_components: dict[str, float]
+    failed_agent_ids: tuple[str, ...]
+    errors: tuple[str, ...]
+    episode_rng_seed: int
+    metadrive_scenario_index: int
+    scenario_parameter_seed: int
+    role: Literal["train", "validation", "test"]
+    worker_index: int
 ```
+
+### 5.7 座標系
+
+- `position_xy_m`と`velocity_xy_mps`はMetaDrive world XY座標を使う
+- `heading_rad`はworld headingを`[-pi, pi)`へ正規化し、反時計回りを正とする
+- `relative_longitudinal_m`と`relative_lateral_m`は自車body frameを使い、前方と左方を正とする
+- `lane_offset_m`は現在laneのlocal座標とMetaDriveのlateral signを保持する
+- `same_lane`はcanonical lane indexの一致とlane幅内のActor位置を両方要求する
+- scenarioのconflict pointは各`ScenarioRuntime`がgeometryから計算し、自車path上の距離をm単位で渡す
 
 ---
 
@@ -276,11 +320,11 @@ Agentは共通インターフェースを実装する。
 class DrivingAgent(Protocol):
     agent_id: str
 
-    def analyze(self, snapshot: SceneSnapshot) -> RiskClaim:
+    def analyze(self, observation: SceneObservation) -> tuple[RiskClaim, ...]:
         ...
 ```
 
-Agentは副作用を持たない。同じSnapshotを与えた場合、同じ設定とseedで同じRiskClaimを返すこと。
+Agentは副作用を持たない。同じObservationを与えた場合、同じ設定とseedで同じ1〜3件のRiskClaimを同じ安全順序で返すこと。1つの専門Agentが失敗しても他のClaimを保持し、失敗したAgent IDとsanitize済みerrorをCritic、Trace、Shieldへ渡す。
 
 ### 6.1 NominalMotionAgent
 
@@ -294,7 +338,7 @@ MVP実装：
 - 同一車線の前方車、割り込み候補、交差Actorを評価
 - 予測最小距離とTTCを算出
 - TTCと相対速度から連続的なcollision probability heuristicを算出
-- 最も危険なActorに対する1件のRiskClaimを返す
+- hard stop、severity、有限TTC、停止余裕、推奨速度、Actor IDの安全順で最大3件のRiskClaimを返す
 
 禁止事項：
 
@@ -346,8 +390,10 @@ CriticAgentはRiskClaimを生成せず、Snapshotと他AgentのRiskClaimを受�
 class CriticAgent:
     def review(
         self,
-        snapshot: SceneSnapshot,
+        observation: SceneObservation,
         claims: Sequence[RiskClaim],
+        *,
+        failed_agent_ids: Sequence[str],
     ) -> CriticReview:
         ...
 ```
@@ -419,7 +465,9 @@ CoordinatorのObservationは固定長24次元の`float32`ベクトルとする�
 23. previous action normalized by 3
 24. previous shield intervention
 
-正規化後は原則`[-1, 1]`、確率・フラグは`[0, 1]`とする。TTCは上限値でclipする。欠損TTCは「危険なし」を表す上限値へ変換する。
+各専門Agentの複数Claimは、既存slot位置を変えずにfield-wiseで安全側へ集約する。有限TTCと停止余裕は最小、severityとprobabilityは最大、推奨最高速度とconfidenceは最小、hard stopは論理和を使う。正規化後は原則`[-1, 1]`、確率・フラグは`[0, 1]`とする。TTCは上限値でclipする。
+
+Observationは引き続きshape `(24,)`、dtype `numpy.float32`、有限、`[-1, 1]`内とする。`ttc_valid`、`claim_valid`、`agent_failed`、`target_actor_present`の明示featureは未実装であり、この24次元へ存在しない。これらはObservation schema versionを上げて再学習する別Phaseで追加する。
 
 ### 7.3 Action Space
 
@@ -456,6 +504,8 @@ seed: 42
 
 Smoke trainingは`5_000` timesteps、標準trainingは`500_000` timestepsを初期値とする。
 
+正式比較では`training.seed`をpolicy/RNG seed `42, 43, 44, 45, 46`へ設定した5本の独立runを使用し、validation episode列を決めるAppConfigのroot `seed`は固定する。自動multi-seed sweepは要件としない。PPOは標準Stable-Baselines3実装を使い、`n_steps * num_envs`のrollout境界で更新する。エピソード途中にrollout境界が来ることを禁止せず、独自collectorを追加しない。
+
 複数環境並列化は設定で切り替える。Windowsで問題がある場合に単一環境へフォールバックできること。
 
 ---
@@ -487,7 +537,7 @@ class SafetyShield:
     def filter(
         self,
         requested_action: int,
-        snapshot: SceneSnapshot,
+        observation: SceneObservation,
         claims: Sequence[RiskClaim],
     ) -> ShieldResult:
         ...
@@ -515,7 +565,9 @@ class SafetyShield:
 - `monitor`: 介入候補を記録するがActionを変更しない
 - `enforce`: Actionを変更する
 
-標準評価は`enforce`。学習は設定可能とし、初期値は`enforce`＋介入ペナルティとする。
+学習は設定可能とし、初期値は`enforce`＋介入ペナルティとする。比較実験では、意思決定性能比較のB1・B2・Proposedをすべて`monitor`にそろえ、実行可能システム比較の全方式を`enforce`にそろえる。`Proposed without Shield`は主baselineではなくablationとして扱う。
+
+`monitor`でも`required_action`と`intervention_required`を`info`と`DecisionTrace`へ必ず記録する。Shieldへは構成上存在する`expected_agent_ids`と、そのうち実行時に失敗した`failed_agent_ids`を別々に渡す。expectedに含まれないAgentは意図的ablationとして欠落数へ含めず、expectedなのにClaimがないAgentだけへ安全floorを適用する。低レベル制御がfail-safeへ入った場合は内部故障としてresourceをcloseし、通常のAction遷移をPPO bufferへ返さない。
 
 ---
 
@@ -525,22 +577,21 @@ class SafetyShield:
 
 ### reset
 
-1. scenarioとseedを決定
-2. MetaDriveをreset
-3. ScenarioManagerがActor条件を設定
-4. Agent、Critic、PID、ログ状態をreset
-5. SceneSnapshotを作成
-6. RiskClaimsとCriticReviewを生成
-7. 24次元Observationを返す
+1. `episode_rng_seed`からrole-scoped allocatorで`metadrive_scenario_index`と`scenario_parameter_seed`を決定する
+2. `ScenarioRuntime.reset`を呼ぶ
+3. 選択したMetaDrive scenario indexでSimulatorをresetする
+4. `ScenarioRuntime.after_simulator_reset`を呼ぶ
+5. `SceneFrame`を作成し、Agent可視ObservationだけからRiskClaimsとCriticReviewを生成する
+6. 24次元Coordinator Observationを返す
 
 ### step
 
 1. PPO CoordinatorからActionを受け取る
 2. Safety ShieldでActionをfilter
 3. 低レベルPolicyへtarget speedを設定
-4. MetaDriveを1 decision step進める
-5. 新Snapshotを作成
-6. Agent分析とCriticReviewを実行
+4. `ScenarioRuntime.before_step`を呼び、MetaDriveを1 decision step進め、authoritative decision intervalを再検証してから`ScenarioRuntime.after_step`を呼ぶ
+5. `after_step`が返す`ScenarioTransition(state, outcome)`のstateを次のlifecycleへ引き継ぐ。observation context取得後にdecision intervalを再検証し、直後に新SceneFrameを作成する。不一致時はsnapshot、Agent分析、Reward、Trace、next stateへ進まずcloseして元の例外を送出する
+6. Agent可視ObservationからAgent分析とCriticReviewを実行
 7. rewardを計算
 8. terminated/truncatedを判定
 9. DecisionTraceを記録
@@ -554,6 +605,8 @@ obs, reward, terminated, truncated, info = env.step(action)
 ```
 
 `gymnasium.utils.env_checker.check_env()`を通すこと。
+
+自然なMDP結果はGymnasium semanticsに従う。typed privileged stateの衝突、off-road、到着、scenario success/failureだけから`terminated=True`を導出し、設定horizonのraw truncationは`truncated=True`として保持する。Simulatorのraw terminationがtrueなら、少なくとも1つのtyped privileged termination outcomeとの一致を必須とし、不一致は内部consistency errorとする。typed outcomeがあるvalidな場合だけboth-trueを許す。Simulator、ScenarioRuntime、snapshot、reward、observationなどの内部errorは所有resourceをcloseして元の例外を送出し、zero Observationや偽のtruncationへ変換しない。
 
 ---
 
@@ -592,21 +645,24 @@ reward:
   shield_intervention: 2.0
 ```
 
+### 比較方式に依存しないReward oracle
+
+Reward APIはAgent Claim、CriticReview、Agent失敗状態を入力に取らない。全方式共通の`PrivilegedWorldState.minimum_actual_ttc_s`は、可視・遮蔽を問わず全Simulator truth Actorについて、現在速度を固定した自車座標系の矩形衝突包絡への最初の進入時刻として決定論的に計算する。`hard_rule_constraint`もprivileged stateへ固定する。Agent ClaimはObservation、Shield、診断だけに使用する。
+
 ### Near-miss
 
-TTCに応じた連続ペナルティとする。閾値を跨いだ瞬間だけの不連続な報酬にしない。
+遷移後の`minimum_actual_ttc_s`に応じた連続ペナルティとする。閾値を跨いだ瞬間だけの不連続な報酬にしない。
 
 ### Unnecessary brake
 
 以下をすべて満たす場合に発生する。
 
 - ActionがSLOW以上
-- HazardAgent severityが低い
-- RuleAgentに制約なし
-- 近傍ActorとのTTCに十分な余裕
-- 直後の数stepで危険イベントが発生しない
+- Action選択時のoracle TTCが欠損して衝突course上のActorがいない、または最小TTCが安全閾値以上
+- Action選択時のoracle Rule制約がない
+- 遷移後の衝突、路外、Shield介入がない
 
-将来情報を直接Observationへ入れてはならない。Reward計算だけに使用する。
+Actionの妥当性はAction選択時のprevious privileged oracleで判定し、`-scale * executed_action`を即時に適用する。遷移後の衝突、路外、Shield介入は安全側のActionを誤罰しないための抑止条件としてだけ使う。将来lookahead、safe-brake streakを使用しない。「後から危険eventが発生しなかった」は評価metricであり、学習Reward入力ではない。`vehicle`、`object`、`sidewalk`、`building`への衝突はvehicle collision penalty、`crossing_actor`への衝突は専用のより大きいpenaltyを適用する。
 
 ### 終了条件
 
@@ -617,21 +673,22 @@ TTCに応じた連続ペナルティとする。閾値を跨いだ瞬間だけ�
 - off-road
 - scenario-defined failure
 
-`truncated=True`：
-
-- 最大step数到達
-- シミュレーター異常
+`truncated=True`は最大step数到達だけに使用する。内部errorはclose後に送出する。
 
 ---
 
 ## 12. ScenarioManager
 
-シナリオ生成とtrain/eval分離を担当する。
+Phase 4.1ではSimulator非依存の`ScenarioRuntime` lifecycleとrole別seed allocationを実装する。Lead Brake、Cut-in、Occluded CrossingのActor生成とCurriculumはPhase 5でこの境界へ接続する。
 
 ### 共通要件
 
 - seedで完全再現可能
-- train seedsとeval seedsを重複させない
+- `episode_rng_seed`、`metadrive_scenario_index`、`scenario_parameter_seed`を別identityとしてreset infoとDecisionTraceへ記録する。学習ではrole/worker別JSONLをexclusive createし、wrapper lifetime中は同じdescriptorだけでappend/fsyncする。headerのplatform file identityとpathのidentityを各append前後に照合する。VecEnv close後は各fileを1回だけopen/readし、同一byte列でstrict JSONL parse、件数、SHA-256を確定する。置換、history injection、parse/hash raceはfail closedとし、`run_metadata.json`の`episode_seed_artifacts`にfile identityも記録する
+- `train=[0, 10000)`、`validation=[10000, 11000)`、`test=[20000, 21000)`を使い、空rangeと重複rangeを拒否する
+- train workerはroleとworker indexを明示する。`num_envs=1`ではtrainをparent processの`DummyVecEnv`、validationを1 workerの`SubprocVecEnv`にする。`num_envs>1`ではtrainを`SubprocVecEnv`、validation worker 0をparent processの`DummyVecEnv`にする。この相補構成で学習中のperiodic evaluationとbest-checkpoint選択を必ず行う
+- 各scheduled evaluation直前にvalidation VecEnvをAppConfigのroot `seed`で再seedし、すべてのcheckpoint比較とresumeで同一のvalidation episode-seed列を使う
+- test rangeはPhase 6の最終比較専用とし、学習、checkpoint選択、Curriculum進行に使用しない
 - Actor生成条件をJSONLへ記録
 - difficulty levelを持つ
 
@@ -667,7 +724,7 @@ Curriculumの進行は、直近評価のsuccess rateとcollision rateに基づ�
 
 ## 13. 比較実験
 
-以下のモードを同じeval seedsで比較する。
+比較対象は同じ最終test scenario seedsを使う。意思決定性能と実行可能システム性能を混同しない。
 
 ### B0: Rule Baseline
 
@@ -699,7 +756,12 @@ Curriculumの進行は、直近評価のsuccess rateとcollision rateに基づ�
 - Proposed without Shield
 - Proposed without Hazard Agent
 
-比較結果をCSVとMarkdownレポートへ出力する。
+### Shield比較契約
+
+1. 意思決定性能比較ではB1、B2、Proposedをすべて`shield=monitor`にし、診断だけを記録してActionを変更しない
+2. 実行可能システム比較では全方式を`shield=enforce`にし、collision rate、raw unsafe-request rate、intervention rate、post-Shield outcomeを報告する
+
+`Proposed without Shield`はablationであり、主baselineではない。比較結果をCSVとMarkdownレポートへ出力する。
 
 ---
 
@@ -756,7 +818,7 @@ Curriculumの進行は、直近評価のsuccess rateとcollision rateに基づ�
 ```text
 runs/<run_id>/
 ├─ config_resolved.yaml
-├─ metadata.json
+├─ run_metadata.json
 ├─ checkpoints/
 ├─ tensorboard/
 ├─ episodes/
@@ -774,6 +836,8 @@ runs/<run_id>/
 └─ renders/
    └─ episode_<id>.gif
 ```
+
+新規学習は必須の`--run-dir`で、存在しない、または空のrun destinationを明示した場合だけ受け付ける。`training.run_root`へのgeneric fallback、非空directoryの再利用、overwrite optionは設けない。Resumeもsource runとは別の新しい空destinationへ書き、source checkpointのSHA-256、source hostで正規化したpath、親run/config、current configとの差分、開始`num_timesteps`、Observation/Action schemaを記録する。current resume sourceはcurrent hostでcanonicalize/dereferenceするが、既存metadata内のhistorical parent pathはcross-host provenance文字列として保持し、current hostのPath flavorで再解釈しない。全runは`research_contract_version=4`と`observation_schema_version=1`を持つ。旧contractのcheckpointを正式比較へ混在させない。
 
 ### GIF Overlay
 
@@ -803,7 +867,15 @@ runs/<run_id>/
 python -m mad_driving.cli.smoke --config configs/base.yaml
 
 # 学習
-python -m mad_driving.cli.train --config configs/train.yaml
+python -m mad_driving.cli.train \
+  --config configs/base.yaml \
+  --run-dir runs/phase4_seed42_<unique_run_id>
+
+# 別runへresume
+python -m mad_driving.cli.train \
+  --config configs/base.yaml \
+  --run-dir runs/<new_run_id> \
+  --resume-from runs/<parent_run_id>/checkpoints/final_model.zip
 
 # 評価
 python -m mad_driving.cli.evaluate \
@@ -831,7 +903,6 @@ python -m mad_driving.cli.compare \
 ```text
 configs/
 ├─ base.yaml
-├─ train.yaml
 ├─ eval.yaml
 ├─ compare.yaml
 ├─ agents.yaml
@@ -991,10 +1062,11 @@ multi-agent-driving/
 - Agentが例外を出した場合、そのAgentのClaimを無効として記録し、Coordinatorへ安全側の欠損値を渡す
 - 複数Agentが失敗した場合はPREPARE_STOPまたはSTOP
 - ObservationにNaN・infがある場合はSTOP
-- MetaDriveが例外を出した場合、episodeをtruncatedとして保存し、次episodeへ進む
-- 学習checkpointは一定間隔で保存し、中断後に再開可能にする
+- MetaDrive、ScenarioRuntime、snapshot、Reward、Observationの内部例外は所有resourceをcloseして元の例外を送出する。zero Observationや`truncated=True`へ変換しない
+- primary exceptionがないcleanup/close failureはrun failureとして送出する。primary exceptionがある場合はcleanup failureをnoteへ付加してprimaryを保持する。train/validation closeとseed artifact finalizationが成功するまでrun destinationをsuccess artifactとしてpublishしない
+- 学習checkpointは一定間隔で保存し、別の新規destinationへ厳密なprovenance付きで再開可能にする
 - 設定不正は起動時に停止する
-- ログ書込失敗で運転判断を停止させない。ただしstderrへ明示する
+- best-effort運転ログの書込失敗はstderrへ明示する。研究provenanceであるseed artifact、metadata、checkpointの書込・identity検証失敗はfail closedとする
 
 ---
 
@@ -1026,11 +1098,19 @@ multi-agent-driving/
 
 ### Phase 4: RL環境
 
-- 24次元Observation
+- 24次元のCoordinator Observation
 - Reward
 - Gymnasium checker
 - PPO training
 - checkpoint・TensorBoard
+
+### Phase 4.1: Research-validity hardening
+
+- 3専門Agentの1〜3 Claimと1 Critic、24-slot保守集約
+- role別seed、`ScenarioRuntime`、Agent可視/privileged state分離
+- action-selection/transition境界を分けたReward、内部errorのfail-fast、標準PPO rollout更新
+- timing/座標契約、fresh destination、resume provenance version 3
+- explicit validity featureは未実装のまま24次元を維持
 
 ### Phase 5: シナリオ
 
@@ -1038,7 +1118,7 @@ multi-agent-driving/
 - Cut-in
 - Occluded Crossing Actor
 - Curriculum
-- train/eval seed分離
+- Phase 4.1の`ScenarioRuntime`へ専用Actorを接続
 
 ### Phase 6: 評価
 
@@ -1061,13 +1141,13 @@ multi-agent-driving/
 3. Gymnasium APIに準拠する
 4. Observationが常に24次元で有限値
 5. Action spaceがDiscrete(4)
-6. 4つのAgentとSafety Shieldが独立モジュールとして存在する
+6. Nominal、Hazard、Ruleの3専門Agent、1 Critic、Safety Shieldが独立モジュールとして存在する
 7. Coordinatorだけが学習対象である
 8. 同一seedでscenario初期条件とAgent出力が再現する
 9. 5,000 timestepsのsmoke trainingが完了する
 10. checkpointを読み込み、評価できる
 11. JSONL trace、CSV metrics、PNG plots、GIFが生成される
-12. B0、B1、B2、Proposedを同じeval seedsで比較できる
+12. B0、B1、B2、Proposedを同じ最終test seedsで比較し、意思決定性能はall-monitor、実行可能システムはall-enforceにできる
 13. Safety Shieldが危険側へActionを変更しないことをテストで保証する
 14. 全unit/integration testsが通る
 15. READMEにセットアップ、学習、評価、可視化のコマンドを記載する

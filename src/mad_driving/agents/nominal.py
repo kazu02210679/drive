@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from math import exp
 
-from mad_driving.agents.claim_factory import claim_id, neutral_claim
+from mad_driving.agents.claim_factory import claim_id, neutral_claim, ordered_claims
 from mad_driving.agents.kinematics import (
     project_vector,
     rectangular_clearance,
@@ -11,7 +11,7 @@ from mad_driving.agents.kinematics import (
     sample_times,
 )
 from mad_driving.config.models import NominalAgentConfig
-from mad_driving.interfaces import ActorState, RiskClaim, SceneSnapshot
+from mad_driving.interfaces import ActorState, RiskClaim, SceneObservation
 
 
 def _clip(value: float, lower: float = 0.0, upper: float = 1.0) -> float:
@@ -32,33 +32,27 @@ class NominalMotionAgent:
     def __init__(self, config: NominalAgentConfig) -> None:
         self._config = config
 
-    def analyze(self, snapshot: SceneSnapshot) -> RiskClaim:
+    def analyze(self, observation: SceneObservation) -> tuple[RiskClaim, ...]:
         candidates = tuple(
             candidate
-            for actor in sorted(snapshot.actors, key=lambda item: item.actor_id)
-            if (candidate := self._evaluate_actor(snapshot, actor)) is not None
+            for actor in sorted(observation.visible_actors, key=lambda item: item.actor_id)
+            if (candidate := self._evaluate_actor(observation, actor)) is not None
         )
         if not candidates:
-            return neutral_claim(self.agent_id, snapshot)
-        return min(
-            candidates,
-            key=lambda candidate: (
-                -candidate.claim.severity,
-                -(candidate.claim.probability or 0.0),
-                candidate.minimum_clearance_m,
-                candidate.claim.target_actor_id or "",
-            ),
-        ).claim
+            return (neutral_claim(self.agent_id, observation),)
+        return ordered_claims(candidate.claim for candidate in candidates)
 
-    def _evaluate_actor(self, snapshot: SceneSnapshot, actor: ActorState) -> _Candidate | None:
+    def _evaluate_actor(
+        self, observation: SceneObservation, actor: ActorState
+    ) -> _Candidate | None:
         if actor.same_lane and actor.relative_longitudinal_m <= 0.0:
             return None
 
-        velocity = project_vector(actor.velocity_xy_mps, snapshot.ego.heading_rad)
-        acceleration = project_vector(actor.acceleration_xy_mps2, snapshot.ego.heading_rad)
-        relative_velocity = (velocity[0] - snapshot.ego.speed_mps, velocity[1])
+        velocity = project_vector(actor.velocity_xy_mps, observation.ego.heading_rad)
+        acceleration = project_vector(actor.acceleration_xy_mps2, observation.ego.heading_rad)
+        relative_velocity = (velocity[0] - observation.ego.speed_mps, velocity[1])
         relative_acceleration = (
-            acceleration[0] - snapshot.ego.acceleration_mps2,
+            acceleration[0] - observation.ego.acceleration_mps2,
             acceleration[1],
         )
         positions = tuple(
@@ -99,16 +93,16 @@ class NominalMotionAgent:
             (time_s for time_s, clearance in clearances if clearance == 0.0),
             None,
         )
-        closing_speed = max(snapshot.ego.speed_mps - velocity[0], 0.0)
+        closing_speed = max(observation.ego.speed_mps - velocity[0], 0.0)
         ttc_term = exp(-ttc / self._config.probability_ttc_scale_s) if ttc is not None else 0.0
         distance_term = exp(-minimum_clearance / self._config.probability_distance_scale_m)
         closing_term = _clip(closing_speed / 10.0)
         probability = _clip(0.65 * ttc_term + 0.25 * distance_term + 0.10 * closing_term)
-        recommended_speed = snapshot.ego.speed_limit_mps * (1.0 - 0.75 * probability)
+        recommended_speed = observation.ego.speed_limit_mps * (1.0 - 0.75 * probability)
         event_type = self._event_type(actor, is_crossing)
         ttc_evidence = "none" if ttc is None else f"{ttc:.6f}"
         claim = RiskClaim(
-            claim_id=claim_id(self.agent_id, snapshot, event_type, actor.actor_id),
+            claim_id=claim_id(self.agent_id, observation, event_type, actor.actor_id),
             agent_id=self.agent_id,
             event_type=event_type,
             target_actor_id=actor.actor_id,
@@ -125,7 +119,7 @@ class NominalMotionAgent:
                 f"ttc_s={ttc_evidence}",
             ),
             assumptions=("constant_acceleration",),
-            valid_until_step=snapshot.step_index,
+            valid_until_step=observation.step_index,
         )
         return _Candidate(claim=claim, minimum_clearance_m=minimum_clearance)
 

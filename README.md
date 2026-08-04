@@ -6,21 +6,33 @@ MetaDrive上の1台の自車内部に、複数の決定論的な専門Agentと�
 
 ## Current status
 
-Phase 3（決定論的な速度判断・安全制御）まで実装済みです。Phase 1の厳密な設定検証とMetaDrive境界、Phase 2の専門Agentに加え、次を含みます。
+Phase 4.2（comparison-validity remediation）まで実装済みです。Phase 1の厳密な設定検証とMetaDrive境界、Phase 2の専門Agent、Phase 3の安全制御、Phase 4のGymnasium/PPO経路に加え、次を含みます。
 
 - Nominal Agentによる等加速度運動予測
 - Hazard Agentによる先行車急制動・横断Actor・遮蔽の最悪ケース評価
 - Rule Agentによる衝突・路外・進入禁止・停止要求・速度制限の判定
-- Critic Agentによる固定8規則の相互レビュー
-- 3つの`RiskClaim`と1つの`CriticReview`を毎decision stepで受動計算
+- Critic Agentによる固定8規則の相互レビュー。Criticは4番目の専門Agentではありません
+- Nominal / Hazard / Ruleの各専門Agentが1〜3件の`RiskClaim`を返し、1つの`CriticReview`が全Claimを検査
 - `RuleBasedCoordinator`によるAgent提案の決定論的な統合
 - `SafetyShield`によるTTC、停止余裕、Agent欠落、hard stopの最終判定
 - anti-windup付きPIDによる車線追従と高レベル速度Actionの実車両入力への変換
-- `SceneSnapshot → AgentSuite → Coordinator → SafetyShield → MetaDrive`のheadless control smoke
+- `SceneFrame(metadata + SceneObservation + PrivilegedWorldState) → AgentSuite → Coordinator → SafetyShield → MetaDrive`のheadless control smoke
+- 複数Claimをfield-wiseで保守集約する有限な24次元`float32` Observationと、action-selection/transition境界を分けた10成分Reward
+- `physics_dt_s=0.02`、`decision_repeat=5`、`decision_dt_s=0.10`の明示timing
+- `ScenarioRuntime` lifecycle、role別seed identity、Gymnasium暗黙resetで進む再現可能なepisode seed列
+- Agent可視構造から遮蔽Actorの運動学を除外し、全Actor truthから計算する固定oracle TTC、Rule制約、衝突・路外・到着・scenario outcomeをReward専用privileged stateへ分離
+- 構成上無効なAgentと実行時失敗したAgentを区別するablation-aware Safety Shield
+- CPU上の標準PPO学習、best/final/periodic checkpoint、resolved config、TensorBoard、strict resume provenance
 
 速度Actionは安全側へ単調な`KEEP=0`、`SLOW=1`、`PREPARE_STOP=2`、`STOP=3`です。Safety Shieldには診断も介入もしない`off`、診断だけ行う`monitor`、要求より安全側のActionを強制する`enforce`があります。既定値は`enforce`です。
 
-24次元Observation、報酬、Gymnasium学習環境、PPO、専用シナリオ生成、Ablationと比較実験はPhase 4以降です。LLM/VLM、画像認識、学習による操舵、車線変更、実車接続はMVP対象外です。
+Phase 6では意思決定性能のB1・B2・Proposedをすべて`monitor`で比較し、実行可能システムは全方式を`enforce`で比較します。最終test seedsはmodel選択やCurriculumへ使いません。Rewardは比較対象AgentのClaimを入力にせず、全方式共通のprivileged oracle transitionだけから計算します。Rule violationとUnnecessary-brakeはpre-step oracle、Near-missはpost-step oracle TTCを使用し、将来lookaheadは使いません。
+
+座標はMetaDrive world XYを使い、headingは反時計回りが正です。Actor相対座標は自車body frameで前方・左方が正、`lane_offset_m`はMetaDrive lane-local lateral signを保持します。`same_lane`はlane index一致だけでなくlane幅内の位置も要求します。
+
+train、validation、testのscenario rangeはそれぞれ`[0, 10000)`、`[10000, 11000)`、`[20000, 21000)`です。正式training comparisonは`training.seed`をpolicy/RNG seed `42, 43, 44, 45, 46`へ設定した5本の独立runで行い、validation episode列を決めるroot `seed`は固定します。自動multi-seed sweepは実装していません。validationは`EvalCallback`とbest-checkpoint選択だけに使い、testはPhase 6の最終比較まで隔離します。
+
+専用シナリオ生成とcurriculumはPhase 5、評価artifact・baseline・ablation・可視化はPhase 6です。`ttc_valid`、`claim_valid`、`agent_failed`、`target_actor_present`のObservation featureは未実装で、現在の24次元schemaには存在しません。追加時はschema versionを上げて再学習します。LLM/VLM、画像認識、学習による操舵、車線変更、実車接続はMVP対象外です。
 
 ## Setup
 
@@ -31,7 +43,7 @@ Python 3.11を使用します。Windowsの非ASCIIパスでも再現できるよ
 ```powershell
 py -3.11 -m venv .venv
 .venv\Scripts\python.exe -m pip install uv==0.8.0
-.venv\Scripts\uv.exe sync --no-editable --group dev
+.venv\Scripts\uv.exe sync --no-editable --group dev --extra training
 ```
 
 ### Linux
@@ -39,7 +51,7 @@ py -3.11 -m venv .venv
 ```bash
 python3.11 -m venv .venv
 .venv/bin/python -m pip install uv==0.8.0
-.venv/bin/uv sync --no-editable --group dev
+.venv/bin/uv sync --no-editable --group dev --extra training
 ```
 
 ## Run
@@ -52,7 +64,7 @@ python3.11 -m venv .venv
 
 Phase 1・2互換の経路です。画面を開かず、固定された低レベルActionで100 decision steps（10秒）を走行します。Agent解析は操作を変更しません。
 
-標準出力のJSONには、`final_snapshot`、Nominal / Hazard / Ruleの順に並ぶ3件の`final_claims`、1件の`final_review`、完了step数と終了状態が入ります。
+標準出力のJSONには、`final_snapshot`、Nominal / Hazard / Ruleの順に並ぶ1〜3件/Agentの`final_claims`、1件の`final_review`、完了step数と終了状態が入ります。
 
 ### Shielded control smoke
 
@@ -66,6 +78,60 @@ JSONには最終Snapshot・Claims・Reviewに加え、`final_trace`、4 Action�
 
 初回だけMetaDrive 0.4.3の公式assetsをダウンロードします。
 
+### PPO training
+
+Windows PowerShell:
+
+```powershell
+# Headless CPU smoke (replace <UNIQUE_RUN_ID>; destination must be fresh)
+.venv\Scripts\python.exe -m mad_driving.cli.train --config configs/base.yaml --smoke --run-dir runs/phase4_smoke_seed42_<UNIQUE_RUN_ID>
+
+# Standard 500,000-timestep run
+.venv\Scripts\python.exe -m mad_driving.cli.train --config configs/base.yaml --run-dir runs/phase4_standard_seed42
+
+# Resume into a new empty destination with parent provenance
+.venv\Scripts\python.exe -m mad_driving.cli.train --config configs/base.yaml --run-dir runs/phase4_standard_seed43_continued --resume-from runs/phase4_standard_seed42/checkpoints/final_model.zip
+```
+
+Linux:
+
+```bash
+# Headless CPU smoke (replace <UNIQUE_RUN_ID>; destination must be fresh)
+.venv/bin/python -m mad_driving.cli.train --config configs/base.yaml --smoke --run-dir runs/phase4_smoke_seed42_<UNIQUE_RUN_ID>
+
+# Standard 500,000-timestep run
+.venv/bin/python -m mad_driving.cli.train --config configs/base.yaml --run-dir runs/phase4_standard_seed42
+
+# Resume into a new empty destination with parent provenance
+.venv/bin/python -m mad_driving.cli.train --config configs/base.yaml --run-dir runs/phase4_standard_seed43_continued --resume-from runs/phase4_standard_seed42/checkpoints/final_model.zip
+```
+
+`configs/base.yaml`がsmokeとtrainingの共通canonical configです。`metadrive.start_seed`と`metadrive.num_scenarios`はsmoke用の既定値で、PPO環境はroleごとに`scenarios.<role>`の範囲へ上書きします。
+
+新規学習とresumeは必須の`--run-dir`で、存在しない、または空のdestinationを明示した場合だけ受け付けます。`<UNIQUE_RUN_ID>`は毎回新しい識別子へ置換してください。非空directoryを上書きしません。Resume sourceはread-onlyとして扱い、checkpoint SHA-256、親run/config、config差分、開始step、Observation/Action schemaを新しいrunの`run_metadata.json`へ記録します。source hostでcanonicalizeしたhistorical parent pathはcross-host provenance文字列として保持します。全runは`research_contract_version=4`、`observation_schema_version=1`です。各train/validation環境の実際のreset情報はdescriptor-boundな`episode_seeds/<role>-worker-<index>.jsonl`へ耐久書き込みします。parentはwriterがopenな間にVecEnv control channelからrole/worker/path/platform identityを保持し、close後のinventoryはそのparent-held identityに対して検証します。metadataの`episode_seed_artifacts`は相対path、role、worker、件数、schema version、検証済みplatform file identity、同一byte readのSHA-256を示します。
+
+`training.num_envs=1`ではtrainをparent processの`DummyVecEnv`、validationを1 workerの`SubprocVecEnv`にします。`num_envs>1`ではtrainを`SubprocVecEnv`、validation worker 0をparent processの`DummyVecEnv`にします。この相補構成でMetaDrive engineを1 processに1つに保ちつつ、学習中にperiodic evaluationとbest-checkpoint選択を行います。各評価直前にvalidation VecEnvをAppConfigのroot `seed`で再seedし、比較するcheckpointごとに同じepisode-seed列を再生します。
+
+標準Stable-Baselines3 PPOは`n_steps * num_envs`単位でrolloutを完了するため、実step数は要求値を超える場合があります。更新をエピソード境界へ同期しません。出力構造は次のとおりです。periodic checkpointは設定したintervalに到達した場合だけ生成されます。
+
+```text
+<run-dir>/
+├── config_resolved.yaml
+├── run_metadata.json
+├── episode_seeds/
+│   ├── train-worker-000.jsonl
+│   └── validation-worker-000.jsonl
+├── checkpoints/
+│   ├── best_model.zip
+│   ├── final_model.zip
+│   └── ppo_checkpoint_<steps>_steps.zip  # interval到達時のみ
+└── tensorboard/
+    └── PPO_<n>/
+        └── events.out.tfevents.*
+```
+
+旧Task 11の再生成seed列と、path occupantをidentity trust sourceにした後続runは実run証拠として廃止しました。`runs/phase4_1_worker_identity_final_smoke_20260721_a`と`runs/phase4_1_worker_identity_final_smoke_20260721_b`は旧research contract v2、`runs/phase4_2_review_fix_v3_smoke_20260721_c`と`runs/phase4_2_review_fix_v3_smoke_20260721_d`は旧v3の履歴証拠です。最新のv4 evidenceは`runs/phase4_2_oracle_v4_smoke_20260721_g`と`runs/phase4_2_oracle_v4_smoke_20260721_h`です。両runは5,000 step時点で同一の5-episode periodic validationを行い、その後6,144 stepまで学習しました。両final checkpointは6,144 stepで再読込でき、各100 decision stepsのObservationとRewardはすべて有限かつ同一でした。詳細は [`docs/phase4_implementation_log.md`](docs/phase4_implementation_log.md) にあります。
+
 ## Verify
 
 ```powershell
@@ -75,4 +141,4 @@ JSONには最終Snapshot・Claims・Reviewに加え、`final_trace`、4 Action�
 .venv\Scripts\mypy.exe src
 ```
 
-Phase 1の実装判断は [`docs/implementation_plan.md`](docs/implementation_plan.md)、Phase 2の検証結果は [`docs/phase2_implementation_log.md`](docs/phase2_implementation_log.md)、Phase 3のMetaDrive API差異と実測結果は [`docs/phase3_implementation_log.md`](docs/phase3_implementation_log.md) にあります。
+Phase 1の実装判断は [`docs/implementation_plan.md`](docs/implementation_plan.md)、Phase 2の検証結果は [`docs/phase2_implementation_log.md`](docs/phase2_implementation_log.md)、Phase 3のMetaDrive API差異と実測結果は [`docs/phase3_implementation_log.md`](docs/phase3_implementation_log.md)、Phase 4の学習・checkpoint検証は [`docs/phase4_implementation_log.md`](docs/phase4_implementation_log.md) にあります。

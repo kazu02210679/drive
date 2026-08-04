@@ -8,7 +8,7 @@ import sys
 from collections.abc import Sequence
 from dataclasses import asdict
 
-from mad_driving.agents.suite import AgentSuite, SuiteFactory
+from mad_driving.agents.suite import AgentAnalysisResult, AgentSuite, SuiteFactory, analyze_safely
 from mad_driving.config.loader import load_config
 from mad_driving.config.models import AppConfig
 from mad_driving.envs.multi_agent_speed_env import (
@@ -16,6 +16,8 @@ from mad_driving.envs.multi_agent_speed_env import (
     SmokeResult,
     create_metadrive_env,
 )
+from mad_driving.interfaces import SceneFrame
+from mad_driving.scenarios import EpisodeSeeds, NoOpScenarioRuntime
 from mad_driving.world_model import SceneSnapshotBuilder
 
 
@@ -32,41 +34,56 @@ def run_smoke(
     action = (float(config.fixed_action[0]), float(config.fixed_action[1]))
     terminated = False
     truncated = False
-    final_snapshot = None
-    final_claims = None
-    final_review = None
+    final_frame: SceneFrame | None = None
+    final_analysis: AgentAnalysisResult | None = None
     steps_completed = 0
+    seeds = EpisodeSeeds(config.seed, config.seed, config.seed)
+    runtime = NoOpScenarioRuntime(config.scenario_id)
 
     try:
-        env.reset(seed=config.seed)
+        state = runtime.reset(env, seeds=seeds)
+        env.reset(seed=seeds.metadrive_scenario_index)
+        state = runtime.after_simulator_reset(env, state)
         for step_index in range(1, config.decision_steps + 1):
-            _, _, terminated_value, truncated_value, _ = env.step(action)
+            state = runtime.before_step(env, state, step_index=step_index)
+            _, _, terminated_value, truncated_value, raw_info = env.step(action)
             terminated = bool(terminated_value)
             truncated = bool(truncated_value)
             steps_completed = step_index
-            final_snapshot = snapshot_builder.build(
+            transition = runtime.after_step(
+                env,
+                state,
+                step_index=step_index,
+                raw_info=raw_info,
+            )
+            state = transition.state
+            final_frame = snapshot_builder.build(
                 env,
                 step_index=step_index,
-                scenario_id=config.scenario_id,
-                seed=config.seed,
-                previous_action=0,
+                seeds=seeds,
+                context=runtime.observation_context(state),
+                scenario_result=transition.outcome,
+                raw_info=raw_info,
+                previous_executed_action=0,
                 previous_shield_intervention=False,
             )
-            final_claims, final_review = suite.analyze(final_snapshot)
+            final_analysis = analyze_safely(suite, final_frame.observation)
             if terminated or truncated:
                 break
     finally:
         env.close()
 
-    if final_snapshot is None or final_claims is None or final_review is None:
+    if final_frame is None or final_analysis is None:
         raise RuntimeError("Smoke run completed without a simulator step")
     return SmokeResult(
         steps_completed=steps_completed,
         terminated=terminated,
         truncated=truncated,
-        final_snapshot=final_snapshot,
-        final_claims=final_claims,
-        final_review=final_review,
+        scenario_id=final_frame.scenario_id,
+        seeds=final_frame.seeds,
+        final_snapshot=final_frame.observation,
+        final_claims=final_analysis.claims,
+        final_review=final_analysis.review,
     )
 
 

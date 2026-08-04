@@ -1,6 +1,7 @@
 """State of a non-ego actor."""
 
 from dataclasses import dataclass
+from math import pi
 from typing import Literal
 
 from mad_driving.interfaces._validation import (
@@ -37,6 +38,8 @@ class ActorState:
         require_finite_values("velocity_xy_mps", self.velocity_xy_mps, length=2)
         require_finite_values("acceleration_xy_mps2", self.acceleration_xy_mps2, length=2)
         require_finite("heading_rad", self.heading_rad)
+        if not -pi <= self.heading_rad < pi:
+            raise ValueError("heading_rad must be normalized to [-pi, pi)")
         require_positive("length_m", self.length_m)
         require_positive("width_m", self.width_m)
         require_finite("relative_longitudinal_m", self.relative_longitudinal_m)

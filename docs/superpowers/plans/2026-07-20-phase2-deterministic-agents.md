@@ -1,5 +1,7 @@
 # Phase 2 Deterministic Agents Implementation Plan
 
+> **Status: historical Phase 2 plan.** This checklist records the original single-claim implementation. The active claim/state contract is the Phase 4.1 plan dated 2026-07-21.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add deterministic Nominal, Hazard, Rule, and Critic agents that analyze every fixed-action MetaDrive decision step without controlling the vehicle.

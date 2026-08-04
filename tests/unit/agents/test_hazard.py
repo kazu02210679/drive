@@ -2,7 +2,8 @@ import math
 
 from mad_driving.agents.hazard import HazardAgent
 from mad_driving.config.models import HazardAgentConfig
-from tests.unit.agents.factories import make_actor, make_snapshot
+from mad_driving.interfaces import RoadContext
+from tests.unit.agents.factories import make_actor, make_occlusion, make_snapshot
 
 
 def close_lead_snapshot():
@@ -22,7 +23,7 @@ def close_lead_snapshot():
 def test_hazard_reports_negative_margin_for_close_braking_lead() -> None:
     snapshot = close_lead_snapshot()
 
-    claim = HazardAgent(HazardAgentConfig()).analyze(snapshot)
+    (claim,) = HazardAgent(HazardAgentConfig()).analyze(snapshot)
 
     assert claim.agent_id == "hazard"
     assert claim.event_type == "hazard_lead_braking"
@@ -37,7 +38,7 @@ def test_hazard_reports_negative_margin_for_close_braking_lead() -> None:
 def test_hazard_positive_margin_is_advisory_and_below_half_severity() -> None:
     actor = make_actor("far-lead", longitudinal_m=100.0, longitudinal_speed_mps=10.0)
 
-    claim = HazardAgent(HazardAgentConfig()).analyze(make_snapshot(actors=(actor,)))
+    (claim,) = HazardAgent(HazardAgentConfig()).analyze(make_snapshot(actors=(actor,)))
 
     assert claim.stopping_margin_m is not None and claim.stopping_margin_m > 0.0
     assert 0.0 <= claim.severity < 0.5
@@ -56,10 +57,10 @@ def test_hazard_evaluates_crossing_actor_arrival() -> None:
     )
     snapshot = make_snapshot(
         actors=(actor,),
-        distance_to_conflict_point_m=10.0,
+        road_context=RoadContext(False, 10.0, False),
     )
 
-    claim = HazardAgent(HazardAgentConfig()).analyze(snapshot)
+    (claim,) = HazardAgent(HazardAgentConfig()).analyze(snapshot)
 
     assert claim.event_type == "hazard_crossing"
     assert claim.target_actor_id == "crossing"
@@ -76,8 +77,8 @@ def test_hazard_ignores_crossing_actor_that_cannot_reach_conflict() -> None:
         same_lane=False,
     )
 
-    claim = HazardAgent(HazardAgentConfig()).analyze(
-        make_snapshot(actors=(actor,), distance_to_conflict_point_m=10.0)
+    (claim,) = HazardAgent(HazardAgentConfig()).analyze(
+        make_snapshot(actors=(actor,), road_context=RoadContext(False, 10.0, False))
     )
 
     assert claim.event_type == "no_hazard"
@@ -93,8 +94,8 @@ def test_hazard_uses_observed_crossing_speed_above_configured_maximum() -> None:
         same_lane=False,
     )
 
-    claim = HazardAgent(HazardAgentConfig()).analyze(
-        make_snapshot(actors=(actor,), distance_to_conflict_point_m=10.0)
+    (claim,) = HazardAgent(HazardAgentConfig()).analyze(
+        make_snapshot(actors=(actor,), road_context=RoadContext(False, 10.0, False))
     )
 
     assert claim.target_actor_id == "fast-crossing"
@@ -103,11 +104,11 @@ def test_hazard_uses_observed_crossing_speed_above_configured_maximum() -> None:
 
 def test_hazard_creates_virtual_occlusion_claim() -> None:
     snapshot = make_snapshot(
-        occlusion_present=True,
-        distance_to_conflict_point_m=10.0,
+        occlusion_regions=(make_occlusion(),),
+        road_context=RoadContext(False, 10.0, False),
     )
 
-    claim = HazardAgent(HazardAgentConfig()).analyze(snapshot)
+    (claim,) = HazardAgent(HazardAgentConfig()).analyze(snapshot)
 
     assert claim.target_actor_id is None
     assert claim.event_type == "occlusion_hazard"
@@ -116,8 +117,8 @@ def test_hazard_creates_virtual_occlusion_claim() -> None:
 
 
 def test_occlusion_without_conflict_distance_uses_crawl_speed() -> None:
-    claim = HazardAgent(HazardAgentConfig()).analyze(
-        make_snapshot(occlusion_present=True, distance_to_conflict_point_m=None)
+    (claim,) = HazardAgent(HazardAgentConfig()).analyze(
+        make_snapshot(occlusion_regions=(make_occlusion(),))
     )
 
     assert claim.stopping_margin_m is None
@@ -127,21 +128,25 @@ def test_occlusion_without_conflict_distance_uses_crawl_speed() -> None:
 
 
 def test_hazard_returns_neutral_claim_without_candidates() -> None:
-    claim = HazardAgent(HazardAgentConfig()).analyze(make_snapshot())
+    (claim,) = HazardAgent(HazardAgentConfig()).analyze(make_snapshot())
 
     assert claim.claim_id == "hazard:1:none:no_hazard"
     assert claim.severity == 0.0
 
 
-def test_hazard_uses_actor_id_as_final_tie_break() -> None:
+def test_hazard_returns_up_to_three_deterministically_ordered_claims() -> None:
     actors = (
-        make_actor("b", longitudinal_m=10.0, longitudinal_speed_mps=2.0),
-        make_actor("a", longitudinal_m=10.0, longitudinal_speed_mps=2.0),
+        make_actor("lead-15", longitudinal_m=15.0, longitudinal_speed_mps=0.0),
+        make_actor("lead-5", longitudinal_m=5.0, longitudinal_speed_mps=0.0),
+        make_actor("lead-10", longitudinal_m=10.0, longitudinal_speed_mps=0.0),
     )
 
-    claim = HazardAgent(HazardAgentConfig()).analyze(make_snapshot(actors=actors))
+    observation = make_snapshot(actors=actors)
+    claims = HazardAgent(HazardAgentConfig()).analyze(observation)
 
-    assert claim.target_actor_id == "a"
+    assert 1 <= len(claims) <= 3
+    assert claims == HazardAgent(HazardAgentConfig()).analyze(observation)
+    assert tuple(claim.target_actor_id for claim in claims) == ("lead-5", "lead-10", "lead-15")
 
 
 def test_hazard_is_exactly_deterministic_and_finite() -> None:
@@ -152,6 +157,9 @@ def test_hazard_is_exactly_deterministic_and_finite() -> None:
     second = agent.analyze(snapshot)
 
     assert first == second
-    assert math.isfinite(first.severity)
-    assert math.isfinite(first.recommended_max_speed_mps)
-    assert first.stopping_margin_m is not None and math.isfinite(first.stopping_margin_m)
+    assert all(math.isfinite(claim.severity) for claim in first)
+    assert all(math.isfinite(claim.recommended_max_speed_mps) for claim in first)
+    assert all(
+        claim.stopping_margin_m is not None and math.isfinite(claim.stopping_margin_m)
+        for claim in first
+    )

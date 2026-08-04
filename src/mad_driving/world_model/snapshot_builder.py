@@ -2,17 +2,35 @@
 
 from __future__ import annotations
 
-from math import cos, sin
-from typing import Any
+from collections.abc import Mapping
+from math import cos, inf, pi, sin
+from numbers import Integral
+from typing import TYPE_CHECKING, Any
+from uuid import UUID
 
-from mad_driving.interfaces import ActorState, EgoState, SceneSnapshot
+from mad_driving.interfaces import (
+    ActorState,
+    CollisionKind,
+    EgoState,
+    PrivilegedWorldState,
+    RoadContext,
+    SceneFrame,
+    SceneObservation,
+)
 from mad_driving.interfaces.actor_state import ActorType
+from mad_driving.scenarios.seeding import EpisodeSeeds
 from mad_driving.world_model.validation import (
     ConfigReader,
     decision_interval_s,
     finite_float,
     xy_pair,
 )
+
+if TYPE_CHECKING:
+    from mad_driving.scenarios.runtime import (
+        ScenarioObservationContext,
+        ScenarioStepResult,
+    )
 
 
 class SceneSnapshotBuilder:
@@ -23,15 +41,13 @@ class SceneSnapshotBuilder:
         env: Any,
         *,
         step_index: int,
-        scenario_id: str,
-        seed: int,
-        previous_action: int,
+        seeds: EpisodeSeeds,
+        context: ScenarioObservationContext,
+        scenario_result: ScenarioStepResult,
+        raw_info: Mapping[str, object],
+        previous_executed_action: int,
         previous_shield_intervention: bool,
-        stop_required: bool = False,
-        occlusion_present: bool = False,
-        distance_to_conflict_point_m: float | None = None,
-        intersection_entry_prohibited: bool = False,
-    ) -> SceneSnapshot:
+    ) -> SceneFrame:
         config = self._config(env)
         interval_s = decision_interval_s(config)
         ego_vehicle = env.agent if hasattr(env, "agent") else env.vehicle
@@ -40,7 +56,7 @@ class SceneSnapshotBuilder:
         ego_last_velocity = xy_pair(
             "ego.last_velocity", getattr(ego_vehicle, "last_velocity", ego_velocity)
         )
-        heading = finite_float("ego.heading_theta", ego_vehicle.heading_theta)
+        heading = self._normalized_heading("ego.heading_theta", ego_vehicle.heading_theta)
         acceleration_xy = self._acceleration(ego_velocity, ego_last_velocity, interval_s)
         longitudinal_acceleration = acceleration_xy[0] * cos(heading) + acceleration_xy[1] * sin(
             heading
@@ -56,29 +72,58 @@ class SceneSnapshotBuilder:
             route_progress=self._route_progress(ego_vehicle),
             speed_limit_mps=self._speed_limit_mps(ego_vehicle, lane),
         )
-        actors = self._actors(env, ego_vehicle, ego_position, heading, interval_s)
-
-        return SceneSnapshot(
+        all_actors = self._actors(
+            env,
+            ego_vehicle,
+            ego_position,
+            heading,
+            interval_s,
+            config,
+            context.visible_actor_ids,
+        )
+        visible_actors = tuple(actor for actor in all_actors if actor.visible)
+        observation = SceneObservation(
             step_index=step_index,
             sim_time_s=step_index * interval_s,
-            scenario_id=scenario_id,
-            seed=seed,
             ego=ego,
-            actors=actors,
-            stop_required=stop_required,
-            occlusion_present=occlusion_present,
-            distance_to_conflict_point_m=distance_to_conflict_point_m,
-            previous_action=previous_action,
+            visible_actors=visible_actors,
+            occlusion_regions=context.occlusion_regions,
+            road_context=RoadContext(
+                stop_required=context.stop_required,
+                distance_to_conflict_point_m=context.distance_to_conflict_point_m,
+                intersection_entry_prohibited=context.intersection_entry_prohibited,
+            ),
+            previous_executed_action=previous_executed_action,
             previous_shield_intervention=previous_shield_intervention,
-            collision_occurred=self._collision_occurred(ego_vehicle),
-            off_road=self._off_road(ego_vehicle),
-            intersection_entry_prohibited=intersection_entry_prohibited,
+        )
+        privileged = PrivilegedWorldState(
+            all_actors=all_actors,
+            collision_occurred=self._collision_occurred(raw_info, ego_vehicle),
+            collision_kind=self._collision_kind(raw_info, ego_vehicle),
+            off_road=bool(raw_info.get("out_of_road", False)) or self._off_road(ego_vehicle),
+            arrived=bool(raw_info.get("arrive_dest", False)),
+            scenario_success=scenario_result.success,
+            scenario_failure=scenario_result.failure,
+            minimum_actual_ttc_s=self._minimum_actual_ttc_s(
+                ego_velocity=ego_velocity,
+                ego_heading=heading,
+                ego_length_m=self._positive_dimension("ego.length", ego_vehicle.LENGTH),
+                ego_width_m=self._positive_dimension("ego.width", ego_vehicle.WIDTH),
+                actors=all_actors,
+            ),
+            hard_rule_constraint=(context.stop_required or context.intersection_entry_prohibited),
+        )
+        return SceneFrame(
+            scenario_id=context.scenario_id,
+            seeds=seeds,
+            observation=observation,
+            privileged=privileged,
         )
 
     @staticmethod
-    def _collision_occurred(vehicle: Any) -> bool:
+    def _collision_occurred(raw_info: Mapping[str, object], vehicle: Any) -> bool:
         return any(
-            bool(getattr(vehicle, attribute, False))
+            bool(raw_info.get(attribute, False)) or bool(getattr(vehicle, attribute, False))
             for attribute in (
                 "crash_vehicle",
                 "crash_human",
@@ -87,6 +132,89 @@ class SceneSnapshotBuilder:
                 "crash_building",
             )
         )
+
+    @staticmethod
+    def _positive_dimension(name: str, value: object) -> float:
+        dimension = finite_float(name, value)
+        if dimension <= 0.0:
+            raise ValueError(f"{name} must be positive")
+        return dimension
+
+    @classmethod
+    def _minimum_actual_ttc_s(
+        cls,
+        *,
+        ego_velocity: tuple[float, float],
+        ego_heading: float,
+        ego_length_m: float,
+        ego_width_m: float,
+        actors: tuple[ActorState, ...],
+    ) -> float | None:
+        """Return fixed-oracle time to collision from all simulator-truth actors."""
+
+        values: list[float] = []
+        for actor in actors:
+            relative_velocity_xy = (
+                actor.velocity_xy_mps[0] - ego_velocity[0],
+                actor.velocity_xy_mps[1] - ego_velocity[1],
+            )
+            relative_velocity = (
+                cos(ego_heading) * relative_velocity_xy[0]
+                + sin(ego_heading) * relative_velocity_xy[1],
+                -sin(ego_heading) * relative_velocity_xy[0]
+                + cos(ego_heading) * relative_velocity_xy[1],
+            )
+            ttc = cls._rectangle_entry_time_s(
+                position=(actor.relative_longitudinal_m, actor.relative_lateral_m),
+                velocity=relative_velocity,
+                half_extents=(
+                    0.5 * (ego_length_m + actor.length_m),
+                    0.5 * (ego_width_m + actor.width_m),
+                ),
+            )
+            if ttc is not None:
+                values.append(ttc)
+        return min(values, default=None)
+
+    @staticmethod
+    def _rectangle_entry_time_s(
+        *,
+        position: tuple[float, float],
+        velocity: tuple[float, float],
+        half_extents: tuple[float, float],
+    ) -> float | None:
+        """Solve constant-velocity entry into the ego-aligned collision rectangle."""
+
+        entry = -inf
+        exit_time = inf
+        for coordinate, rate, extent in zip(position, velocity, half_extents, strict=True):
+            if rate == 0.0:
+                if abs(coordinate) > extent:
+                    return None
+                continue
+            first = (-extent - coordinate) / rate
+            second = (extent - coordinate) / rate
+            entry = max(entry, min(first, second))
+            exit_time = min(exit_time, max(first, second))
+            if entry > exit_time:
+                return None
+        if exit_time < 0.0:
+            return None
+        return max(entry, 0.0)
+
+    @staticmethod
+    def _collision_kind(raw_info: Mapping[str, object], vehicle: Any) -> CollisionKind | None:
+        kinds: tuple[tuple[str, CollisionKind], ...] = (
+            ("crash_vehicle", "vehicle"),
+            ("crash_human", "crossing_actor"),
+            ("crash_object", "object"),
+            ("crash_sidewalk", "sidewalk"),
+            ("crash_building", "building"),
+        )
+        for attribute, kind in kinds:
+            if bool(raw_info.get(attribute, False)) or bool(getattr(vehicle, attribute, False)):
+                return kind
+        return None
 
     @staticmethod
     def _off_road(vehicle: Any) -> bool:
@@ -107,8 +235,11 @@ class SceneSnapshotBuilder:
         ego_position: tuple[float, float],
         ego_heading: float,
         interval_s: float,
+        config: ConfigReader,
+        visible_actor_ids: frozenset[str] | None,
     ) -> tuple[ActorState, ...]:
-        ego_lane_index = getattr(ego_vehicle, "lane_index", None)
+        ego_lane = self._current_lane(ego_vehicle)
+        ego_lane_index = self._canonical_lane_index(ego_vehicle, ego_lane)
         actors: list[ActorState] = []
         for object_key, simulator_object in env.engine.get_objects().items():
             if simulator_object is ego_vehicle or not self._has_actor_state(simulator_object):
@@ -121,7 +252,9 @@ class SceneSnapshotBuilder:
             )
             dx = position[0] - ego_position[0]
             dy = position[1] - ego_position[1]
-            actor_id = str(getattr(simulator_object, "name", object_key))
+            actor_id = self._actor_id(object_key, simulator_object)
+            actor_lane = self._current_lane(simulator_object)
+            visible = visible_actor_ids is None or actor_id in visible_actor_ids
             actors.append(
                 ActorState(
                     actor_id=actor_id,
@@ -129,22 +262,92 @@ class SceneSnapshotBuilder:
                     position_xy_m=position,
                     velocity_xy_mps=velocity,
                     acceleration_xy_mps2=self._acceleration(velocity, last_velocity, interval_s),
-                    heading_rad=finite_float(
+                    heading_rad=self._normalized_heading(
                         f"actor[{actor_id}].heading_theta", simulator_object.heading_theta
                     ),
                     length_m=finite_float(f"actor[{actor_id}].length", simulator_object.LENGTH),
                     width_m=finite_float(f"actor[{actor_id}].width", simulator_object.WIDTH),
                     relative_longitudinal_m=cos(ego_heading) * dx + sin(ego_heading) * dy,
                     relative_lateral_m=-sin(ego_heading) * dx + cos(ego_heading) * dy,
-                    same_lane=(
-                        ego_lane_index is not None
-                        and getattr(simulator_object, "lane_index", None) == ego_lane_index
+                    same_lane=self._same_lane(
+                        ego_lane_index,
+                        simulator_object,
+                        actor_lane,
+                        position,
+                        config,
                     ),
-                    visible=True,
-                    occluded=False,
+                    visible=visible,
+                    occluded=not visible,
                 )
             )
+        actor_ids = tuple(actor.actor_id for actor in actors)
+        if len(actor_ids) != len(set(actor_ids)):
+            raise ValueError("simulator actors produced a duplicate actor_id")
         return tuple(sorted(actors, key=lambda actor: actor.actor_id))
+
+    @staticmethod
+    def _actor_id(object_key: object, simulator_object: Any) -> str:
+        actor_id = str(getattr(simulator_object, "name", object_key))
+        try:
+            UUID(actor_id)
+        except ValueError:
+            return actor_id
+        random_seed = getattr(simulator_object, "random_seed", None)
+        if isinstance(random_seed, bool) or not isinstance(random_seed, Integral):
+            return actor_id
+        return f"metadrive-{type(simulator_object).__name__}-{int(random_seed)}"
+
+    @staticmethod
+    def _normalized_heading(name: str, value: Any) -> float:
+        heading = finite_float(name, value)
+        return (heading + pi) % (2.0 * pi) - pi
+
+    @staticmethod
+    def _canonical_lane_index(vehicle: Any, lane: Any | None) -> tuple[object, ...] | None:
+        lane_index = getattr(vehicle, "lane_index", None)
+        if lane_index is None and lane is not None:
+            lane_index = getattr(lane, "index", None)
+        if isinstance(lane_index, tuple | list):
+            return tuple(lane_index)
+        return None
+
+    def _same_lane(
+        self,
+        ego_lane_index: tuple[object, ...] | None,
+        actor_vehicle: Any,
+        actor_lane: Any | None,
+        actor_position: tuple[float, float],
+        config: ConfigReader,
+    ) -> bool:
+        if ego_lane_index is None:
+            return False
+        if self._canonical_lane_index(actor_vehicle, actor_lane) != ego_lane_index:
+            return False
+        if actor_lane is None:
+            return False
+        _, lateral_position = actor_lane.local_coordinates(actor_position)
+        lateral_position = finite_float("actor.lane_lateral_m", lateral_position)
+        return abs(lateral_position) <= self._lane_width_m(actor_lane, config) / 2.0
+
+    @staticmethod
+    def _lane_width_m(lane: Any, config: ConfigReader) -> float:
+        for attribute in ("width", "WIDTH"):
+            exposed_width = getattr(lane, attribute, None)
+            if exposed_width is not None:
+                width = finite_float(f"lane.{attribute}", exposed_width)
+                if width <= 0.0:
+                    raise ValueError(f"lane.{attribute} must be positive")
+                return width
+        map_config = config.get("map_config")
+        if map_config is None or not callable(getattr(map_config, "get", None)):
+            raise ValueError("map_config.lane_width must be configured")
+        lane_width = map_config.get("lane_width")
+        if lane_width is None:
+            raise ValueError("map_config.lane_width must be configured")
+        width = finite_float("map_config.lane_width", lane_width)
+        if width <= 0.0:
+            raise ValueError("map_config.lane_width must be positive")
+        return width
 
     @staticmethod
     def _has_actor_state(simulator_object: Any) -> bool:

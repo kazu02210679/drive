@@ -38,6 +38,9 @@ def test_loads_valid_config_and_exports_metadrive_values(tmp_path: Path) -> None
         "start_seed": 42,
         "traffic_density": 0.1,
         "horizon": 200,
+        "physics_world_step_size": 0.02,
+        "decision_repeat": 5,
+        "map_config": {"lane_width": 3.5},
     }
 
 

@@ -3,11 +3,12 @@ from typing import Any
 
 import pytest
 
+from mad_driving.agents.suite import AgentAnalysisResult
 from mad_driving.cli import control_smoke as control_smoke_module
 from mad_driving.cli.control_smoke import main, run_control_smoke
 from mad_driving.config.models import AppConfig, ControlConfig
-from mad_driving.interfaces import CriticReview, SceneSnapshot
-from tests.unit.agents.factories import make_claim
+from mad_driving.interfaces import CriticReview, SceneObservation
+from tests.unit.agents.factories import make_analysis, make_claim
 
 
 class FakeLane:
@@ -25,6 +26,8 @@ class FakeNavigation:
 
 
 class FakeVehicle:
+    LENGTH = 4.5
+    WIDTH = 1.8
     name = "ego"
     position = (0.0, 0.0)
     velocity = (1.0, 0.0)
@@ -34,6 +37,12 @@ class FakeVehicle:
     lane_index = FakeLane.index
     max_speed_m_s = 20.0
     speed = 1.0
+    on_lane = True
+    crash_vehicle = False
+    crash_human = False
+    crash_object = False
+    crash_sidewalk = False
+    crash_building = False
 
 
 class FakeEngine:
@@ -69,10 +78,13 @@ class FakeControlEnv:
         self.reset_seeds: list[int | None] = []
         self.actions: list[int] = []
         self.closed = False
+        self.current_seed = 0
 
     def reset(self, *, seed: int | None = None):
         self.reset_seeds.append(seed)
-        return {}, {}
+        assert seed is not None
+        self.current_seed = seed
+        return {}, {"env_seed": seed}
 
     def step(self, action: int):
         self.actions.append(action)
@@ -116,22 +128,39 @@ def neutral_review() -> CriticReview:
 class RecordingSuite:
     def __init__(self, *, min_ttc_s: float | None = None) -> None:
         self.min_ttc_s = min_ttc_s
-        self.snapshots: list[SceneSnapshot] = []
+        self.observations: list[SceneObservation] = []
 
-    def analyze(self, snapshot: SceneSnapshot) -> tuple[tuple[Any, ...], CriticReview]:
-        self.snapshots.append(snapshot)
+    def analyze(self, observation: SceneObservation) -> AgentAnalysisResult:
+        self.observations.append(observation)
         claims = (
             make_claim("nominal"),
             make_claim("hazard", min_ttc_s=self.min_ttc_s),
             make_claim("rule"),
         )
-        return claims, neutral_review()
+        return make_analysis(claims=claims, review=neutral_review())
 
 
-class FailingSuite:
-    def analyze(self, snapshot: SceneSnapshot):
-        del snapshot
-        raise RuntimeError("analysis failed")
+class FailedAgentSuite:
+    def analyze(self, observation: SceneObservation) -> AgentAnalysisResult:
+        del observation
+        return AgentAnalysisResult(
+            claims=(),
+            failed_agent_ids=("nominal", "hazard", "rule"),
+            errors=(
+                "nominal:RuntimeError:analysis failed",
+                "hazard:RuntimeError:analysis failed",
+                "rule:RuntimeError:analysis failed",
+            ),
+            review=CriticReview(
+                conflict_score=1.0,
+                unresolved_conflict=True,
+                max_severity=1.0,
+                supported_agent_ids=(),
+                challenged_claim_ids=(),
+                reasons=("agent_analysis_failed",),
+            ),
+            expected_agent_ids=("nominal", "hazard", "rule"),
+        )
 
 
 def test_control_smoke_runs_decision_pipeline_and_closes() -> None:
@@ -163,7 +192,7 @@ def test_analysis_failure_executes_stop_and_still_closes() -> None:
     result = run_control_smoke(
         make_config(),
         env_factory=lambda options, control: env,
-        suite_factory=lambda config: FailingSuite(),
+        suite_factory=lambda config: FailedAgentSuite(),
     )
 
     assert env.actions[0] == 3
@@ -207,10 +236,10 @@ def test_previous_action_and_intervention_are_propagated() -> None:
         suite_factory=lambda config: suite,
     )
 
-    assert suite.snapshots[0].step_index == 0
-    assert suite.snapshots[1].previous_action == 3
-    assert suite.snapshots[1].previous_shield_intervention is True
-    assert result.final_snapshot.previous_action == 3
+    assert suite.observations[0].step_index == 0
+    assert suite.observations[1].previous_executed_action == 3
+    assert suite.observations[1].previous_shield_intervention is True
+    assert result.final_snapshot.previous_executed_action == 3
     assert result.final_trace.target_speed_mps == 0.0
     assert result.shield_intervention_count == result.steps_completed
 
@@ -225,6 +254,8 @@ def test_monitor_mode_counts_no_actual_intervention() -> None:
 
     assert result.action_counts == (2, 0, 0, 0)
     assert result.shield_intervention_count == 0
+    assert result.final_trace.required_action == 3
+    assert result.final_trace.intervention_required is True
     assert result.final_trace.shield_intervened is False
     assert "imminent_ttc" in result.final_trace.shield_reasons
 

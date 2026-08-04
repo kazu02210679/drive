@@ -2,6 +2,8 @@
 
 ## Status and authority
 
+> **Status: historical Phase 2 design.** This document preserves the original single-claim and all-purpose snapshot contract. Phase 4.1 supersedes those two boundaries with one-to-three claims and agent-visible `SceneObservation` separated from `PrivilegedWorldState`.
+
 This design implements Phase 2 of `docs/multi_agent_driving_mvp_spec.md`. That document remains the highest-level requirement. The user approved two narrow additions needed to make the specified Rule Agent executable:
 
 - add `collision_occurred`, `off_road`, and `intersection_entry_prohibited` to `SceneSnapshot`;

@@ -1,6 +1,6 @@
 import json
 import math
-from dataclasses import FrozenInstanceError, asdict
+from dataclasses import FrozenInstanceError, asdict, fields, replace
 from typing import Any
 
 import pytest
@@ -9,7 +9,14 @@ from mad_driving.interfaces.actor_state import ActorState
 from mad_driving.interfaces.critic_review import CriticReview
 from mad_driving.interfaces.decision_trace import DecisionTrace
 from mad_driving.interfaces.risk_claim import RiskClaim
-from mad_driving.interfaces.scene_snapshot import EgoState, SceneSnapshot
+from mad_driving.interfaces.scene_frame import (
+    OcclusionRegion,
+    PrivilegedWorldState,
+    RoadContext,
+    SceneFrame,
+)
+from mad_driving.interfaces.scene_snapshot import EgoState, SceneObservation
+from mad_driving.scenarios import EpisodeSeeds
 
 
 def make_actor(**overrides: Any) -> ActorState:
@@ -46,25 +53,80 @@ def make_ego(**overrides: Any) -> EgoState:
     return EgoState(**values)
 
 
-def make_snapshot(**overrides: Any) -> SceneSnapshot:
+def make_seeds(**overrides: Any) -> EpisodeSeeds:
     values: dict[str, Any] = {
-        "step_index": 1,
-        "sim_time_s": 0.1,
-        "scenario_id": "test",
-        "seed": 42,
-        "ego": make_ego(),
-        "actors": (make_actor(),),
+        "episode_rng_seed": 42,
+        "metadrive_scenario_index": 7,
+        "scenario_parameter_seed": 11,
+    }
+    values.update(overrides)
+    return EpisodeSeeds(**values)
+
+
+def make_road_context(**overrides: Any) -> RoadContext:
+    values: dict[str, Any] = {
         "stop_required": False,
-        "occlusion_present": False,
         "distance_to_conflict_point_m": None,
-        "previous_action": 0,
-        "previous_shield_intervention": False,
-        "collision_occurred": False,
-        "off_road": False,
         "intersection_entry_prohibited": False,
     }
     values.update(overrides)
-    return SceneSnapshot(**values)
+    return RoadContext(**values)
+
+
+def make_snapshot(**overrides: Any) -> SceneObservation:
+    values: dict[str, Any] = {
+        "step_index": 1,
+        "sim_time_s": 0.1,
+        "ego": make_ego(),
+        "visible_actors": (make_actor(),),
+        "occlusion_regions": (),
+        "road_context": make_road_context(),
+        "previous_executed_action": 0,
+        "previous_shield_intervention": False,
+    }
+    values.update(overrides)
+    return SceneObservation(**values)
+
+
+def make_frame(**overrides: Any) -> SceneFrame:
+    values: dict[str, Any] = {
+        "scenario_id": "test",
+        "seeds": make_seeds(),
+        "observation": make_snapshot(),
+        "privileged": PrivilegedWorldState(
+            all_actors=(make_actor(),),
+            collision_occurred=False,
+            collision_kind=None,
+            off_road=False,
+            arrived=False,
+            scenario_success=False,
+            scenario_failure=False,
+            minimum_actual_ttc_s=None,
+            hard_rule_constraint=False,
+        ),
+    }
+    values.update(overrides)
+    return SceneFrame(**values)
+
+
+def test_agent_visible_observation_excludes_scenario_identity_and_seeds() -> None:
+    observation_fields = {field.name for field in fields(SceneObservation)}
+    frame_fields = {field.name for field in fields(SceneFrame)}
+
+    assert "scenario_id" not in observation_fields
+    assert "seeds" not in observation_fields
+    assert {"scenario_id", "seeds"} <= frame_fields
+
+
+@pytest.mark.parametrize("value", [-0.1, math.inf, math.nan])
+def test_privileged_oracle_ttc_requires_a_non_negative_finite_value(value: float) -> None:
+    with pytest.raises(ValueError, match="minimum_actual_ttc_s"):
+        replace(make_frame().privileged, minimum_actual_ttc_s=value)
+
+
+def test_privileged_rule_constraint_requires_a_boolean() -> None:
+    with pytest.raises(ValueError, match="hard_rule_constraint"):
+        replace(make_frame().privileged, hard_rule_constraint=1)  # type: ignore[arg-type]
 
 
 def make_claim(**overrides: Any) -> RiskClaim:
@@ -103,11 +165,13 @@ def make_review(**overrides: Any) -> CriticReview:
 
 
 def test_models_are_frozen_and_json_serializable() -> None:
-    snapshot = make_snapshot()
+    frame = make_frame()
     trace = DecisionTrace(
         step_index=1,
         raw_action=0,
+        required_action=1,
         executed_action=1,
+        intervention_required=True,
         target_speed_mps=7.0,
         shield_intervened=True,
         shield_reasons=("margin",),
@@ -117,20 +181,58 @@ def test_models_are_frozen_and_json_serializable() -> None:
     )
 
     with pytest.raises(FrozenInstanceError):
-        snapshot.step_index = 2  # type: ignore[misc]
+        frame.observation.step_index = 2  # type: ignore[misc]
     json.dumps(asdict(trace))
 
 
-def test_scene_snapshot_contains_explicit_rule_state() -> None:
-    snapshot = make_snapshot(
-        collision_occurred=True,
-        off_road=True,
-        intersection_entry_prohibited=True,
+def test_scene_frame_keeps_privileged_labels_out_of_observation() -> None:
+    frame = make_frame(
+        privileged=PrivilegedWorldState(
+            all_actors=(make_actor(),),
+            collision_occurred=True,
+            collision_kind="vehicle",
+            off_road=True,
+            arrived=True,
+            scenario_success=True,
+            scenario_failure=False,
+            minimum_actual_ttc_s=1.5,
+            hard_rule_constraint=True,
+        )
     )
 
-    assert snapshot.collision_occurred is True
-    assert snapshot.off_road is True
-    assert snapshot.intersection_entry_prohibited is True
+    assert frame.privileged.collision_occurred is True
+    assert frame.privileged.off_road is True
+    assert frame.privileged.arrived is True
+    assert frame.observation.road_context.intersection_entry_prohibited is False
+    assert not hasattr(frame.observation, "collision_occurred")
+
+
+def test_scene_observation_rejects_hidden_actor_kinematics() -> None:
+    with pytest.raises(ValueError, match="visible_actors"):
+        make_snapshot(visible_actors=(make_actor(visible=False),))
+
+
+def test_scene_observation_defensively_freezes_and_validates_inputs() -> None:
+    visible_actors = [make_actor()]
+    occlusion_regions: list[OcclusionRegion] = []
+    observation = make_snapshot(
+        visible_actors=visible_actors,
+        occlusion_regions=occlusion_regions,
+    )
+    visible_actors.clear()
+    occlusion_regions.append(
+        OcclusionRegion(
+            region_id="building-corner",
+            boundary_points_xy_m=((0.0, 0.0), (1.0, 0.0)),
+        )
+    )
+
+    assert observation.visible_actors == (make_actor(),)
+    assert observation.occlusion_regions == ()
+    with pytest.raises(ValueError, match="seeds"):
+        make_frame(seeds={"episode_rng_seed": 42})
+    with pytest.raises(ValueError, match="road_context"):
+        make_snapshot(road_context={"stop_required": False})
 
 
 def test_decision_trace_copies_reward_components() -> None:
@@ -138,7 +240,9 @@ def test_decision_trace_copies_reward_components() -> None:
     trace = DecisionTrace(
         step_index=1,
         raw_action=0,
+        required_action=0,
         executed_action=0,
+        intervention_required=False,
         target_speed_mps=8.0,
         shield_intervened=False,
         shield_reasons=(),
@@ -149,6 +253,198 @@ def test_decision_trace_copies_reward_components() -> None:
 
     components["progress"] = 99.0
     assert trace.reward_components == {"progress": 0.1}
+    with pytest.raises(TypeError):
+        trace.reward_components["progress"] = 2.0  # type: ignore[index]
+
+
+def test_decision_trace_preserves_monitor_mode_shield_requirement() -> None:
+    trace = DecisionTrace(
+        step_index=1,
+        raw_action=0,
+        required_action=3,
+        executed_action=0,
+        intervention_required=True,
+        target_speed_mps=8.0,
+        shield_intervened=False,
+        shield_reasons=("imminent_ttc",),
+        claims=(make_claim(),),
+        review=make_review(),
+        reward_components={},
+    )
+
+    assert trace.required_action == 3
+    assert trace.intervention_required is True
+    assert trace.shield_intervened is False
+
+
+def test_decision_trace_rejects_inconsistent_shield_diagnostics() -> None:
+    with pytest.raises(ValueError, match="intervention_required"):
+        DecisionTrace(
+            step_index=1,
+            raw_action=0,
+            required_action=3,
+            executed_action=0,
+            intervention_required=False,
+            target_speed_mps=8.0,
+            shield_intervened=False,
+            shield_reasons=(),
+            claims=(make_claim(),),
+            review=make_review(),
+            reward_components={},
+        )
+
+
+def test_decision_trace_preserves_low_level_control_fail_safe() -> None:
+    trace = DecisionTrace(
+        step_index=1,
+        raw_action=0,
+        required_action=0,
+        executed_action=0,
+        intervention_required=False,
+        target_speed_mps=8.0,
+        shield_intervened=False,
+        shield_reasons=(),
+        claims=(make_claim(),),
+        review=make_review(),
+        reward_components={},
+        control_fail_safe=True,
+        control_fail_safe_reason="ValueError",
+    )
+
+    assert trace.control_fail_safe is True
+    assert trace.control_fail_safe_reason == "ValueError"
+
+    with pytest.raises(ValueError, match="control_fail_safe_reason"):
+        DecisionTrace(
+            step_index=1,
+            raw_action=0,
+            required_action=0,
+            executed_action=0,
+            intervention_required=False,
+            target_speed_mps=8.0,
+            shield_intervened=False,
+            shield_reasons=(),
+            claims=(make_claim(),),
+            review=make_review(),
+            reward_components={},
+            control_fail_safe=False,
+            control_fail_safe_reason="ValueError",
+        )
+
+
+def test_decision_trace_freezes_and_validates_analysis_diagnostics() -> None:
+    failed_agent_ids = ["hazard"]
+    errors = ["hazard:RuntimeError:failed"]
+    trace = DecisionTrace(
+        step_index=1,
+        raw_action=0,
+        required_action=0,
+        executed_action=0,
+        intervention_required=False,
+        target_speed_mps=8.0,
+        shield_intervened=False,
+        shield_reasons=[],  # type: ignore[arg-type]
+        claims=[make_claim()],  # type: ignore[arg-type]
+        review=make_review(),
+        reward_components={"progress": 0.1},
+        failed_agent_ids=failed_agent_ids,  # type: ignore[arg-type]
+        errors=errors,  # type: ignore[arg-type]
+    )
+
+    failed_agent_ids.clear()
+    errors.clear()
+    assert trace.failed_agent_ids == ("hazard",)
+    assert trace.errors == ("hazard:RuntimeError:failed",)
+    assert trace.shield_reasons == ()
+    assert isinstance(trace.claims, tuple)
+
+    with pytest.raises(ValueError, match="one-to-one|match failed_agent_ids"):
+        DecisionTrace(
+            step_index=1,
+            raw_action=0,
+            required_action=0,
+            executed_action=0,
+            intervention_required=False,
+            target_speed_mps=8.0,
+            shield_intervened=False,
+            shield_reasons=(),
+            claims=(make_claim(),),
+            review=make_review(),
+            reward_components={},
+            failed_agent_ids=("hazard",),
+            errors=("rule:RuntimeError:failed",),
+        )
+
+
+def test_decision_trace_deeply_freezes_claim_and_review_sequences() -> None:
+    evidence = ["relative_position"]
+    assumptions = ["constant_velocity"]
+    supported_agent_ids = ["nominal"]
+    challenged_claim_ids = ["hazard-1"]
+    reasons = ["supported"]
+    trace = DecisionTrace(
+        step_index=1,
+        raw_action=0,
+        required_action=0,
+        executed_action=0,
+        intervention_required=False,
+        target_speed_mps=8.0,
+        shield_intervened=False,
+        shield_reasons=(),
+        claims=(
+            make_claim(
+                evidence=evidence,
+                assumptions=assumptions,
+            ),
+        ),
+        review=make_review(
+            supported_agent_ids=supported_agent_ids,
+            challenged_claim_ids=challenged_claim_ids,
+            reasons=reasons,
+        ),
+        reward_components={"progress": 0.1},
+    )
+
+    evidence.append("caller_mutation")
+    assumptions.clear()
+    supported_agent_ids.clear()
+    challenged_claim_ids.append("caller-mutation")
+    reasons[0] = "caller_mutation"
+
+    assert trace.claims[0].evidence == ("relative_position",)
+    assert trace.claims[0].assumptions == ("constant_velocity",)
+    assert trace.review.supported_agent_ids == ("nominal",)
+    assert trace.review.challenged_claim_ids == ("hazard-1",)
+    assert trace.review.reasons == ("supported",)
+    json.dumps(asdict(trace))
+
+
+@pytest.mark.parametrize(
+    ("claim_overrides", "review_overrides", "message"),
+    [
+        ({"evidence": ["valid", 1]}, {}, "evidence"),
+        ({}, {"reasons": "bare string"}, "reasons"),
+    ],
+)
+def test_decision_trace_rejects_invalid_nested_string_sequences(
+    claim_overrides: dict[str, Any],
+    review_overrides: dict[str, Any],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        DecisionTrace(
+            step_index=1,
+            raw_action=0,
+            required_action=0,
+            executed_action=0,
+            intervention_required=False,
+            target_speed_mps=8.0,
+            shield_intervened=False,
+            shield_reasons=(),
+            claims=(make_claim(**claim_overrides),),
+            review=make_review(**review_overrides),
+            reward_components={},
+        )
 
 
 @pytest.mark.parametrize("actor_type", ["pedestrian", "", "VEHICLE"])
@@ -171,7 +467,7 @@ def test_actor_dimensions_must_be_positive(field: str) -> None:
         (make_ego, "speed_mps", math.inf),
         (make_ego, "lane_offset_m", math.nan),
         (make_snapshot, "sim_time_s", math.inf),
-        (make_snapshot, "distance_to_conflict_point_m", math.nan),
+        (make_road_context, "distance_to_conflict_point_m", math.nan),
         (make_claim, "time_horizon_s", math.inf),
         (make_claim, "min_ttc_s", math.nan),
         (make_review, "conflict_score", math.inf),
@@ -212,10 +508,16 @@ def test_route_progress_is_normalized(route_progress: float) -> None:
         make_ego(route_progress=route_progress)
 
 
-@pytest.mark.parametrize("previous_action", [-1, 4])
-def test_snapshot_action_is_discrete_four(previous_action: int) -> None:
-    with pytest.raises(ValueError, match="previous_action"):
-        make_snapshot(previous_action=previous_action)
+@pytest.mark.parametrize("previous_executed_action", [-1, 4])
+def test_scene_observation_action_is_discrete_four(previous_executed_action: int) -> None:
+    with pytest.raises(ValueError, match="previous_executed_action"):
+        make_snapshot(previous_executed_action=previous_executed_action)
+
+
+@pytest.mark.parametrize("heading_rad", [math.pi, 3.0 * math.pi])
+def test_ego_heading_must_be_normalized_at_project_boundary(heading_rad: float) -> None:
+    with pytest.raises(ValueError, match="heading_rad"):
+        make_ego(heading_rad=heading_rad)
 
 
 @pytest.mark.parametrize("field", ["raw_action", "executed_action"])
@@ -224,7 +526,9 @@ def test_decision_trace_actions_are_discrete_four(field: str, value: int) -> Non
     values: dict[str, Any] = {
         "step_index": 1,
         "raw_action": 0,
+        "required_action": 0,
         "executed_action": 0,
+        "intervention_required": False,
         "target_speed_mps": 8.0,
         "shield_intervened": False,
         "shield_reasons": (),
@@ -243,11 +547,41 @@ def test_reward_components_must_be_finite() -> None:
         DecisionTrace(
             step_index=1,
             raw_action=0,
+            required_action=0,
             executed_action=0,
+            intervention_required=False,
             target_speed_mps=8.0,
             shield_intervened=False,
             shield_reasons=(),
             claims=(make_claim(),),
             review=make_review(),
             reward_components={"progress": math.nan},
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("region_id", ""),
+        ("boundary_points_xy_m", ((0.0, 0.0),)),
+        ("boundary_points_xy_m", ((0.0, 0.0), (math.nan, 1.0))),
+    ],
+)
+def test_occlusion_region_requires_a_valid_boundary(field: str, value: Any) -> None:
+    values: dict[str, Any] = {
+        "region_id": "building-corner",
+        "boundary_points_xy_m": ((0.0, 0.0), (1.0, 0.0)),
+    }
+    values[field] = value
+
+    with pytest.raises(ValueError, match=field):
+        OcclusionRegion(**values)
+
+
+def test_road_context_requires_a_finite_optional_conflict_distance() -> None:
+    with pytest.raises(ValueError, match="distance_to_conflict_point_m"):
+        RoadContext(
+            stop_required=False,
+            distance_to_conflict_point_m=math.inf,
+            intersection_entry_prohibited=False,
         )

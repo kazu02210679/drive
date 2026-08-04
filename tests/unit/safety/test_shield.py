@@ -6,7 +6,7 @@ from mad_driving.config.models import ShieldConfig
 from mad_driving.control import DrivingAction
 from mad_driving.interfaces import RiskClaim, ShieldResult
 from mad_driving.safety import SafetyShield
-from tests.unit.agents.factories import make_claim, make_snapshot
+from tests.unit.agents.factories import make_claim, make_ego, make_frame, make_snapshot
 
 
 def complete_claims(**hazard_overrides: object) -> tuple[RiskClaim, ...]:
@@ -15,6 +15,12 @@ def complete_claims(**hazard_overrides: object) -> tuple[RiskClaim, ...]:
         make_claim("hazard", **hazard_overrides),
         make_claim("rule"),
     )
+
+
+def make_shield_observation(**overrides: object):
+    values = dict(overrides)
+    speed_limit_mps = float(values.pop("speed_limit_mps", 15.0))
+    return make_snapshot(ego=make_ego(speed_limit_mps=speed_limit_mps), **values)
 
 
 def test_enforce_never_relaxes_requested_action() -> None:
@@ -43,6 +49,25 @@ def test_modes_distinguish_candidate_from_real_intervention() -> None:
     assert enforce.intervened is True
 
 
+def test_privileged_labels_cannot_change_an_observation_only_shield_decision() -> None:
+    observation = make_snapshot()
+    safe_frame = make_frame(observation=observation)
+    labeled_frame = make_frame(
+        observation=observation,
+        collision_occurred=True,
+        off_road=True,
+        scenario_success=True,
+        scenario_failure=True,
+    )
+    shield = SafetyShield(ShieldConfig())
+
+    safe_result = shield.filter(DrivingAction.KEEP, safe_frame.observation, complete_claims())
+    labeled_result = shield.filter(DrivingAction.KEEP, labeled_frame.observation, complete_claims())
+
+    assert labeled_result == safe_result
+    assert labeled_result.reasons == ()
+
+
 def test_all_reasons_have_fixed_duplicate_free_order() -> None:
     claims = (
         make_claim(
@@ -54,12 +79,10 @@ def test_all_reasons_have_fixed_duplicate_free_order() -> None:
     )
     result = SafetyShield(ShieldConfig()).filter(
         DrivingAction.KEEP,
-        make_snapshot(collision_occurred=True, off_road=True),
+        make_snapshot(),
         claims,
     )
     assert result.reasons == (
-        "collision_occurred",
-        "off_road",
         "hard_stop_required",
         "multiple_agents_missing",
         "imminent_ttc",
@@ -86,8 +109,6 @@ def test_all_reasons_have_fixed_duplicate_free_order() -> None:
             "claim_speed_limit",
             1,
         ),
-        (complete_claims(), {"collision_occurred": True}, "collision_occurred", 3),
-        (complete_claims(), {"off_road": True}, "off_road", 3),
         (
             (make_claim("nominal"), make_claim("rule")),
             {},
@@ -105,7 +126,7 @@ def test_individual_safety_reasons(
 ) -> None:
     result = SafetyShield(ShieldConfig()).filter(
         DrivingAction.KEEP,
-        make_snapshot(**snapshot_overrides),
+        make_shield_observation(**snapshot_overrides),
         claims,
     )
     assert reason in result.reasons
@@ -227,6 +248,54 @@ def test_missing_agent_count_is_monotone_for_every_valid_config(
         (make_claim("nominal"),),
     )
     assert multiple.executed_action >= one.executed_action >= complete.executed_action
+
+
+def test_intentional_ablation_is_not_treated_as_runtime_agent_failure() -> None:
+    result = SafetyShield(ShieldConfig(mode="enforce")).filter(
+        DrivingAction.KEEP,
+        make_snapshot(),
+        (make_claim("nominal"),),
+        expected_agent_ids=("nominal",),
+        failed_agent_ids=(),
+    )
+
+    assert result.executed_action is DrivingAction.KEEP
+    assert "agent_missing" not in result.reasons
+    assert "multiple_agents_missing" not in result.reasons
+
+
+def test_expected_agent_runtime_failure_applies_missing_agent_floor() -> None:
+    result = SafetyShield(ShieldConfig(mode="enforce")).filter(
+        DrivingAction.KEEP,
+        make_snapshot(),
+        (make_claim("nominal"), make_claim("rule")),
+        expected_agent_ids=("nominal", "hazard", "rule"),
+        failed_agent_ids=("hazard",),
+    )
+
+    assert result.executed_action is DrivingAction.PREPARE_STOP
+    assert "agent_missing" in result.reasons
+
+
+@pytest.mark.parametrize(
+    ("expected", "failed"),
+    [
+        (("nominal", "nominal"), ()),
+        (("unknown",), ()),
+        (("nominal",), ("hazard",)),
+    ],
+)
+def test_agent_status_contract_rejects_inconsistent_ids(
+    expected: tuple[str, ...], failed: tuple[str, ...]
+) -> None:
+    with pytest.raises(ValueError, match="agent_ids|specialist"):
+        SafetyShield(ShieldConfig()).filter(
+            DrivingAction.KEEP,
+            make_snapshot(),
+            (),
+            expected_agent_ids=expected,
+            failed_agent_ids=failed,
+        )
 
 
 def test_shield_result_rejects_inconsistent_flags_and_duplicate_reasons() -> None:

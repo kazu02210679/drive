@@ -5,10 +5,25 @@ fixed_action: [0.0, 0.25]
 metadrive:
   use_render: false
   image_observation: false
+  # Smoke defaults only; PPO environments override both from scenarios.<role>.
   num_scenarios: 1
   start_seed: 42
   traffic_density: 0.1
   horizon: 200
+  physics_dt_s: 0.02
+  decision_repeat: 5
+  decision_dt_s: 0.10
+  lane_width_m: 3.5
+scenarios:
+  train:
+    seed_start: 0
+    seed_count: 10000
+  validation:
+    seed_start: 10000
+    seed_count: 1000
+  test:
+    seed_start: 20000
+    seed_count: 1000
 agents:
   nominal:
     horizon_s: 5.0
@@ -66,3 +81,45 @@ control:
     lateral_kd: 0.05
     integral_limit: 5.0
     lookahead_m: 1.0
+observation:
+  max_speed_mps: 40.0
+  max_abs_acceleration_mps2: 10.0
+  max_abs_lane_offset_m: 3.5
+  max_ttc_s: 10.0
+  max_abs_stopping_margin_m: 50.0
+reward:
+  progress_per_meter: 0.10
+  arrival: 100.0
+  collision_vehicle: 200.0
+  collision_crossing_actor: 500.0
+  near_miss_max: 50.0
+  near_miss_ttc_s: 3.0
+  offroad: 100.0
+  hard_rule_violation: 100.0
+  jerk_scale: 0.05
+  unnecessary_brake_scale: 0.20
+  unnecessary_brake_safe_ttc_s: 5.0
+  standstill_per_second: 0.50
+  standstill_speed_mps: 0.10
+  shield_intervention: 2.0
+training:
+  algorithm: PPO
+  policy: MlpPolicy
+  learning_rate: 0.0003
+  n_steps: 2048
+  batch_size: 64
+  n_epochs: 10
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.01
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  seed: 42
+  smoke_timesteps: 5000
+  total_timesteps: 500000
+  num_envs: 1
+  checkpoint_interval_steps: 10000
+  eval_interval_steps: 10000
+  eval_episodes: 5
+  run_root: runs

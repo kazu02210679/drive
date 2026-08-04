@@ -1,5 +1,17 @@
 # Phase 1 Foundation Implementation Plan
 
+> **Status: historical Phase 1 plan.** This file preserves the implementation record from the repository foundation. The active system contract is `docs/multi_agent_driving_mvp_spec.md`; Phase 4.1 hardening is specified in `docs/superpowers/specs/2026-07-21-phase4-research-validity-hardening-design.md` and tracked in `docs/superpowers/plans/2026-07-21-phase4-research-validity-hardening.md`.
+
+Phase 4.1 now implements the research-hardening contract while retaining the 24-dimensional Observation:
+
+- three specialists plus one Critic and one-to-three claims per specialist, conservatively aggregated into 24 slots
+- standard PPO rollout updates and timing `0.02 / 5 / 0.10`
+- role-disjoint train/validation/test seeds, actual-reset JSONL artifacts, and a documented five-run policy/RNG-seed comparison protocol
+- `ScenarioRuntime`, hidden-kinematics isolation, boundary-causal Reward, and coordinate signs
+- all-monitor decision comparison, all-enforce system comparison, and fresh destination/provenance version 3
+
+The explicit validity features `ttc_valid`, `claim_valid`, `agent_failed`, and `target_actor_present` remain deferred and unimplemented.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build the reproducible Phase 1 foundation: strict configuration, validated JSON-serializable interfaces, MetaDrive-backed `SceneSnapshot` creation, and a deterministic headless fixed-action smoke run.

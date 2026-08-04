@@ -31,10 +31,16 @@ def xy_pair(name: str, value: Sequence[Any]) -> tuple[float, float]:
 def decision_interval_s(config: ConfigReader) -> float:
     """Return one policy decision interval from MetaDrive timing settings."""
 
-    physics_step = finite_float(
-        "physics_world_step_size", config.get("physics_world_step_size", 0.02)
-    )
-    decision_repeat = finite_float("decision_repeat", config.get("decision_repeat", 5))
+    physics_value = config.get("physics_world_step_size")
+    if physics_value is None:
+        raise ValueError("physics_world_step_size must be configured")
+    decision_repeat_value = config.get("decision_repeat")
+    if decision_repeat_value is None:
+        raise ValueError("decision_repeat must be configured")
+    physics_step = finite_float("physics_world_step_size", physics_value)
+    decision_repeat = finite_float("decision_repeat", decision_repeat_value)
+    if decision_repeat != int(decision_repeat):
+        raise ValueError("decision_repeat must be an integer")
     interval = physics_step * decision_repeat
     if interval <= 0.0:
         raise ValueError("decision interval must be positive")

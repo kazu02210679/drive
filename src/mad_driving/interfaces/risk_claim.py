@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 
 from mad_driving.interfaces._validation import (
+    canonical_string_tuple,
     require_finite,
     require_non_empty,
     require_non_negative,
@@ -44,3 +45,9 @@ class RiskClaim:
         require_non_negative("recommended_max_speed_mps", self.recommended_max_speed_mps)
         if self.valid_until_step < 0:
             raise ValueError("valid_until_step must be non-negative")
+        object.__setattr__(self, "evidence", canonical_string_tuple("evidence", self.evidence))
+        object.__setattr__(
+            self,
+            "assumptions",
+            canonical_string_tuple("assumptions", self.assumptions),
+        )
