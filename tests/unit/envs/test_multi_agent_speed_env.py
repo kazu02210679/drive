@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any, cast
 
 import gymnasium as gym
@@ -10,8 +10,12 @@ import pytest
 from numpy.typing import NDArray
 from stable_baselines3.common.vec_env import DummyVecEnv
 
-from mad_driving.agents.suite import AgentAnalysisResult
-from mad_driving.config.models import AppConfig, ControlConfig
+import mad_driving.envs.multi_agent_speed_env as multi_agent_speed_env_module
+from mad_driving.agents.critic import CriticAgent
+from mad_driving.agents.nominal import NominalMotionAgent
+from mad_driving.agents.noop_critic import NoOpCritic
+from mad_driving.agents.suite import AgentAnalysisResult, AgentSuite
+from mad_driving.config.models import AppConfig, ControlConfig, ShieldConfig
 from mad_driving.control import DrivingAction
 from mad_driving.envs import MultiAgentSpeedEnv
 from mad_driving.envs.reward import RewardContext, RewardResult
@@ -24,6 +28,7 @@ from mad_driving.interfaces import (
     SceneObservation,
     ShieldResult,
 )
+from mad_driving.methods import get_method_profile
 from mad_driving.safety import SafetyShield
 from mad_driving.scenarios import (
     EpisodeSeedAllocator,
@@ -52,6 +57,7 @@ class FakeNavigation:
     def __init__(self) -> None:
         self.current_lane = FakeLane()
         self.route_completion = 0.25
+        self.travelled_length = 12.5
 
 
 class FakeVehicle:
@@ -175,6 +181,10 @@ class FakeSimulator:
             self.events.append("simulator.close")
         if self.fail_on_close:
             raise RuntimeError("simulator close failure")
+
+    @staticmethod
+    def scenario_capture_rgb() -> NDArray[np.uint8]:
+        return np.full((12, 16, 3), (17, 34, 51), dtype=np.uint8)
 
 
 class RecordingEnvironmentFactory:
@@ -615,6 +625,13 @@ def make_config_for_scenario(scenario_id: str) -> AppConfig:
     return AppConfig.model_validate(values)
 
 
+def make_config_for_method(method_id: str, *, shield_mode: str = "monitor") -> AppConfig:
+    values = make_config().model_dump(mode="python")
+    values["method"] = {"id": method_id}
+    values["shield"]["mode"] = shield_mode
+    return AppConfig.model_validate(values)
+
+
 @dataclass
 class EnvHarness:
     env: MultiAgentSpeedEnv
@@ -678,6 +695,82 @@ def make_env(
         observation=selected_observation,
         runtime=selected_runtime,
     )
+
+
+def make_default_composition_env(
+    config: AppConfig,
+    *,
+    shield_factory: Callable[..., Any] | None = None,
+) -> MultiAgentSpeedEnv:
+    simulator = FakeSimulator()
+    arguments: dict[str, Any] = {}
+    if shield_factory is not None:
+        arguments["shield_factory"] = shield_factory
+    return MultiAgentSpeedEnv(
+        config,
+        role="train",
+        worker_index=0,
+        scenario_runtime_factory=lambda scenario_id: RecordingRuntime(),
+        env_factory=RecordingEnvironmentFactory((simulator,)),
+        builder_factory=RecordingSnapshotBuilder,
+        reward_factory=lambda reward_config: RecordingRewardCalculator(),
+        observation_factory=lambda observation_config: RecordingObservationBuilder(),
+        **arguments,
+    )
+
+
+@pytest.mark.parametrize(
+    "method_id",
+    (
+        "b0_rule",
+        "b1_nominal",
+        "b2_multi_no_review",
+        "proposed",
+        "proposed_no_critic",
+        "proposed_no_shield",
+        "proposed_no_hazard",
+    ),
+)
+def test_default_environment_composes_the_selected_method_profile(method_id: str) -> None:
+    config = make_config_for_method(method_id)
+    profile = get_method_profile(config.method.id)
+    env = make_default_composition_env(config)
+    try:
+        env.reset(seed=17)
+
+        suite = cast(AgentSuite, env._suite)
+        shield = cast(SafetyShield, env._shield)
+        assert suite.expected_agent_ids == profile.specialist_ids
+        assert isinstance(suite.critic, CriticAgent) is profile.critic_enabled
+        assert isinstance(suite.critic, NoOpCritic) is not profile.critic_enabled
+        assert shield._config.mode == profile.default_shield_mode
+    finally:
+        env.close()
+
+
+def test_default_suite_routes_expected_failed_agents_to_the_shield(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_nominal(
+        self: NominalMotionAgent, observation: SceneObservation
+    ) -> tuple[RiskClaim, ...]:
+        del self, observation
+        raise RuntimeError("injected nominal failure")
+
+    monkeypatch.setattr(NominalMotionAgent, "analyze", fail_nominal)
+    shield = RecordingShield()
+    env = make_default_composition_env(
+        make_config_for_method("proposed_no_hazard"),
+        shield_factory=lambda shield_config: shield,
+    )
+    try:
+        env.reset(seed=18)
+        env.step(DrivingAction.KEEP)
+
+        assert shield.calls[0][3] == ("nominal", "rule")
+        assert shield.calls[0][4] == ("nominal",)
+    finally:
+        env.close()
 
 
 def expected_seeds(
@@ -1626,6 +1719,115 @@ def test_per_agent_failure_result_remains_a_valid_mdp_step() -> None:
         harness.env.close()
 
 
+def test_trace_records_pre_step_analysis_and_shield_latency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock_values = iter((100, 2_000_100, 5_000_000, 5_500_000, 8_000_000, 11_000_000))
+    monkeypatch.setattr(
+        multi_agent_speed_env_module.time,
+        "perf_counter_ns",
+        lambda: next(clock_values),
+    )
+    harness = make_env()
+    try:
+        harness.env.reset(seed=89)
+        _, _, _, _, info = harness.env.step(DrivingAction.KEEP)
+        trace = info["decision_trace"]
+
+        assert trace.expected_agent_ids == ("nominal", "hazard", "rule")
+        assert trace.analysis_latency_ms == pytest.approx(2.0)
+        assert trace.shield_latency_ms == pytest.approx(0.5)
+        assert np.isfinite(trace.analysis_latency_ms)
+        assert np.isfinite(trace.shield_latency_ms)
+        assert trace.analysis_latency_ms >= 0.0
+        assert trace.shield_latency_ms >= 0.0
+    finally:
+        harness.env.close()
+
+
+def test_latency_differences_do_not_change_environment_scientific_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def run(clock_samples: tuple[int, ...]) -> tuple[np.ndarray, float, DecisionTrace]:
+        clock_values = iter(clock_samples)
+        monkeypatch.setattr(
+            multi_agent_speed_env_module.time,
+            "perf_counter_ns",
+            lambda: next(clock_values),
+        )
+        harness = make_env()
+        try:
+            harness.env.reset(seed=90)
+            observation, reward, _, _, info = harness.env.step(DrivingAction.KEEP)
+            return observation, reward, info["decision_trace"]  # type: ignore[return-value]
+        finally:
+            harness.env.close()
+
+    first = run((0, 1_000_000, 2_000_000, 3_000_000, 4_000_000, 5_000_000))
+    second = run((0, 9_000_000, 10_000_000, 12_000_000, 13_000_000, 16_000_000))
+
+    first_record = asdict(first[2])
+    second_record = asdict(second[2])
+    for record in (first_record, second_record):
+        record.pop("analysis_latency_ms")
+        record.pop("shield_latency_ms")
+
+    assert np.array_equal(first[0], second[0])
+    assert first[1] == second[1]
+    assert first_record == second_record
+    assert (
+        first[2].analysis_latency_ms,
+        first[2].shield_latency_ms,
+    ) != (
+        second[2].analysis_latency_ms,
+        second[2].shield_latency_ms,
+    )
+
+
+def test_default_oracle_ignores_claims_and_intentionally_disabled_specialists() -> None:
+    def reset_with_method(method_id: str) -> tuple[float | None, tuple[str, ...]]:
+        config_values = make_config_for_method(method_id).model_dump(mode="python")
+        config_values["agents"]["hazard"].update(  # type: ignore[index]
+            {"reaction_delay_s": 0.25, "ego_max_safe_deceleration_mps2": -5.0}
+        )
+        actor = FakeVehicle("hidden-lead", position=(12.0, 0.0))
+        actor.velocity = (5.0, 0.0)
+        actor.last_velocity = (5.0, 0.0)
+        runtime = RecordingRuntime(
+            context=ScenarioObservationContext(
+                scenario_id="unit_multi_agent_speed_env",
+                visible_actor_ids=frozenset(),
+            )
+        )
+        environment = MultiAgentSpeedEnv(
+            AppConfig.model_validate(config_values),
+            role="train",
+            worker_index=0,
+            scenario_runtime_factory=lambda scenario_id: runtime,
+            env_factory=RecordingEnvironmentFactory((FakeSimulator(actors=(actor,)),)),
+            reward_factory=lambda reward_config: RecordingRewardCalculator(),
+            observation_factory=lambda observation_config: RecordingObservationBuilder(),
+        )
+        try:
+            environment.reset(seed=91)
+            assert environment._frame is not None
+            assert environment._analysis is not None
+            assert environment._frame.observation.visible_actors == ()
+            return (
+                environment._frame.privileged.minimum_actual_stopping_margin_m,
+                environment._analysis.expected_agent_ids,
+            )
+        finally:
+            environment.close()
+
+    proposed_margin, proposed_agents = reset_with_method("proposed")
+    ablated_margin, ablated_agents = reset_with_method("proposed_no_hazard")
+
+    assert proposed_agents == ("nominal", "hazard", "rule")
+    assert ablated_agents == ("nominal", "rule")
+    assert proposed_margin == ablated_margin == pytest.approx(2.5)
+
+
 def test_suite_level_analysis_error_is_fatal() -> None:
     simulator = FakeSimulator()
     harness = make_env(simulators=(simulator,), suite=FailingSuite())
@@ -1780,6 +1982,15 @@ class DifficultyRecordingRuntimeFactory:
         self.levels.append(level)
 
 
+class EvaluationScheduleRecordingRuntimeFactory(DifficultyRecordingRuntimeFactory):
+    def __init__(self, runtime: RecordingRuntime) -> None:
+        super().__init__(runtime)
+        self.schedules: list[tuple[str, ...]] = []
+
+    def set_scenario_schedule(self, scenario_ids: tuple[str, ...]) -> None:
+        self.schedules.append(scenario_ids)
+
+
 def test_difficulty_level_is_forwarded_to_the_scenario_factory() -> None:
     runtime = RecordingRuntime()
     factory = DifficultyRecordingRuntimeFactory(runtime)
@@ -1788,6 +1999,106 @@ def test_difficulty_level_is_forwarded_to_the_scenario_factory() -> None:
     harness.env.set_difficulty_level(2)
 
     assert factory.levels == [2]
+
+
+@pytest.mark.parametrize("role", ["validation", "test"])
+def test_evaluation_schedule_is_forwarded_for_non_training_roles(role: str) -> None:
+    runtime = RecordingRuntime()
+    factory = EvaluationScheduleRecordingRuntimeFactory(runtime)
+    harness = make_env(role=role, runtime=runtime, runtime_factory=factory)
+
+    harness.env.set_evaluation_scenario_schedule(("lead_brake", "cut_in"))
+
+    assert factory.schedules == [("lead_brake", "cut_in")]
+
+
+def test_evaluation_schedule_allows_scheduled_scenario_to_replace_configured_id() -> None:
+    context = ScenarioObservationContext(scenario_id="lead_brake")
+    runtime = RecordingRuntime(context=context)
+    factory = EvaluationScheduleRecordingRuntimeFactory(runtime)
+    harness = make_env(role="test", runtime=runtime, runtime_factory=factory)
+
+    harness.env.set_evaluation_scenario_schedule(("lead_brake",))
+    _, info = harness.env.reset(seed=20_000)
+
+    assert info["scenario_id"] == "lead_brake"
+
+
+def test_training_environment_rejects_evaluation_schedule_installation() -> None:
+    runtime = RecordingRuntime()
+    factory = EvaluationScheduleRecordingRuntimeFactory(runtime)
+    harness = make_env(role="train", runtime=runtime, runtime_factory=factory)
+
+    with pytest.raises(ValueError, match="validation.*test"):
+        harness.env.set_evaluation_scenario_schedule(("lead_brake",))
+
+    assert factory.schedules == []
+
+
+@pytest.mark.parametrize("mode", ["monitor", "enforce", "off"])
+@pytest.mark.parametrize("role", ["validation", "test"])
+def test_evaluation_shield_mode_is_used_to_construct_the_next_episode(mode: str, role: str) -> None:
+    shield_configs: list[ShieldConfig] = []
+
+    def shield_factory(shield_config: ShieldConfig) -> RecordingShield:
+        shield_configs.append(shield_config)
+        return RecordingShield()
+
+    harness = make_env(role=role, shield_factory=shield_factory)
+
+    harness.env.set_evaluation_shield_mode(mode)  # type: ignore[arg-type]
+    harness.env.reset(seed=10_001 if role == "validation" else 20_001)
+
+    assert [value.mode for value in shield_configs] == [mode]
+    assert harness.env.observation_space.shape == (24,)
+
+
+def test_training_environment_rejects_evaluation_shield_mode_installation() -> None:
+    harness = make_env(role="train")
+
+    with pytest.raises(ValueError, match="validation.*test"):
+        harness.env.set_evaluation_shield_mode("monitor")
+
+
+def test_active_evaluation_episode_rejects_shield_mode_mutation() -> None:
+    harness = make_env(role="test")
+    harness.env.reset(seed=20_001)
+
+    with pytest.raises(RuntimeError, match="active"):
+        harness.env.set_evaluation_shield_mode("off")
+
+
+def test_evaluation_scene_read_requires_active_episode_and_returns_current_visible_view() -> None:
+    harness = make_env(role="test")
+
+    with pytest.raises(RuntimeError, match="reset"):
+        harness.env.current_scene_observation_for_evaluation()
+
+    harness.env.reset(seed=20_001)
+    initial = harness.env.current_scene_observation_for_evaluation()
+    harness.env.step(int(DrivingAction.KEEP))
+    current = harness.env.current_scene_observation_for_evaluation()
+
+    assert isinstance(initial, SceneObservation)
+    assert initial.step_index == 0
+    assert current.step_index == 1
+    assert not hasattr(current, "privileged")
+
+
+def test_test_environment_exposes_a_copied_rgb_frame_only_during_an_active_episode() -> None:
+    harness = make_env(role="test")
+
+    with pytest.raises(RuntimeError, match="reset"):
+        harness.env.capture_rgb_frame_for_evaluation()
+
+    harness.env.reset(seed=20_001)
+    frame = harness.env.capture_rgb_frame_for_evaluation()
+    frame[0, 0] = 0
+    second = harness.env.capture_rgb_frame_for_evaluation()
+
+    assert frame.shape == (12, 16, 3)
+    assert frame.dtype == np.uint8
+    assert second[0, 0].tolist() == [17, 34, 51]
 
 
 def test_reset_and_step_info_include_scenario_metadata() -> None:
@@ -1801,3 +2112,26 @@ def test_reset_and_step_info_include_scenario_metadata() -> None:
         assert info["scenario_parameters"] == {}
         assert info["scenario_success"] is False
         assert info["scenario_failure"] is False
+
+
+def test_step_info_exposes_strict_evaluation_record_telemetry_without_changing_shape() -> None:
+    harness = make_env(shield=RecordingShield(DrivingAction.KEEP))
+    harness.env.reset(seed=42)
+
+    observation, _, _, _, info = harness.env.step(int(DrivingAction.KEEP))
+
+    assert observation.shape == (24,)
+    assert info["simulation_time_s"] == pytest.approx(0.1)
+    assert info["decision_interval_s"] == pytest.approx(0.1)
+    assert info["ego_speed_mps"] == pytest.approx(10.0)
+    assert info["ego_longitudinal_acceleration_mps2"] == pytest.approx(0.0)
+    assert info["route_completion"] == pytest.approx(0.25)
+    assert info["route_progress_m"] == pytest.approx(12.5)
+    assert info["lane_offset_m"] == pytest.approx(0.0)
+    assert info["collision_kind"] is None
+    assert info["minimum_actual_ttc_s"] is None
+    assert info["minimum_actual_stopping_margin_m"] is None
+    assert info["pre_step_hard_rule_constraint"] is False
+    assert info["post_step_rule_violation_event"] is False
+    assert info["arrived"] is False
+    assert info["off_road"] is False

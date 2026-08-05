@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from mad_driving.methods import get_method_profile
 from mad_driving.training import ResumeMetadata, RunMetadata, sha256_file
 from mad_driving.training import metadata as metadata_module
 
@@ -21,6 +22,21 @@ def curriculum_summary(**overrides: object) -> dict[str, object]:
     }
     values.update(overrides)
     return values
+
+
+def profile_snapshot(method_id: str) -> metadata_module.MethodProfileSnapshot:
+    profile = get_method_profile(method_id)  # type: ignore[arg-type]
+    return metadata_module.MethodProfileSnapshot(
+        method_id=profile.method_id,
+        policy_kind=profile.policy_kind,
+        specialist_ids=profile.specialist_ids,
+        critic_enabled=profile.critic_enabled,
+        shield_mode=profile.default_shield_mode,
+    )
+
+
+def bound_config(**values: object) -> dict[str, object]:
+    return {"method": {"id": "proposed"}, **values}
 
 
 def test_sha256_file_returns_lowercase_digest_without_mutating_source(tmp_path: Path) -> None:
@@ -48,12 +64,13 @@ def test_metadata_models_are_frozen_and_json_serializable(tmp_path: Path) -> Non
         start_num_timesteps=12_500,
     )
     metadata = RunMetadata(
-        resolved_config={"training": {"seed": 43}},
+        resolved_config=bound_config(training={"seed": 43}),
+        method_profile=profile_snapshot("proposed"),
         resume=resume,
         curriculum_state=curriculum_summary(),
     )
 
-    assert metadata.research_contract_version == 6
+    assert metadata.research_contract_version == 7
     assert metadata.observation_schema_version == 1
     assert metadata.observation_shape == (24,)
     assert metadata.observation_dtype == "float32"
@@ -68,11 +85,16 @@ def test_metadata_models_are_frozen_and_json_serializable(tmp_path: Path) -> Non
 
 def test_contract_5_run_metadata_requires_non_null_curriculum_state() -> None:
     with pytest.raises(ValueError, match="curriculum_state"):
-        RunMetadata(resolved_config={"seed": 42}, curriculum_state=None)
+        RunMetadata(
+            resolved_config=bound_config(seed=42),
+            method_profile=profile_snapshot("proposed"),
+            curriculum_state=None,
+        )
 
 
 def test_metadata_recursively_detaches_and_freezes_caller_owned_values(tmp_path: Path) -> None:
     resolved_config: dict[str, Any] = {
+        "method": {"id": "proposed"},
         "training": {"seed": 42, "layers": [24, 16]},
         "enabled": True,
     }
@@ -89,6 +111,7 @@ def test_metadata_recursively_detaches_and_freezes_caller_owned_values(tmp_path:
     )
     metadata = RunMetadata(
         resolved_config=resolved_config,
+        method_profile=profile_snapshot("proposed"),
         curriculum_state=curriculum_summary(),
         resume=resume,
     )
@@ -111,7 +134,8 @@ def test_metadata_recursively_detaches_and_freezes_caller_owned_values(tmp_path:
 
 def test_frozen_json_objects_reject_attribute_and_storage_reassignment() -> None:
     metadata = RunMetadata(
-        resolved_config={"nested": {"value": 7}},
+        resolved_config=bound_config(nested={"value": 7}),
+        method_profile=profile_snapshot("proposed"),
         curriculum_state=curriculum_summary(),
     )
     root = metadata.resolved_config
@@ -124,13 +148,14 @@ def test_frozen_json_objects_reject_attribute_and_storage_reassignment() -> None
     with pytest.raises(AttributeError):
         nested._items = (("value", 99),)  # type: ignore[attr-defined]
 
-    assert root == {"nested": {"value": 7}}
+    assert root == {"method": {"id": "proposed"}, "nested": {"value": 7}}
 
 
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [
         ({"research_contract_version": True}, "research_contract_version"),
+        ({"research_contract_version": 6}, "research_contract_version"),
         ({"research_contract_version": 4}, "research_contract_version"),
         ({"research_contract_version": 3}, "research_contract_version"),
         ({"research_contract_version": 2}, "research_contract_version"),
@@ -156,7 +181,8 @@ def test_run_metadata_rejects_invalid_public_constructor_fields(
     message: str,
 ) -> None:
     values: dict[str, object] = {
-        "resolved_config": {"seed": 42},
+        "resolved_config": bound_config(seed=42),
+        "method_profile": profile_snapshot("proposed"),
         "curriculum_state": curriculum_summary(),
         **overrides,
     }
@@ -251,7 +277,8 @@ def test_metadata_write_failure_preserves_primary_error_and_cleans_sibling_temp(
 ) -> None:
     destination = tmp_path / "run_metadata.json"
     metadata = RunMetadata(
-        resolved_config={"seed": 42},
+        resolved_config=bound_config(seed=42),
+        method_profile=profile_snapshot("proposed"),
         curriculum_state=curriculum_summary(),
     )
     expected_error: type[Exception] = TypeError
@@ -282,7 +309,8 @@ def test_metadata_writer_rejects_non_finite_nested_value_without_destination(
 ) -> None:
     destination = tmp_path / "run_metadata.json"
     valid = RunMetadata(
-        resolved_config={"seed": 42},
+        resolved_config=bound_config(seed=42),
+        method_profile=profile_snapshot("proposed"),
         curriculum_state=curriculum_summary(),
     )
     object.__setattr__(valid, "resolved_config", {"nested": [float("nan")]})
@@ -294,23 +322,64 @@ def test_metadata_writer_rejects_non_finite_nested_value_without_destination(
     assert list(tmp_path.iterdir()) == []
 
 
-def test_contract_6_metadata_without_seed_artifacts_remains_loadable(tmp_path: Path) -> None:
+def test_metadata_records_the_complete_immutable_method_profile_snapshot() -> None:
+    metadata = RunMetadata(
+        resolved_config={"method": {"id": "proposed_no_shield"}},
+        method_profile=profile_snapshot("proposed_no_shield"),
+        curriculum_state=curriculum_summary(),
+    )
+
+    assert metadata.method_profile.method_id == "proposed_no_shield"
+    assert metadata.method_profile.policy_kind == "ppo"
+    assert metadata.method_profile.specialist_ids == ("nominal", "hazard", "rule")
+    assert metadata.method_profile.critic_enabled is True
+    assert metadata.method_profile.shield_mode == "off"
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        metadata.method_profile.shield_mode = "enforce"  # type: ignore[misc]
+
+
+def test_metadata_requires_resolved_config_method_id() -> None:
+    with pytest.raises(ValueError, match="resolved_config.method"):
+        RunMetadata(
+            resolved_config={"seed": 42},
+            method_profile=profile_snapshot("proposed"),
+            curriculum_state=curriculum_summary(),
+        )
+
+
+def test_metadata_requires_an_explicit_method_profile() -> None:
+    with pytest.raises(TypeError, match="method_profile"):
+        RunMetadata(
+            resolved_config=bound_config(seed=42),
+            curriculum_state=curriculum_summary(),
+        )
+
+
+def test_metadata_rejects_a_method_profile_inconsistent_with_resolved_config() -> None:
+    with pytest.raises(ValueError, match="method_profile"):
+        RunMetadata(
+            resolved_config={"method": {"id": "b1_nominal"}},
+            method_profile=profile_snapshot("proposed"),
+            curriculum_state=curriculum_summary(),
+        )
+
+
+def test_phase_6_metadata_is_rejected_when_loading(tmp_path: Path) -> None:
     destination = tmp_path / "run_metadata.json"
     metadata_module.write_run_metadata(
         RunMetadata(
-            resolved_config={"seed": 42},
+            resolved_config={"method": {"id": "proposed"}},
+            method_profile=profile_snapshot("proposed"),
             curriculum_state=curriculum_summary(),
         ),
         destination,
     )
     payload = json.loads(destination.read_text(encoding="utf-8"))
-    payload.pop("episode_seed_artifacts")
+    payload["research_contract_version"] = 6
     destination.write_text(json.dumps(payload), encoding="utf-8")
 
-    loaded = metadata_module._load_run_metadata(destination)
-
-    assert loaded.research_contract_version == 6
-    assert loaded.episode_seed_artifacts == ()
+    with pytest.raises(ValueError, match="research_contract_version"):
+        metadata_module._load_run_metadata(destination)
 
 
 def test_metadata_writes_curriculum_state_values_and_sha256(tmp_path: Path) -> None:
@@ -319,7 +388,8 @@ def test_metadata_writes_curriculum_state_values_and_sha256(tmp_path: Path) -> N
 
     metadata_module.write_run_metadata(
         RunMetadata(
-            resolved_config={"seed": 42},
+            resolved_config=bound_config(seed=42),
+            method_profile=profile_snapshot("proposed"),
             curriculum_state=summary,
         ),
         destination,
@@ -333,15 +403,16 @@ def test_run_metadata_json_rejects_duplicate_keys(tmp_path: Path) -> None:
     destination = tmp_path / "run_metadata.json"
     metadata_module.write_run_metadata(
         RunMetadata(
-            resolved_config={"seed": 42},
+            resolved_config=bound_config(seed=42),
+            method_profile=profile_snapshot("proposed"),
             curriculum_state=curriculum_summary(),
         ),
         destination,
     )
     text = destination.read_text(encoding="utf-8")
     text = text.replace(
-        '  "research_contract_version": 6,',
-        '  "research_contract_version": 6,\n  "research_contract_version": 6,',
+        '  "research_contract_version": 7,',
+        '  "research_contract_version": 7,\n  "research_contract_version": 7,',
         1,
     )
     destination.write_text(text, encoding="utf-8")
@@ -366,7 +437,8 @@ def test_metadata_rejects_malformed_curriculum_state_summary(
 ) -> None:
     with pytest.raises(ValueError, match="curriculum_state"):
         RunMetadata(
-            resolved_config={"seed": 42},
+            resolved_config=bound_config(seed=42),
+            method_profile=profile_snapshot("proposed"),
             curriculum_state=summary,
         )
 
@@ -405,7 +477,8 @@ def test_metadata_rejects_malformed_episode_seed_artifact_summary(
 ) -> None:
     with pytest.raises(ValueError, match="episode_seed_artifacts"):
         RunMetadata(
-            resolved_config={"seed": 42},
+            resolved_config=bound_config(seed=42),
+            method_profile=profile_snapshot("proposed"),
             curriculum_state=curriculum_summary(),
             episode_seed_artifacts=(summary,),
         )

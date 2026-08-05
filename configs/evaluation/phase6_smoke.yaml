@@ -1,0 +1,43 @@
+plan_kind: phase6_smoke
+evaluation_id: phase6_smoke
+is_formal: false
+result_label: SMOKE - NOT A RESEARCH RESULT
+app_config_path: configs/base.yaml
+method_overlays:
+  - configs/methods/b0_rule.yaml
+  - configs/methods/b1_nominal.yaml
+  - configs/methods/b2_multi_no_review.yaml
+  - configs/methods/proposed.yaml
+  - configs/methods/proposed_no_critic.yaml
+  - configs/methods/proposed_no_shield.yaml
+  - configs/methods/proposed_no_hazard.yaml
+max_episode_steps: 32
+episodes_per_case: 1
+test_seed_start: 20000
+ppo_run_bindings:
+  - method_id: b1_nominal
+    policy_seed: 42
+    training_run_dir: runs/phase6_smoke/b1_nominal_seed42
+    checkpoint_path: runs/phase6_smoke/b1_nominal_seed42/checkpoints/final_model.zip
+  - method_id: b2_multi_no_review
+    policy_seed: 42
+    training_run_dir: runs/phase6_smoke/b2_multi_no_review_seed42
+    checkpoint_path: runs/phase6_smoke/b2_multi_no_review_seed42/checkpoints/final_model.zip
+  - method_id: proposed
+    policy_seed: 42
+    training_run_dir: runs/phase6_smoke/proposed_seed42
+    checkpoint_path: runs/phase6_smoke/proposed_seed42/checkpoints/final_model.zip
+  - method_id: proposed_no_critic
+    policy_seed: 42
+    training_run_dir: runs/phase6_smoke/proposed_no_critic_seed42
+    checkpoint_path: runs/phase6_smoke/proposed_no_critic_seed42/checkpoints/final_model.zip
+  - method_id: proposed_no_shield
+    policy_seed: 42
+    training_run_dir: runs/phase6_smoke/proposed_no_shield_seed42
+    checkpoint_path: runs/phase6_smoke/proposed_no_shield_seed42/checkpoints/final_model.zip
+  - method_id: proposed_no_hazard
+    policy_seed: 42
+    training_run_dir: runs/phase6_smoke/proposed_no_hazard_seed42
+    checkpoint_path: runs/phase6_smoke/proposed_no_hazard_seed42/checkpoints/final_model.zip
+capture_episode_keys:
+  - proposed_system_42_level1_lead_brake_20000

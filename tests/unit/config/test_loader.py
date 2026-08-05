@@ -210,6 +210,36 @@ def test_fixed_action_rejects_non_finite_values(tmp_path: Path, bad_value: str) 
 
 
 @pytest.mark.parametrize(
+    "fixed_action",
+    ["[-1.01, 0.0]", "[1.01, 0.0]", "[0.0, -1.01]", "[0.0, 1.01]"],
+)
+def test_fixed_action_rejects_values_outside_metadrive_action_space(
+    tmp_path: Path, fixed_action: str
+) -> None:
+    text = VALID_CONFIG.replace("[0.0, 0.25]", fixed_action)
+
+    with pytest.raises(ValidationError, match="fixed_action"):
+        load_config(write_config(tmp_path, text))
+
+
+@pytest.mark.parametrize(
+    ("fixed_action", "expected"),
+    [
+        ("[-1.0, 0.0]", (-1.0, 0.0)),
+        ("[1.0, 0.0]", (1.0, 0.0)),
+        ("[0.0, -1.0]", (0.0, -1.0)),
+        ("[0.0, 1.0]", (0.0, 1.0)),
+    ],
+)
+def test_fixed_action_accepts_metadrive_action_space_boundaries(
+    tmp_path: Path, fixed_action: str, expected: tuple[float, float]
+) -> None:
+    text = VALID_CONFIG.replace("[0.0, 0.25]", fixed_action)
+
+    assert load_config(write_config(tmp_path, text)).fixed_action == expected
+
+
+@pytest.mark.parametrize(
     ("field", "bad_value"),
     [("num_scenarios", 0), ("traffic_density", -0.1), ("traffic_density", 1.1), ("horizon", 0)],
 )
@@ -251,6 +281,21 @@ def test_scenario_worst_case_duration_accepts_the_exact_configured_capacity() ->
     config = AppConfig.model_validate(payload)
 
     assert config.metadrive.horizon == 120
+
+
+def test_scenario_worst_case_duration_rejects_segment_rounding_beyond_horizon() -> None:
+    payload = load_config("configs/base.yaml").model_dump(mode="python")
+    payload["metadrive"]["horizon"] = 120
+    payload["scenarios"]["cut_in"].update(
+        {
+            "trigger_s": {"minimum": 3.95, "maximum": 3.95},
+            "merge_duration_s": {"minimum": 3.95, "maximum": 3.95},
+            "survival_s": 4.1,
+        }
+    )
+
+    with pytest.raises(ValidationError, match="cut_in"):
+        AppConfig.model_validate(payload)
 
 
 @pytest.mark.parametrize(

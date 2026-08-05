@@ -42,7 +42,7 @@ class TinyDeterministicEnv(gym.Env[NDArray[np.float32], int]):
     def set_difficulty_level(self, level: int) -> None:
         self.pending_difficulty_level = level
 
-    def set_validation_scenario_schedule(self, scenario_ids: tuple[str, ...]) -> None:
+    def set_evaluation_scenario_schedule(self, scenario_ids: tuple[str, ...]) -> None:
         self.validation_schedule = scenario_ids
         self.validation_schedule_index = 0
 

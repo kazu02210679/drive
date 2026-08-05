@@ -16,10 +16,10 @@ from typing import Any, Final, cast
 import numpy as np
 import yaml
 from gymnasium import spaces
-from stable_baselines3.common.utils import ConstantSchedule, FloatSchedule
 
 from mad_driving.config.models import AppConfig
 from mad_driving.config.parsing import load_unique_yaml
+from mad_driving.methods import MethodProfileSnapshot
 from mad_driving.training.curriculum import (
     CHECKPOINT_CURRICULUM_SIDECAR_SCHEMA_VERSION,
     CURRICULUM_STATE_FILENAME,
@@ -31,7 +31,7 @@ from mad_driving.training.curriculum import (
     read_stable_artifact_bytes,
 )
 
-RESEARCH_CONTRACT_VERSION: Final = 6
+RESEARCH_CONTRACT_VERSION: Final = 7
 OBSERVATION_SCHEMA_VERSION: Final = 1
 OBSERVATION_SHAPE: Final = (24,)
 OBSERVATION_DTYPE: Final = "float32"
@@ -216,6 +216,7 @@ class RunMetadata:
 
     resolved_config: Mapping[str, Any]
     curriculum_state: Mapping[str, Any]
+    method_profile: MethodProfileSnapshot
     resume: ResumeMetadata | None = None
     research_contract_version: int = RESEARCH_CONTRACT_VERSION
     observation_schema_version: int = OBSERVATION_SCHEMA_VERSION
@@ -288,6 +289,11 @@ class RunMetadata:
             "resolved_config",
             _freeze_json(self.resolved_config, "resolved_config"),
         )
+        if not isinstance(self.method_profile, MethodProfileSnapshot):
+            raise ValueError("method_profile must be a MethodProfileSnapshot")
+        expected_profile = _method_profile_from_resolved_config(self.resolved_config)
+        if self.method_profile != expected_profile:
+            raise ValueError("method_profile must match resolved_config.method.id")
         if self.resume is not None and not isinstance(self.resume, ResumeMetadata):
             raise ValueError("resume must be ResumeMetadata or null")
         object.__setattr__(
@@ -305,6 +311,23 @@ class RunMetadata:
             "episode_seed_artifacts",
             _validated_episode_seed_artifacts(self.episode_seed_artifacts),
         )
+
+
+def _method_profile_from_resolved_config(
+    resolved_config: Mapping[str, Any],
+) -> MethodProfileSnapshot:
+    if "method" not in resolved_config:
+        raise ValueError("resolved_config.method.id is required")
+    method = resolved_config["method"]
+    if not isinstance(method, Mapping) or set(method) != {"id"}:
+        raise ValueError("resolved_config.method is malformed")
+    method_id = method["id"]
+    if not isinstance(method_id, str):
+        raise ValueError("resolved_config.method.id must be a string")
+    try:
+        return MethodProfileSnapshot.from_method_id(method_id)
+    except ValueError as error:
+        raise ValueError("resolved_config.method.id is malformed") from error
 
 
 def _validated_curriculum_state_artifact(
@@ -665,6 +688,7 @@ def _parse_run_metadata(payload: object) -> RunMetadata:
         "action_schema_version",
         "action_count",
         "action_order",
+        "method_profile",
         "resolved_config",
         "resume",
         "curriculum_state",
@@ -683,6 +707,20 @@ def _parse_run_metadata(payload: object) -> RunMetadata:
         isinstance(item, str) for item in action_order_value
     ):
         raise ValueError("Resume metadata action_order is malformed")
+    method_profile_value = _require_dict(values["method_profile"], "method_profile")
+    if set(method_profile_value) != {
+        "method_id",
+        "policy_kind",
+        "specialist_ids",
+        "critic_enabled",
+        "shield_mode",
+    }:
+        raise ValueError("Resume metadata method_profile fields are malformed")
+    specialist_ids_value = method_profile_value["specialist_ids"]
+    if not isinstance(specialist_ids_value, list) or not all(
+        isinstance(agent_id, str) for agent_id in specialist_ids_value
+    ):
+        raise ValueError("Resume metadata method_profile.specialist_ids is malformed")
     return RunMetadata(
         resolved_config=_require_dict(values["resolved_config"], "resolved_config"),
         resume=_parse_resume_metadata(values["resume"]),
@@ -699,6 +737,19 @@ def _parse_run_metadata(payload: object) -> RunMetadata:
         ),
         action_count=_require_int(values["action_count"], "action_count"),
         action_order=tuple(action_order_value),
+        method_profile=MethodProfileSnapshot(
+            method_id=_require_string(
+                method_profile_value["method_id"], "method_profile.method_id"
+            ),
+            policy_kind=_require_string(
+                method_profile_value["policy_kind"], "method_profile.policy_kind"
+            ),
+            specialist_ids=tuple(specialist_ids_value),
+            critic_enabled=method_profile_value["critic_enabled"],
+            shield_mode=_require_string(
+                method_profile_value["shield_mode"], "method_profile.shield_mode"
+            ),
+        ),
         curriculum_state=values["curriculum_state"],
         checkpoint_curriculum_artifacts=values["checkpoint_curriculum_artifacts"],
         episode_seed_artifacts=values.get("episode_seed_artifacts", ()),
@@ -888,6 +939,8 @@ def _require_constant_schedule(
     schedule: object,
     expected: float,
 ) -> None:
+    from stable_baselines3.common.utils import ConstantSchedule, FloatSchedule
+
     canonical = FloatSchedule(expected)
     if type(schedule) is not type(canonical) or vars(schedule).keys() != vars(canonical).keys():
         raise ValueError(
@@ -927,6 +980,7 @@ def write_run_metadata(metadata: RunMetadata, destination: Path) -> None:
         }
     validated = RunMetadata(
         resolved_config=metadata.resolved_config,
+        method_profile=metadata.method_profile,
         resume=metadata.resume,
         research_contract_version=metadata.research_contract_version,
         observation_schema_version=metadata.observation_schema_version,
@@ -949,6 +1003,13 @@ def write_run_metadata(metadata: RunMetadata, destination: Path) -> None:
         "action_schema_version": validated.action_schema_version,
         "action_count": validated.action_count,
         "action_order": list(validated.action_order),
+        "method_profile": {
+            "method_id": validated.method_profile.method_id,
+            "policy_kind": validated.method_profile.policy_kind,
+            "specialist_ids": list(validated.method_profile.specialist_ids),
+            "critic_enabled": validated.method_profile.critic_enabled,
+            "shield_mode": validated.method_profile.shield_mode,
+        },
         "curriculum_state": _thaw_json(validated.curriculum_state, "curriculum_state"),
         "checkpoint_curriculum_artifacts": _thaw_json(
             validated.checkpoint_curriculum_artifacts,
@@ -995,6 +1056,9 @@ def validate_resume_contract(model: object, config: AppConfig, metadata: RunMeta
     """Validate a loaded checkpoint against the current research contract."""
 
     _validate_metadata_contract(metadata)
+    expected_method_profile = MethodProfileSnapshot.from_method_id(config.method.id)
+    if metadata.method_profile != expected_method_profile:
+        raise ValueError("Resume method profile mismatch")
     policy_class = getattr(model, "policy_class", None)
     expected_policy_class = {"MlpPolicy": "ActorCriticPolicy"}[config.training.policy]
     if getattr(policy_class, "__name__", None) != expected_policy_class:
@@ -1048,6 +1112,7 @@ def validate_resume_contract(model: object, config: AppConfig, metadata: RunMeta
 
 
 __all__ = [
+    "MethodProfileSnapshot",
     "ResumeMetadata",
     "RunMetadata",
     "curriculum_state_artifact",

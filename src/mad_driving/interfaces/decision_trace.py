@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import NoReturn, Self
 from unicodedata import category
 
 from mad_driving.interfaces._validation import (
+    canonical_string_tuple,
     require_action,
     require_finite,
     require_non_negative,
@@ -61,6 +62,9 @@ class DecisionTrace:
     claims: tuple[RiskClaim, ...]
     review: CriticReview
     reward_components: dict[str, float]
+    expected_agent_ids: tuple[str, ...]
+    analysis_latency_ms: float = field(compare=False)
+    shield_latency_ms: float = field(compare=False)
     control_fail_safe: bool = False
     control_fail_safe_reason: str | None = None
     failed_agent_ids: tuple[str, ...] = ()
@@ -97,14 +101,19 @@ class DecisionTrace:
         elif self.control_fail_safe_reason is not None:
             raise ValueError("control_fail_safe_reason must be None when fail-safe is inactive")
         require_non_negative("target_speed_mps", self.target_speed_mps)
+        require_non_negative("analysis_latency_ms", self.analysis_latency_ms)
+        require_non_negative("shield_latency_ms", self.shield_latency_ms)
         shield_reasons = tuple(self.shield_reasons)
         claims = tuple(self.claims)
+        expected_agent_ids = canonical_string_tuple("expected_agent_ids", self.expected_agent_ids)
         failed_agent_ids = tuple(self.failed_agent_ids)
         errors = tuple(self.errors)
         if not all(isinstance(value, str) for value in shield_reasons):
             raise ValueError("shield_reasons must contain only strings")
         if not all(isinstance(value, RiskClaim) for value in claims):
             raise ValueError("claims must contain only RiskClaim values")
+        if not all(expected_agent_ids) or len(expected_agent_ids) != len(set(expected_agent_ids)):
+            raise ValueError("expected_agent_ids must contain unique non-empty strings")
         if not all(isinstance(value, str) and value for value in failed_agent_ids):
             raise ValueError("failed_agent_ids must contain non-empty strings")
         if len(failed_agent_ids) != len(set(failed_agent_ids)):
@@ -157,6 +166,7 @@ class DecisionTrace:
             raise ValueError("scenario trace metadata must be complete with episode metadata")
         object.__setattr__(self, "shield_reasons", shield_reasons)
         object.__setattr__(self, "claims", claims)
+        object.__setattr__(self, "expected_agent_ids", expected_agent_ids)
         object.__setattr__(self, "failed_agent_ids", failed_agent_ids)
         object.__setattr__(self, "errors", errors)
         object.__setattr__(self, "reward_components", components)

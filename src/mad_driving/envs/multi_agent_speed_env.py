@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
 from math import isclose, isfinite
-from numbers import Integral
-from typing import Any, Protocol, cast
+from numbers import Integral, Real
+from typing import Any, Literal, Protocol, cast
 
 import gymnasium as gym
 import numpy as np
@@ -38,6 +39,7 @@ from mad_driving.interfaces import (
     SceneObservation,
     ShieldResult,
 )
+from mad_driving.methods import get_method_profile
 from mad_driving.safety import SafetyShield
 from mad_driving.scenarios import (
     EnvironmentRole,
@@ -98,6 +100,8 @@ class DrivingEnvironment(Protocol):
     def scenario_visible_actor_ids(self) -> frozenset[str]: ...
 
     def scenario_ego_collided_with(self, actor_id: str) -> bool: ...
+
+    def scenario_capture_rgb(self) -> NDArray[np.uint8]: ...
 
 
 class EnvironmentFactory(Protocol):
@@ -227,9 +231,9 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
         worker_index: int,
         scenario_runtime_factory: ScenarioRuntimeFactory | None = None,
         env_factory: ControlEnvironmentFactory = _create_control_environment,
-        suite_factory: SuiteFactory = AgentSuite.from_config,
+        suite_factory: SuiteFactory | None = None,
         shield_factory: ShieldFactory = SafetyShield,
-        builder_factory: FrameBuilderFactory = SceneSnapshotBuilder,
+        builder_factory: FrameBuilderFactory | None = None,
         reward_factory: RewardFactory = RewardCalculator,
         observation_factory: ObservationFactory = ObservationBuilder,
     ) -> None:
@@ -248,6 +252,10 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
             dtype=np.float32,
         )
         self._config = config
+        self._method_profile = get_method_profile(config.method.id)
+        self._shield_config = config.shield.model_copy(
+            update={"mode": self._method_profile.default_shield_mode}
+        )
         self._role = role
         self._worker_index = worker_index
         if scenario_runtime_factory is None:
@@ -258,7 +266,19 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
         self._env_factory = env_factory
         self._suite_factory = suite_factory
         self._shield_factory = shield_factory
-        self._builder_factory = builder_factory
+        if builder_factory is None:
+            reaction_delay_s = config.agents.hazard.reaction_delay_s
+            safe_deceleration_mps2 = abs(config.agents.hazard.ego_max_safe_deceleration_mps2)
+
+            def default_builder_factory() -> FrameBuilder:
+                return SceneSnapshotBuilder(
+                    reaction_delay_s=reaction_delay_s,
+                    safe_deceleration_mps2=safe_deceleration_mps2,
+                )
+
+            self._builder_factory = default_builder_factory
+        else:
+            self._builder_factory = builder_factory
         self._reward_factory = reward_factory
         self._observation_factory = observation_factory
         self._environment: DrivingEnvironment | None = None
@@ -271,9 +291,11 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
         self._scenario_state: ScenarioState | None = None
         self._frame: SceneFrame | None = None
         self._analysis: AgentAnalysisResult | None = None
+        self._analysis_latency_ms: float | None = None
         self._episode_seeds: EpisodeSeeds | None = None
         self._actual_scenario_index: int | None = None
         self._unnecessary_stop_duration_s = 0.0
+        self._evaluation_scenario_schedule_active = False
         self._episode_active = False
         self._gym_rng_initialized = False
         self._closed = False
@@ -287,15 +309,60 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
             raise RuntimeError("scenario runtime factory does not support difficulty levels")
         setter(level)
 
-    def set_validation_scenario_schedule(self, scenario_ids: tuple[str, ...]) -> None:
-        """Install an explicit reset schedule on the validation environment only."""
+    def set_evaluation_scenario_schedule(self, scenario_ids: tuple[str, ...]) -> None:
+        """Install an explicit finite reset schedule for evaluation roles."""
 
-        if self._role != "validation":
-            raise ValueError("scenario schedules may be installed only on validation environments")
+        if self._role not in {"validation", "test"}:
+            raise ValueError(
+                "scenario schedules may be installed only on validation and test environments"
+            )
         setter = getattr(self._scenario_runtime_factory, "set_scenario_schedule", None)
         if not callable(setter):
             raise RuntimeError("scenario runtime factory does not support scenario schedules")
         setter(scenario_ids)
+        self._evaluation_scenario_schedule_active = True
+
+    def set_evaluation_shield_mode(self, mode: Literal["off", "monitor", "enforce"]) -> None:
+        """Install the evaluation-only Shield mode used on the next reset."""
+
+        if self._role not in {"validation", "test"}:
+            raise ValueError(
+                "Shield modes may be installed only on validation and test environments"
+            )
+        self._require_resettable()
+        if self._episode_active:
+            raise RuntimeError("Shield mode cannot change during an active episode")
+        if mode not in {"off", "monitor", "enforce"}:
+            raise ValueError("Shield mode must be off, monitor, or enforce")
+        self._shield_config = self._shield_config.model_copy(update={"mode": mode})
+
+    def current_scene_observation_for_evaluation(self) -> SceneObservation:
+        """Return the active immutable Agent-visible scene and no privileged state."""
+
+        if self._role not in {"validation", "test"}:
+            raise ValueError("scene evaluation reads require a validation or test environment")
+        self._require_active_episode()
+        return cast(SceneFrame, self._frame).observation
+
+    def capture_rgb_frame_for_evaluation(self) -> NDArray[np.uint8]:
+        """Return one copied RGB simulator frame for an initialized evaluation episode."""
+
+        if self._role not in {"validation", "test"}:
+            raise ValueError("RGB evaluation capture requires a validation or test environment")
+        environment = self._environment
+        if environment is None or self._frame is None:
+            raise RuntimeError("reset() must be called before RGB evaluation capture")
+        frame = environment.scenario_capture_rgb()
+        if (
+            not isinstance(frame, np.ndarray)
+            or frame.dtype != np.dtype(np.uint8)
+            or frame.ndim != 3
+            or frame.shape[0] <= 0
+            or frame.shape[1] <= 0
+            or frame.shape[2] != 3
+        ):
+            raise ValueError("simulator RGB frame must be a non-empty HWC uint8 array")
+        return np.ascontiguousarray(frame).copy()
 
     def reset(
         self,
@@ -316,8 +383,8 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
                 environment = self._new_environment()
             self._environment = environment
 
-            suite = self._suite_factory(self._config.agents)
-            shield = self._shield_factory(self._config.shield)
+            suite = self._new_suite()
+            shield = self._shield_factory(self._shield_config)
             builder = self._builder_factory()
             reward = self._reward_factory(self._config.reward)
             reward.reset()
@@ -355,7 +422,7 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
                 previous_executed_action=int(DrivingAction.KEEP),
                 previous_shield_intervention=False,
             )
-            analysis = self._analyze(suite, frame.observation)
+            analysis, analysis_latency_ms = self._analyze(suite, frame.observation)
             observation = self._build_observation(
                 observation_builder,
                 frame.observation,
@@ -377,10 +444,19 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
         self._scenario_state = scenario_state
         self._frame = frame
         self._analysis = analysis
+        self._analysis_latency_ms = analysis_latency_ms
         self._episode_seeds = seeds
         self._actual_scenario_index = actual_scenario_index
         self._episode_active = True
         return observation, info
+
+    def _new_suite(self) -> AnalysisSuite:
+        if self._suite_factory is not None:
+            return self._suite_factory(self._config.agents)
+        return AgentSuite.from_config(
+            self._config.agents,
+            method_id=self._method_profile.method_id,
+        )
 
     def step(
         self,
@@ -400,17 +476,26 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
         scenario_state = cast(ScenarioState, self._scenario_state)
         frame = cast(SceneFrame, self._frame)
         analysis = cast(AgentAnalysisResult, self._analysis)
+        analysis_latency_ms = cast(float, self._analysis_latency_ms)
         seeds = cast(EpisodeSeeds, self._episode_seeds)
         actual_scenario_index = cast(int, self._actual_scenario_index)
 
         try:
             runtime_decision_interval_s = self._validated_decision_interval(environment)
+            shield_observation = frame.observation
+            shield_claims = analysis.claims
+            expected_agent_ids = analysis.expected_agent_ids
+            failed_agent_ids = analysis.failed_agent_ids
+            shield_start_ns = time.perf_counter_ns()
             shield_result = shield.filter(
                 requested,
-                frame.observation,
-                analysis.claims,
-                expected_agent_ids=analysis.expected_agent_ids,
-                failed_agent_ids=analysis.failed_agent_ids,
+                shield_observation,
+                shield_claims,
+                expected_agent_ids=expected_agent_ids,
+                failed_agent_ids=failed_agent_ids,
+            )
+            shield_latency_ms = self._latency_ms(
+                "shield_latency_ms", shield_start_ns, time.perf_counter_ns()
             )
             executed = shield_result.executed_action
             target = target_speed_mps(
@@ -468,7 +553,7 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
                 previous_executed_action=int(executed),
                 previous_shield_intervention=shield_result.intervened,
             )
-            next_analysis = self._analyze(suite, next_frame.observation)
+            next_analysis, next_analysis_latency_ms = self._analyze(suite, next_frame.observation)
             if self._is_unnecessary_stop(next_frame, executed, shield_result.intervened):
                 self._unnecessary_stop_duration_s += runtime_decision_interval_s
             reward_result = reward_calculator.calculate(
@@ -512,6 +597,9 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
                 claims=analysis.claims,
                 review=analysis.review,
                 reward_components=reward_result.components,
+                expected_agent_ids=analysis.expected_agent_ids,
+                analysis_latency_ms=analysis_latency_ms,
+                shield_latency_ms=shield_latency_ms,
                 control_fail_safe=control_fail_safe,
                 control_fail_safe_reason=control_fail_safe_reason,
                 failed_agent_ids=analysis.failed_agent_ids,
@@ -541,7 +629,30 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
                     "analysis_errors": tuple(analysis.errors),
                     "reward_components": dict(reward_result.components),
                     "collision_occurred": privileged.collision_occurred,
+                    "collision_kind": privileged.collision_kind,
+                    "simulation_time_s": next_frame.observation.sim_time_s,
+                    "decision_interval_s": runtime_decision_interval_s,
+                    "ego_speed_mps": next_frame.observation.ego.speed_mps,
+                    "ego_longitudinal_acceleration_mps2": (
+                        next_frame.observation.ego.acceleration_mps2
+                    ),
+                    "route_completion": next_frame.observation.ego.route_progress,
+                    "route_progress_m": self._route_progress_m(
+                        environment, next_frame.observation.ego.route_progress
+                    ),
+                    "lane_offset_m": next_frame.observation.ego.lane_offset_m,
                     "route_progress": next_frame.observation.ego.route_progress,
+                    "minimum_actual_ttc_s": privileged.minimum_actual_ttc_s,
+                    "minimum_actual_stopping_margin_m": (
+                        privileged.minimum_actual_stopping_margin_m
+                    ),
+                    "pre_step_hard_rule_constraint": frame.privileged.hard_rule_constraint,
+                    "post_step_rule_violation_event": (
+                        frame.privileged.hard_rule_constraint
+                        and int(executed) < int(DrivingAction.STOP)
+                    ),
+                    "arrived": privileged.arrived,
+                    "off_road": privileged.off_road,
                     "unnecessary_stop_duration_s": self._unnecessary_stop_duration_s,
                     "control_fail_safe": control_fail_safe,
                     "control_fail_safe_reason": control_fail_safe_reason,
@@ -555,6 +666,7 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
 
         self._frame = next_frame
         self._analysis = next_analysis
+        self._analysis_latency_ms = next_analysis_latency_ms
         self._scenario_state = scenario_state
         self._episode_active = not (terminated or truncated)
         return observation, reward_total, terminated, truncated, info
@@ -619,6 +731,7 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
         self._scenario_state = None
         self._frame = None
         self._analysis = None
+        self._analysis_latency_ms = None
         self._episode_seeds = None
         self._actual_scenario_index = None
         self._unnecessary_stop_duration_s = 0.0
@@ -722,6 +835,25 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
         raise ValueError("scenario parameters must be JSON-safe")
 
     @staticmethod
+    def _route_progress_m(environment: DrivingEnvironment, route_completion: float) -> float:
+        vehicle = environment.agent if hasattr(environment, "agent") else environment.vehicle
+        navigation = getattr(vehicle, "navigation", None)
+        value = getattr(navigation, "travelled_length", None)
+        if value is None:
+            trajectory = getattr(navigation, "reference_trajectory", None)
+            trajectory_length = getattr(trajectory, "length", None)
+            if isinstance(trajectory_length, Real) and not isinstance(trajectory_length, bool):
+                value = route_completion * float(trajectory_length)
+            else:
+                value = route_completion
+        if isinstance(value, bool) or not isinstance(value, Real):
+            raise TypeError("route progress must be a real number")
+        progress = float(value)
+        if not isfinite(progress) or progress < 0.0:
+            raise ValueError("route progress must be finite and non-negative")
+        return progress
+
+    @staticmethod
     def _copy_info(raw_info: Mapping[str, object]) -> dict[str, object]:
         if not isinstance(raw_info, Mapping):
             raise TypeError("simulator info must be a mapping")
@@ -734,7 +866,11 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
     ) -> None:
         if state.seeds != expected_seeds:
             raise RuntimeError("ScenarioState seeds mismatch for current episode")
-        if self._config.scenario_id != "phase5" and state.scenario_id != self._config.scenario_id:
+        if (
+            self._config.scenario_id != "phase5"
+            and not self._evaluation_scenario_schedule_active
+            and state.scenario_id != self._config.scenario_id
+        ):
             raise RuntimeError(
                 "ScenarioState scenario_id mismatch: "
                 f"expected {self._config.scenario_id!r}, returned {state.scenario_id!r}"
@@ -802,7 +938,11 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
                 "observation context scenario_id mismatch: "
                 f"state {state.scenario_id!r}, returned {context.scenario_id!r}"
             )
-        if self._config.scenario_id != "phase5" and context.scenario_id != self._config.scenario_id:
+        if (
+            self._config.scenario_id != "phase5"
+            and not self._evaluation_scenario_schedule_active
+            and context.scenario_id != self._config.scenario_id
+        ):
             raise RuntimeError("observation context scenario_id does not match configured scenario")
         return context
 
@@ -817,15 +957,25 @@ class MultiAgentSpeedEnv(gym.Env[NDArray[np.float32], int]):
             raise TypeError("frame builder must return SceneFrame")
         return frame
 
-    @staticmethod
+    @classmethod
     def _analyze(
+        cls,
         suite: AnalysisSuite,
         observation: SceneObservation,
-    ) -> AgentAnalysisResult:
+    ) -> tuple[AgentAnalysisResult, float]:
+        start_ns = time.perf_counter_ns()
         analysis = analyze_safely(suite, observation)
+        latency_ms = cls._latency_ms("analysis_latency_ms", start_ns, time.perf_counter_ns())
         if not isinstance(analysis, AgentAnalysisResult):
             raise TypeError("analyze_safely must return AgentAnalysisResult")
-        return analysis
+        return analysis, latency_ms
+
+    @staticmethod
+    def _latency_ms(name: str, start_ns: int, end_ns: int) -> float:
+        latency_ms = (end_ns - start_ns) / 1_000_000.0
+        if not isfinite(latency_ms) or latency_ms < 0.0:
+            raise ValueError(f"{name} must be finite and non-negative")
+        return latency_ms
 
     def _build_observation(
         self,

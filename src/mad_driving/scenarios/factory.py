@@ -11,9 +11,12 @@ class ScenarioRuntimeFactory:
     def __init__(self, config: AppConfig) -> None:
         self._config = config
         self._phase5_runtime = ScenarioManagerRuntime(config.scenarios)
+        self._evaluation_runtime_pending = False
 
     def __call__(self, scenario_id: str) -> ScenarioRuntime:
-        if scenario_id == "phase5":
+        use_phase5_runtime = scenario_id == "phase5" or self._evaluation_runtime_pending
+        self._evaluation_runtime_pending = False
+        if use_phase5_runtime:
             return self._phase5_runtime
         return NoOpScenarioRuntime(scenario_id)
 
@@ -23,9 +26,10 @@ class ScenarioRuntimeFactory:
         self._phase5_runtime.set_difficulty_level(level)
 
     def set_scenario_schedule(self, scenario_ids: tuple[str, ...]) -> None:
-        """Replace the finite Phase 5 reset schedule used by validation."""
+        """Replace the finite Phase 5 reset schedule used by evaluation."""
 
         self._phase5_runtime.set_scenario_schedule(scenario_ids)
+        self._evaluation_runtime_pending = True
 
 
 def build_scenario_runtime_factory(config: AppConfig) -> ScenarioRuntimeFactory:

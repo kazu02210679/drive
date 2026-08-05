@@ -291,7 +291,9 @@ class CurriculumEvalCallback(SeededEvalCallback):
         self._terminal_records = []
         previous_state = self.controller.state
         scenarios = _VALIDATION_SCENARIOS_BY_LEVEL[previous_state.level]
-        schedule = tuple(scenarios[index % len(scenarios)] for index in range(self.n_eval_episodes))
+        schedule = tuple(
+            scenarios[index % len(scenarios)] for index in range(self.n_eval_episodes + 1)
+        )
         self.eval_env.env_method("set_validation_scenario_schedule", schedule)
         continue_training = self._run_scheduled_evaluation()
         if len(self._terminal_records) != self.n_eval_episodes:

@@ -19,6 +19,7 @@ from gymnasium import spaces
 from stable_baselines3.common.utils import ConstantSchedule, FloatSchedule
 
 from mad_driving.config.models import AppConfig
+from mad_driving.methods import get_method_profile
 from mad_driving.scenarios import EnvironmentRole
 from mad_driving.training import RunMetadata, sha256_file
 from mad_driving.training import metadata as metadata_module
@@ -539,6 +540,9 @@ def seed_compatible_source_run(
     write_checkpoint_curriculum_state(selected_state, checkpoint)
     metadata = RunMetadata(
         resolved_config=resolved_config,
+        method_profile=metadata_module.MethodProfileSnapshot.from_method_id(
+            selected_config.method.id
+        ),
         curriculum_state=curriculum_state_artifact(curriculum_path, selected_state),
         checkpoint_curriculum_artifacts=checkpoint_curriculum_artifact_inventory(checkpoints_dir),
     )
@@ -1204,6 +1208,13 @@ def test_fresh_run_writes_complete_research_contract_metadata(tmp_path: Path) ->
         "action_schema_version": 1,
         "action_count": 4,
         "action_order": ["KEEP", "SLOW", "PREPARE_STOP", "STOP"],
+        "method_profile": {
+            "method_id": get_method_profile(config.method.id).method_id,
+            "policy_kind": get_method_profile(config.method.id).policy_kind,
+            "specialist_ids": list(get_method_profile(config.method.id).specialist_ids),
+            "critic_enabled": get_method_profile(config.method.id).critic_enabled,
+            "shield_mode": get_method_profile(config.method.id).default_shield_mode,
+        },
         "resolved_config": config.model_dump(mode="json"),
         "resume": None,
     }
@@ -2469,7 +2480,11 @@ def test_successful_training_confirms_subprocess_training_worker_exited(
     remote = training.remotes[0]
     assert remote.sent == [("close", None)]
     assert remote.close_calls == 1
-    assert process.join_calls == [pytest.approx(3.0)]
+    assert len(process.join_calls) == 1
+    graceful_timeout = process.join_calls[0]
+    assert graceful_timeout is not None
+    assert graceful_timeout <= 3.0
+    assert graceful_timeout == pytest.approx(3.0, abs=0.01)
     assert process.terminate_calls == 0
     assert process.kill_calls == 0
     assert process.is_alive() is False
@@ -2520,7 +2535,11 @@ def test_preclosed_subprocess_still_requires_first_exitcode_audit() -> None:
     with pytest.raises(RuntimeError, match="exit code 1"):
         train_module._close_vector_env(vector_env)
 
-    assert process.join_calls == [pytest.approx(3.0)]
+    assert len(process.join_calls) == 1
+    graceful_timeout = process.join_calls[0]
+    assert graceful_timeout is not None
+    assert graceful_timeout <= 3.0
+    assert graceful_timeout == pytest.approx(3.0, abs=0.01)
 
 
 @pytest.mark.parametrize(

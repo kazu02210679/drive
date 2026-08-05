@@ -194,6 +194,22 @@ def test_privileged_oracle_ttc_uses_all_actor_truth_independent_of_visibility() 
     assert frame.privileged.minimum_actual_ttc_s == pytest.approx(1.5)
 
 
+def test_privileged_stopping_margin_uses_hidden_actor_truth_and_fixed_oracle_constants() -> None:
+    frame = SceneSnapshotBuilder(reaction_delay_s=0.5, safe_deceleration_mps2=6.0).build(
+        make_env(),
+        step_index=2,
+        seeds=EpisodeSeeds(42, 7, 9, 11),
+        context=ScenarioObservationContext(scenario_id="unit", visible_actor_ids=frozenset()),
+        scenario_result=ScenarioStepResult(success=False, failure=False),
+        raw_info={},
+        previous_executed_action=1,
+        previous_shield_intervention=False,
+    )
+
+    assert frame.observation.visible_actors == ()
+    assert frame.privileged.minimum_actual_stopping_margin_m == pytest.approx(5.0 / 3.0)
+
+
 def test_metadrive_random_seed_stabilizes_regenerated_actor_ids() -> None:
     lane = FakeLane(("A", "B", 0))
     first = make_env()

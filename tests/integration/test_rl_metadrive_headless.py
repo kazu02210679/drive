@@ -98,7 +98,7 @@ def assert_phase5_training_artifacts(
 ) -> None:
     assert read_curriculum_state(run_dir / "curriculum_state.yaml") == expected_state
     metadata = json.loads((run_dir / "run_metadata.json").read_text(encoding="utf-8"))
-    assert metadata["research_contract_version"] == RESEARCH_CONTRACT_VERSION == 6
+    assert metadata["research_contract_version"] == RESEARCH_CONTRACT_VERSION == 7
     assert metadata["observation_shape"] == [24]
     assert metadata["action_order"] == ["KEEP", "SLOW", "PREPARE_STOP", "STOP"]
     assert metadata["curriculum_state"]["level"] == expected_state.level

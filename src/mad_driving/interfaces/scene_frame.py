@@ -9,6 +9,8 @@ from mad_driving.interfaces._validation import (
     require_finite,
     require_finite_values,
     require_non_empty,
+    require_non_negative,
+    require_positive,
 )
 from mad_driving.interfaces.actor_state import ActorState
 
@@ -24,6 +26,28 @@ CollisionKind = Literal[
     "sidewalk",
     "building",
 ]
+
+
+def stopping_margin_m(
+    *,
+    ego_speed_mps: float,
+    minimum_actual_ttc_s: float | None,
+    reaction_delay_s: float,
+    safe_deceleration_mps2: float,
+) -> float | None:
+    """Return the fixed-oracle braking margin, or ``None`` without a TTC."""
+
+    require_non_negative("ego_speed_mps", ego_speed_mps)
+    require_non_negative("reaction_delay_s", reaction_delay_s)
+    require_positive("safe_deceleration_mps2", safe_deceleration_mps2)
+    if minimum_actual_ttc_s is None:
+        return None
+    require_non_negative("minimum_actual_ttc_s", minimum_actual_ttc_s)
+    available_distance_m = ego_speed_mps * minimum_actual_ttc_s
+    required_distance_m = ego_speed_mps * reaction_delay_s + ego_speed_mps**2 / (
+        2.0 * safe_deceleration_mps2
+    )
+    return available_distance_m - required_distance_m
 
 
 @dataclass(frozen=True)
@@ -68,6 +92,7 @@ class PrivilegedWorldState:
     scenario_success: bool
     scenario_failure: bool
     minimum_actual_ttc_s: float | None
+    minimum_actual_stopping_margin_m: float | None
     hard_rule_constraint: bool
 
     def __post_init__(self) -> None:
@@ -87,6 +112,10 @@ class PrivilegedWorldState:
             require_finite("minimum_actual_ttc_s", self.minimum_actual_ttc_s)
             if self.minimum_actual_ttc_s < 0.0:
                 raise ValueError("minimum_actual_ttc_s must be non-negative")
+        if self.minimum_actual_stopping_margin_m is not None:
+            require_finite(
+                "minimum_actual_stopping_margin_m", self.minimum_actual_stopping_margin_m
+            )
         if not isinstance(self.hard_rule_constraint, bool):
             raise ValueError("hard_rule_constraint must be boolean")
         object.__setattr__(self, "all_actors", all_actors)

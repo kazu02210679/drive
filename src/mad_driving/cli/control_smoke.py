@@ -5,11 +5,19 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from collections.abc import Sequence
 from dataclasses import asdict
+from math import isfinite
 from typing import Protocol
 
-from mad_driving.agents.suite import AgentAnalysisResult, AgentSuite, SuiteFactory, analyze_safely
+from mad_driving.agents.suite import (
+    AgentAnalysisResult,
+    AgentSuite,
+    AnalysisSuite,
+    SuiteFactory,
+    analyze_safely,
+)
 from mad_driving.config.loader import load_config
 from mad_driving.config.models import (
     AppConfig,
@@ -21,6 +29,8 @@ from mad_driving.envs.control_metadrive_env import create_control_metadrive_env
 from mad_driving.envs.multi_agent_speed_env import (
     ControlEnvironmentFactory,
     ControlSmokeResult,
+    FrameBuilder,
+    FrameBuilderFactory,
     ShieldFactory,
 )
 from mad_driving.interfaces import (
@@ -54,6 +64,7 @@ def run_control_smoke(
     suite_factory: SuiteFactory = AgentSuite.from_config,
     coordinator_factory: CoordinatorFactory = RuleBasedCoordinator,
     shield_factory: ShieldFactory = SafetyShield,
+    builder_factory: FrameBuilderFactory | None = None,
 ) -> ControlSmokeResult:
     """Run the complete deterministic decision and control pipeline."""
 
@@ -70,7 +81,14 @@ def run_control_smoke(
     runtime = NoOpScenarioRuntime(config.scenario_id)
 
     try:
-        builder = SceneSnapshotBuilder()
+        builder: FrameBuilder
+        if builder_factory is None:
+            builder = SceneSnapshotBuilder(
+                reaction_delay_s=config.agents.hazard.reaction_delay_s,
+                safe_deceleration_mps2=abs(config.agents.hazard.ego_max_safe_deceleration_mps2),
+            )
+        else:
+            builder = builder_factory()
         suite = suite_factory(config.agents)
         coordinator = coordinator_factory(config.coordinator)
         shield = shield_factory(config.shield)
@@ -87,7 +105,7 @@ def run_control_smoke(
             previous_executed_action=int(DrivingAction.KEEP),
             previous_shield_intervention=False,
         )
-        analysis = analyze_safely(suite, frame.observation)
+        analysis, analysis_latency_ms = _analyze(suite, frame.observation)
 
         for step_index in range(1, config.decision_steps + 1):
             requested = coordinator.decide(
@@ -95,12 +113,20 @@ def run_control_smoke(
                 analysis.claims,
                 analysis.review,
             )
+            shield_observation = frame.observation
+            shield_claims = analysis.claims
+            expected_agent_ids = analysis.expected_agent_ids
+            failed_agent_ids = analysis.failed_agent_ids
+            shield_start_ns = time.perf_counter_ns()
             shield_result = shield.filter(
                 requested,
-                frame.observation,
-                analysis.claims,
-                expected_agent_ids=analysis.expected_agent_ids,
-                failed_agent_ids=analysis.failed_agent_ids,
+                shield_observation,
+                shield_claims,
+                expected_agent_ids=expected_agent_ids,
+                failed_agent_ids=failed_agent_ids,
+            )
+            shield_latency_ms = _latency_ms(
+                "shield_latency_ms", shield_start_ns, time.perf_counter_ns()
             )
             executed = shield_result.executed_action
             target = target_speed_mps(
@@ -136,6 +162,9 @@ def run_control_smoke(
                 claims=analysis.claims,
                 review=analysis.review,
                 reward_components={},
+                expected_agent_ids=analysis.expected_agent_ids,
+                analysis_latency_ms=analysis_latency_ms,
+                shield_latency_ms=shield_latency_ms,
                 control_fail_safe=control_fail_safe,
                 control_fail_safe_reason=control_fail_safe_reason,
                 failed_agent_ids=analysis.failed_agent_ids,
@@ -166,7 +195,7 @@ def run_control_smoke(
                 previous_executed_action=int(executed),
                 previous_shield_intervention=shield_result.intervened,
             )
-            analysis = analyze_safely(suite, frame.observation)
+            analysis, analysis_latency_ms = _analyze(suite, frame.observation)
             if terminated or truncated:
                 break
     finally:
@@ -192,6 +221,23 @@ def run_control_smoke(
         ),
         shield_intervention_count=intervention_count,
     )
+
+
+def _analyze(
+    suite: AnalysisSuite,
+    observation: SceneObservation,
+) -> tuple[AgentAnalysisResult, float]:
+    start_ns = time.perf_counter_ns()
+    analysis = analyze_safely(suite, observation)
+    latency_ms = _latency_ms("analysis_latency_ms", start_ns, time.perf_counter_ns())
+    return analysis, latency_ms
+
+
+def _latency_ms(name: str, start_ns: int, end_ns: int) -> float:
+    latency_ms = (end_ns - start_ns) / 1_000_000.0
+    if not isfinite(latency_ms) or latency_ms < 0.0:
+        raise ValueError(f"{name} must be finite and non-negative")
+    return latency_ms
 
 
 def _parser() -> argparse.ArgumentParser:

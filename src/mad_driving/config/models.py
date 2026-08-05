@@ -1,7 +1,7 @@
 """Validated configuration models."""
 
-from math import isclose
-from typing import Any, Literal, Self
+from math import ceil, isclose
+from typing import Annotated, Any, Literal, Self
 
 from pydantic import (
     BaseModel,
@@ -14,6 +14,18 @@ from pydantic import (
 
 OCCLUDED_CROSSING_ACTOR_HALF_WIDTH_M = 0.2
 
+MethodId = Literal[
+    "b0_rule",
+    "b1_nominal",
+    "b2_multi_no_review",
+    "proposed",
+    "proposed_no_critic",
+    "proposed_no_shield",
+    "proposed_no_hazard",
+]
+
+NormalizedActionValue = Annotated[FiniteFloat, Field(ge=-1.0, le=1.0)]
+
 
 class StrictFrozenModel(BaseModel):
     """Base class that rejects unknown settings and runtime mutation."""
@@ -25,6 +37,12 @@ class StrictTypedFrozenModel(StrictFrozenModel):
     """Frozen model that also rejects Pydantic scalar type coercion."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+
+class MethodConfig(StrictFrozenModel):
+    """Select one centrally defined method composition."""
+
+    id: MethodId = "proposed"
 
 
 class SeedRangeConfig(StrictTypedFrozenModel):
@@ -263,8 +281,8 @@ class ShieldConfig(StrictTypedFrozenModel):
     caution_ttc_s: FiniteFloat = Field(default=3.0, gt=0.0)
     emergency_margin_m: FiniteFloat = 0.0
     caution_margin_m: FiniteFloat = 5.0
-    missing_agent_action: int = Field(default=2, ge=0, le=3)
-    multiple_missing_action: int = Field(default=3, ge=0, le=3)
+    missing_agent_action: int = Field(default=2, ge=2, le=3)
+    multiple_missing_action: int = Field(default=3, ge=3, le=3)
 
     @model_validator(mode="after")
     def validate_threshold_order(self) -> Self:
@@ -381,9 +399,10 @@ class AppConfig(StrictFrozenModel):
     seed: int = Field(ge=0)
     scenario_id: str = Field(min_length=1)
     decision_steps: PositiveInt
-    fixed_action: tuple[FiniteFloat, FiniteFloat]
+    fixed_action: tuple[NormalizedActionValue, NormalizedActionValue]
     metadrive: MetaDriveConfig
     scenarios: ScenarioSplitsConfig = Field(default_factory=ScenarioSplitsConfig)
+    method: MethodConfig = Field(default_factory=MethodConfig)
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     coordinator: CoordinatorConfig = Field(default_factory=CoordinatorConfig)
     shield: ShieldConfig = Field(default_factory=ShieldConfig)
@@ -394,41 +413,44 @@ class AppConfig(StrictFrozenModel):
 
     @model_validator(mode="after")
     def validate_scenario_durations_fit_horizon(self) -> Self:
-        capacity_s = self.metadrive.horizon * self.metadrive.decision_dt_s
+        decision_dt_s = self.metadrive.decision_dt_s
         crossing = self.scenarios.occluded_crossing
-        required_durations_s = {
+        required_steps = {
             "lead_brake": (
-                self.scenarios.lead_brake.trigger_s.maximum + self.scenarios.lead_brake.survival_s
+                ceil(self.scenarios.lead_brake.trigger_s.maximum / decision_dt_s)
+                + ceil(self.scenarios.lead_brake.survival_s / decision_dt_s)
             ),
             "cut_in": (
-                self.scenarios.cut_in.trigger_s.maximum
-                + self.scenarios.cut_in.merge_duration_s.maximum
-                + self.scenarios.cut_in.survival_s
+                ceil(self.scenarios.cut_in.trigger_s.maximum / decision_dt_s)
+                + ceil(self.scenarios.cut_in.merge_duration_s.maximum / decision_dt_s)
+                + ceil(self.scenarios.cut_in.survival_s / decision_dt_s)
             ),
             "occluded_crossing": (
-                crossing.trigger_s.maximum
-                + (
-                    crossing.crossing_start_offset_m.maximum
-                    + self.metadrive.lane_width_m / 2.0
-                    + OCCLUDED_CROSSING_ACTOR_HALF_WIDTH_M
+                ceil(crossing.trigger_s.maximum / decision_dt_s)
+                + ceil(
+                    (
+                        crossing.crossing_start_offset_m.maximum
+                        + self.metadrive.lane_width_m / 2.0
+                        + OCCLUDED_CROSSING_ACTOR_HALF_WIDTH_M
+                    )
+                    / crossing.crossing_speed_mps.minimum
+                    / decision_dt_s
                 )
-                / crossing.crossing_speed_mps.minimum
-                + crossing.survival_s
+                + ceil(crossing.survival_s / decision_dt_s)
             ),
         }
         over_capacity = {
-            scenario_id: duration_s
-            for scenario_id, duration_s in required_durations_s.items()
-            if duration_s > capacity_s
+            scenario_id: steps
+            for scenario_id, steps in required_steps.items()
+            if steps > self.metadrive.horizon
         }
         if over_capacity:
             details = ", ".join(
-                f"{scenario_id}={duration_s:.6g}s"
-                for scenario_id, duration_s in over_capacity.items()
+                f"{scenario_id}={steps} steps" for scenario_id, steps in over_capacity.items()
             )
             raise ValueError(
                 "scenario worst-case duration exceeds MetaDrive horizon "
-                f"({capacity_s:.6g}s): {details}"
+                f"({self.metadrive.horizon} steps): {details}"
             )
         return self
 

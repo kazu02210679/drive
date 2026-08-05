@@ -136,6 +136,18 @@ def test_explicit_validation_schedule_balances_level_two_independent_of_seed() -
     )
 
 
+def test_installed_schedule_fails_closed_after_its_last_entry() -> None:
+    runtime = make_manager(level=2)
+    runtime.set_scenario_schedule(("lead_brake", "cut_in"))
+
+    first = runtime.reset(FakeEnvironment(), seeds=EpisodeSeeds(1, 2, 3, 4))
+    second = runtime.reset(FakeEnvironment(), seeds=EpisodeSeeds(5, 6, 7, 8))
+
+    assert (first.scenario_id, second.scenario_id) == ("lead_brake", "cut_in")
+    with pytest.raises(RuntimeError, match="schedule.*exhausted"):
+        runtime.reset(FakeEnvironment(), seeds=EpisodeSeeds(9, 10, 11, 12))
+
+
 def test_explicit_validation_schedule_rejects_scenario_outside_pending_level() -> None:
     runtime = make_manager(level=1)
 

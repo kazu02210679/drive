@@ -40,3 +40,13 @@ def test_phase5_factory_builds_the_occluded_crossing_runtime() -> None:
     state = runtime.reset(object(), seeds=EpisodeSeeds(1, 2, 3, 4))
 
     assert state.scenario_id == "occluded_crossing"
+
+
+def test_evaluation_schedule_uses_phase5_manager_for_next_legacy_reset() -> None:
+    factory = build_scenario_runtime_factory(make_config("phase1_smoke"))
+
+    factory.set_difficulty_level(1)
+    factory.set_scenario_schedule(("lead_brake",))
+
+    assert isinstance(factory("phase1_smoke"), ScenarioManagerRuntime)
+    assert isinstance(factory("phase1_smoke"), NoOpScenarioRuntime)

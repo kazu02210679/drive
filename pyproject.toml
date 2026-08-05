@@ -47,6 +47,9 @@ pythonpath = ["src"]
 markers = [
   "integration: requires the real MetaDrive runtime",
 ]
+filterwarnings = [
+  "ignore:'(oneOf|parseString|resetCache|enablePackrat)' deprecated.*:pyparsing.PyparsingDeprecationWarning",
+]
 
 [tool.ruff]
 line-length = 100
