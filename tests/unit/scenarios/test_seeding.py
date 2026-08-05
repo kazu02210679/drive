@@ -13,7 +13,18 @@ def test_allocator_is_reproducible_and_role_bounded() -> None:
     assert first == second
     assert first.episode_rng_seed == 42
     assert 10_000 <= first.metadrive_scenario_index < 11_000
+    assert 10_000 <= first.scenario_selection_seed < 11_000
     assert 10_000 <= first.scenario_parameter_seed < 11_000
+    assert (
+        len(
+            {
+                first.metadrive_scenario_index,
+                first.scenario_selection_seed,
+                first.scenario_parameter_seed,
+            }
+        )
+        == 3
+    )
 
 
 def test_role_or_worker_changes_derived_seed_identity() -> None:
@@ -28,8 +39,14 @@ def test_role_or_worker_changes_derived_seed_identity() -> None:
 
 def test_scenario_seed_api_is_exported() -> None:
     assert get_args(EnvironmentRole) == ("train", "validation", "test")
-    seeds = EpisodeSeeds(episode_rng_seed=42, metadrive_scenario_index=1, scenario_parameter_seed=2)
+    seeds = EpisodeSeeds(
+        episode_rng_seed=42,
+        metadrive_scenario_index=1,
+        scenario_selection_seed=2,
+        scenario_parameter_seed=3,
+    )
     assert seeds.episode_rng_seed == 42
+    assert seeds.scenario_selection_seed == 2
 
 
 def test_allocator_rejects_negative_worker_index() -> None:

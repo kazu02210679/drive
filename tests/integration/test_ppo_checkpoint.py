@@ -11,12 +11,14 @@ import yaml
 from gymnasium import spaces
 from numpy.typing import NDArray
 from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import SubprocVecEnv
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 
 from mad_driving.config.models import AppConfig
 from mad_driving.scenarios import EnvironmentRole
 from mad_driving.training import run_training
-from mad_driving.training.metadata import RESEARCH_CONTRACT_VERSION
+from mad_driving.training.callbacks import CurriculumEvalCallback
+from mad_driving.training.curriculum import CurriculumState
+from mad_driving.training.metadata import RESEARCH_CONTRACT_VERSION, resolve_resume_source
 
 
 class TinyDeterministicEnv(gym.Env[NDArray[np.float32], int]):
@@ -31,6 +33,18 @@ class TinyDeterministicEnv(gym.Env[NDArray[np.float32], int]):
         self.role = role
         self.worker_index = worker_index
         self.reset_count = 0
+        self.difficulty_level = 1
+        self.pending_difficulty_level = 1
+        self.validation_schedule: tuple[str, ...] = ()
+        self.validation_schedule_index = 0
+        self.current_scenario_id = "lead_brake"
+
+    def set_difficulty_level(self, level: int) -> None:
+        self.pending_difficulty_level = level
+
+    def set_validation_scenario_schedule(self, scenario_ids: tuple[str, ...]) -> None:
+        self.validation_schedule = scenario_ids
+        self.validation_schedule_index = 0
 
     def reset(
         self,
@@ -41,13 +55,22 @@ class TinyDeterministicEnv(gym.Env[NDArray[np.float32], int]):
         super().reset(seed=seed)
         del options
         self.steps = 0
+        self.difficulty_level = self.pending_difficulty_level
+        if self.role == "validation" and self.validation_schedule_index < len(
+            self.validation_schedule
+        ):
+            self.current_scenario_id = self.validation_schedule[self.validation_schedule_index]
+            self.validation_schedule_index += 1
         role_offset = 100 if self.role == "train" else 10_000
         episode_seed = role_offset + self.worker_index * 100 + self.reset_count
         self.reset_count += 1
         return np.zeros(24, dtype=np.float32), {
-            "episode_rng_seed": episode_seed,
-            "metadrive_scenario_index": episode_seed + 20_000,
+            "environment_seed": episode_seed,
+            "scenario_selection_seed": episode_seed + 20_000,
             "scenario_parameter_seed": episode_seed + 30_000,
+            "scenario_id": self.current_scenario_id,
+            "difficulty_level": self.difficulty_level,
+            "scenario_parameters": {"initial_gap_m": 40.0},
         }
 
     def step(
@@ -58,7 +81,19 @@ class TinyDeterministicEnv(gym.Env[NDArray[np.float32], int]):
         self.steps += 1
         observation = np.full(24, self.steps / 4.0, dtype=np.float32)
         reward = float(action == self.steps % 4)
-        return observation, reward, self.steps == 4, False, {}
+        return (
+            observation,
+            reward,
+            self.steps == 4,
+            False,
+            {
+                "scenario_id": self.current_scenario_id,
+                "scenario_success": self.steps == 4,
+                "collision_occurred": False,
+                "route_progress": self.steps / 4.0,
+                "unnecessary_stop_duration_s": 0.0,
+            },
+        )
 
     def close(self) -> None:
         self.closed = True
@@ -70,6 +105,13 @@ class SeedAwareTinyEnv(gym.Env[NDArray[np.float32], int]):
     observation_space = spaces.Box(low=-1.0, high=1.0, shape=(24,), dtype=np.float32)
     action_space = spaces.Discrete(4)
 
+    def __init__(self) -> None:
+        self.difficulty_level = 1
+        self.pending_difficulty_level = 1
+
+    def set_difficulty_level(self, level: int) -> None:
+        self.pending_difficulty_level = level
+
     def reset(
         self,
         *,
@@ -78,13 +120,17 @@ class SeedAwareTinyEnv(gym.Env[NDArray[np.float32], int]):
     ) -> tuple[NDArray[np.float32], dict[str, Any]]:
         super().reset(seed=seed)
         del options
+        self.difficulty_level = self.pending_difficulty_level
         episode_seed = (
             seed if seed is not None else int(self.np_random.integers(0, np.iinfo(np.int32).max))
         )
         return np.zeros(24, dtype=np.float32), {
-            "episode_rng_seed": episode_seed,
-            "metadrive_scenario_index": episode_seed + 20_000,
+            "environment_seed": episode_seed,
+            "scenario_selection_seed": episode_seed + 20_000,
             "scenario_parameter_seed": episode_seed + 30_000,
+            "scenario_id": "lead_brake",
+            "difficulty_level": self.difficulty_level,
+            "scenario_parameters": {"initial_gap_m": 40.0},
         }
 
     def step(
@@ -92,7 +138,48 @@ class SeedAwareTinyEnv(gym.Env[NDArray[np.float32], int]):
         action: int,
     ) -> tuple[NDArray[np.float32], float, bool, bool, dict[str, Any]]:
         assert self.action_space.contains(action)
-        return np.zeros(24, dtype=np.float32), 0.0, True, False, {}
+        return (
+            np.zeros(24, dtype=np.float32),
+            0.0,
+            True,
+            False,
+            {
+                "scenario_id": "lead_brake",
+                "scenario_success": True,
+                "collision_occurred": False,
+                "route_progress": 1.0,
+                "unnecessary_stop_duration_s": 0.0,
+            },
+        )
+
+
+class ContinuationTinyEnv(TinyDeterministicEnv):
+    """Tiny environment whose active level follows automatic curriculum from level zero."""
+
+    def __init__(self, *, role: EnvironmentRole, worker_index: int) -> None:
+        super().__init__(role=role, worker_index=worker_index)
+        self.difficulty_level = 0
+        self.pending_difficulty_level = 0
+
+
+class RecordingCurriculumEvalCallback(CurriculumEvalCallback):
+    """Record actual scheduled evaluation timesteps and resulting states."""
+
+    def __init__(
+        self,
+        *args: Any,
+        evaluation_events: list[tuple[int, CurriculumState]],
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self._evaluation_events = evaluation_events
+
+    def _on_step(self) -> bool:
+        previous_evaluations = self.controller.state.evaluations
+        continue_training = super()._on_step()
+        if self.controller.state.evaluations != previous_evaluations:
+            self._evaluation_events.append((self.num_timesteps, self.controller.state))
+        return continue_training
 
 
 class CapturingSubprocVecEnv(SubprocVecEnv):
@@ -151,6 +238,9 @@ def make_real_ppo_config() -> AppConfig:
 
 def load_and_predict_policy(checkpoint: Path) -> PPO:
     model = PPO.load(checkpoint, device="cpu")
+    for name, tensor in model.policy.state_dict().items():
+        if tensor.is_floating_point():
+            assert bool(tensor.isfinite().all()), f"non-finite policy tensor: {name}"
     action, _ = model.predict(np.zeros(24, dtype=np.float32), deterministic=True)
     predicted_action = int(np.asarray(action).item())
     assert 0 <= predicted_action <= 3
@@ -162,10 +252,186 @@ def checkpoint_hash(checkpoint: Path) -> str:
         return hashlib.file_digest(checkpoint_file, "sha256").hexdigest()
 
 
+def checkpoint_curriculum_sidecar(checkpoint: Path) -> Path:
+    return checkpoint.with_name(f"{checkpoint.name}.curriculum.yaml")
+
+
+@pytest.mark.integration
+def test_every_published_checkpoint_restores_its_exact_automatic_curriculum_state(
+    tmp_path: Path,
+) -> None:
+    base = make_real_ppo_config()
+    config = base.model_copy(
+        update={
+            "scenarios": base.scenarios.model_copy(
+                update={
+                    "selection": "auto",
+                    "curriculum": base.scenarios.curriculum.model_copy(
+                        update={
+                            "mode": "automatic",
+                            "initial_level": 0,
+                            "consecutive_evaluations": 1,
+                            "success_rate_threshold": 1.0,
+                            "collision_rate_threshold": 0.0,
+                        }
+                    ),
+                }
+            ),
+            "training": base.training.model_copy(
+                update={
+                    "total_timesteps": 24,
+                    "checkpoint_interval_steps": 8,
+                    "eval_interval_steps": 8,
+                    "eval_episodes": 2,
+                }
+            ),
+        }
+    )
+    run_dir = tmp_path / "checkpoint-curriculum-bindings"
+
+    result = run_training(
+        config,
+        smoke=False,
+        run_dir=run_dir,
+        env_factory=tiny_env_factory,
+        subproc_vec_env_factory=DummyVecEnv,
+    )
+
+    expected = {
+        run_dir / "checkpoints" / "ppo_checkpoint_8_steps.zip": CurriculumState(1, 0, 1),
+        run_dir / "checkpoints" / "ppo_checkpoint_16_steps.zip": CurriculumState(2, 0, 2),
+        run_dir / "checkpoints" / "ppo_checkpoint_24_steps.zip": CurriculumState(3, 0, 3),
+        result.best_checkpoint: CurriculumState(3, 0, 3),
+        run_dir / "checkpoints" / "best_model_level_0.zip": CurriculumState(1, 0, 1),
+        run_dir / "checkpoints" / "best_model_level_1.zip": CurriculumState(2, 0, 2),
+        run_dir / "checkpoints" / "best_model_level_2.zip": CurriculumState(3, 0, 3),
+        result.final_checkpoint: CurriculumState(3, 0, 3),
+    }
+    for checkpoint, state in expected.items():
+        assert checkpoint.is_file()
+        assert checkpoint_curriculum_sidecar(checkpoint).is_file()
+        assert resolve_resume_source(checkpoint, config).curriculum_state == state
+
+
+@pytest.mark.integration
+def test_periodic_checkpoint_resume_matches_absolute_non_aligned_continuation(
+    tmp_path: Path,
+) -> None:
+    base = make_real_ppo_config()
+    config = base.model_copy(
+        update={
+            "scenarios": base.scenarios.model_copy(
+                update={
+                    "selection": "auto",
+                    "curriculum": base.scenarios.curriculum.model_copy(
+                        update={
+                            "mode": "automatic",
+                            "initial_level": 0,
+                            "consecutive_evaluations": 1,
+                            "success_rate_threshold": 1.0,
+                            "collision_rate_threshold": 0.0,
+                        }
+                    ),
+                }
+            ),
+            "training": base.training.model_copy(
+                update={
+                    "n_steps": 2,
+                    "batch_size": 4,
+                    "n_epochs": 1,
+                    "num_envs": 2,
+                    "total_timesteps": 24,
+                    "checkpoint_interval_steps": 11,
+                    "eval_interval_steps": 7,
+                    "eval_episodes": 2,
+                }
+            ),
+        }
+    )
+
+    def environment_factory(
+        received_config: AppConfig,
+        *,
+        role: EnvironmentRole,
+        worker_index: int,
+    ) -> ContinuationTinyEnv:
+        assert received_config.training.num_envs == 2
+        return ContinuationTinyEnv(role=role, worker_index=worker_index)
+
+    uninterrupted_events: list[tuple[int, CurriculumState]] = []
+
+    def uninterrupted_eval_factory(**kwargs: Any) -> RecordingCurriculumEvalCallback:
+        return RecordingCurriculumEvalCallback(
+            **kwargs,
+            evaluation_events=uninterrupted_events,
+        )
+
+    uninterrupted_dir = tmp_path / "absolute-uninterrupted"
+    uninterrupted = run_training(
+        config,
+        smoke=False,
+        run_dir=uninterrupted_dir,
+        env_factory=environment_factory,
+        eval_callback_factory=uninterrupted_eval_factory,
+        subproc_vec_env_factory=DummyVecEnv,
+    )
+    periodic_checkpoint = uninterrupted_dir / "checkpoints" / "ppo_checkpoint_12_steps.zip"
+    assert periodic_checkpoint.is_file()
+    assert uninterrupted_events == [
+        (8, CurriculumState(1, 0, 1)),
+        (14, CurriculumState(2, 0, 2)),
+        (22, CurriculumState(3, 0, 3)),
+    ]
+    assert resolve_resume_source(periodic_checkpoint, config).curriculum_state == CurriculumState(
+        1, 0, 1
+    )
+
+    resumed_events: list[tuple[int, CurriculumState]] = []
+
+    def resumed_eval_factory(**kwargs: Any) -> RecordingCurriculumEvalCallback:
+        return RecordingCurriculumEvalCallback(
+            **kwargs,
+            evaluation_events=resumed_events,
+        )
+
+    resumed_config = config.model_copy(
+        update={"training": config.training.model_copy(update={"total_timesteps": 12})}
+    )
+    resumed_dir = tmp_path / "absolute-resumed"
+    resumed = run_training(
+        resumed_config,
+        smoke=False,
+        run_dir=resumed_dir,
+        resume_from=periodic_checkpoint,
+        env_factory=environment_factory,
+        eval_callback_factory=resumed_eval_factory,
+        subproc_vec_env_factory=DummyVecEnv,
+    )
+
+    assert resumed_events == uninterrupted_events[1:]
+    assert resolve_resume_source(resumed.final_checkpoint, resumed_config).curriculum_state == (
+        resolve_resume_source(uninterrupted.final_checkpoint, config).curriculum_state
+    )
+    uninterrupted_periodic_steps = sorted(
+        int(path.stem.removeprefix("ppo_checkpoint_").removesuffix("_steps"))
+        for path in (uninterrupted_dir / "checkpoints").glob("ppo_checkpoint_*_steps.zip")
+    )
+    resumed_periodic_steps = sorted(
+        int(path.stem.removeprefix("ppo_checkpoint_").removesuffix("_steps"))
+        for path in (resumed_dir / "checkpoints").glob("ppo_checkpoint_*_steps.zip")
+    )
+    assert uninterrupted_periodic_steps == [12, 22]
+    assert resumed_periodic_steps == uninterrupted_periodic_steps[1:]
+    assert resolve_resume_source(
+        resumed_dir / "checkpoints" / "ppo_checkpoint_22_steps.zip",
+        resumed_config,
+    ).curriculum_state == CurriculumState(3, 0, 3)
+
+
 def episode_seed_records(run_dir: Path, role: EnvironmentRole) -> list[int]:
     artifact = run_dir / "episode_seeds" / f"{role}-worker-000.jsonl"
     return [
-        int(record["episode_rng_seed"])
+        int(record["environment_seed"])
         for record in (
             json.loads(line) for line in artifact.read_text(encoding="utf-8").splitlines()[1:]
         )
@@ -318,20 +584,23 @@ def test_real_ppo_writes_artifacts_and_resumes_transactionally(tmp_path: Path) -
         seed_records[summary["role"]] = records
         assert summary["record_count"] == len(records)
         assert summary["sha256"] == checkpoint_hash(artifact)
-        assert summary["schema_version"] == 2
+        assert summary["schema_version"] == 4
         assert summary["file_identity"] == header["file_identity"]
-    train_seeds = [record["episode_rng_seed"] for record in seed_records["train"]]
-    validation_seeds = [record["episode_rng_seed"] for record in seed_records["validation"]]
+    train_seeds = [record["environment_seed"] for record in seed_records["train"]]
+    validation_seeds = [record["environment_seed"] for record in seed_records["validation"]]
     assert len(set(train_seeds)) >= 2
     assert all(seed < 10_000 for seed in train_seeds)
     assert all(seed >= 10_000 for seed in validation_seeds)
     assert all(
         set(record)
         == {
-            "episode_rng_seed",
-            "metadrive_scenario_index",
+            "difficulty_level",
+            "environment_seed",
             "role",
             "scenario_parameter_seed",
+            "scenario_parameters",
+            "scenario_id",
+            "scenario_selection_seed",
             "worker_index",
         }
         for records in seed_records.values()

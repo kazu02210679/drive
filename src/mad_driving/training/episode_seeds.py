@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 from collections.abc import Mapping, Sequence
 from numbers import Integral
@@ -14,21 +15,24 @@ import gymnasium as gym
 
 from mad_driving.scenarios import EnvironmentRole
 
-EPISODE_SEED_ARTIFACT_SCHEMA_VERSION: Final = 2
+EPISODE_SEED_ARTIFACT_SCHEMA_VERSION: Final = 4
 _ARTIFACT_DIRECTORY: Final = "episode_seeds"
 _HEADER_RECORD_TYPE: Final = "episode_seed_artifact"
 _RECORD_FIELDS: Final = frozenset(
     {
         "role",
         "worker_index",
-        "episode_rng_seed",
-        "metadrive_scenario_index",
+        "environment_seed",
+        "scenario_selection_seed",
         "scenario_parameter_seed",
+        "scenario_id",
+        "difficulty_level",
+        "scenario_parameters",
     }
 )
 _SEED_FIELDS: Final = (
-    "episode_rng_seed",
-    "metadrive_scenario_index",
+    "environment_seed",
+    "scenario_selection_seed",
     "scenario_parameter_seed",
 )
 
@@ -88,16 +92,52 @@ def _validate_reset_info(
     seeds: dict[str, int] = {}
     for field in _SEED_FIELDS:
         value = info.get(field)
-        if isinstance(value, bool) or not isinstance(value, Integral) or int(value) < 0:
+        if type(value) is not int or value < 0:
             raise ValueError(
                 f"Environment reset seed info {field} must be a non-negative non-bool integer"
             )
         seeds[field] = int(value)
+    scenario_id = info.get("scenario_id")
+    if not isinstance(scenario_id, str) or not scenario_id:
+        raise ValueError("Environment reset seed info scenario_id must be a non-empty string")
+    difficulty_level = info.get("difficulty_level")
+    if type(difficulty_level) is not int or not 0 <= difficulty_level <= 3:
+        raise ValueError(
+            "Environment reset seed info difficulty_level must be an integer from 0 through 3"
+        )
+    scenario_parameters = _validated_json_value(
+        info.get("scenario_parameters"),
+        "scenario_parameters",
+    )
+    if not isinstance(scenario_parameters, dict):
+        raise ValueError("Environment reset seed info scenario_parameters must be a JSON object")
     return {
         "role": role,
         "worker_index": worker_index,
         **seeds,
+        "scenario_id": scenario_id,
+        "difficulty_level": int(difficulty_level),
+        "scenario_parameters": scenario_parameters,
     }
+
+
+def _validated_json_value(value: object, name: str) -> object:
+    if isinstance(value, Mapping):
+        result: dict[str, object] = {}
+        for key, nested in value.items():
+            if not isinstance(key, str):
+                raise ValueError(f"Environment reset seed info {name} keys must be strings")
+            result[key] = _validated_json_value(nested, f"{name}.{key}")
+        return result
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+        return [_validated_json_value(nested, f"{name}[]") for nested in value]
+    if value is None or type(value) in (bool, int, str):
+        return value
+    if type(value) is float and math.isfinite(value):
+        return value
+    raise ValueError(
+        f"Environment reset seed info {name} must contain only finite JSON-safe values"
+    )
 
 
 def _file_identity(stat_result: os.stat_result) -> tuple[int, int]:
@@ -132,6 +172,17 @@ def _strict_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
             raise ValueError(f"duplicate JSON field: {key}")
         result[key] = value
     return result
+
+
+def _parsed_json_integer(
+    value: object,
+    name: str,
+    *,
+    minimum: int,
+) -> int:
+    if type(value) is not int or value < minimum:
+        raise ValueError(f"Episode seed artifact {name} must be an integer >= {minimum}")
+    return value
 
 
 def _write_all(descriptor: int, payload: bytes) -> None:
@@ -246,6 +297,15 @@ class EpisodeSeedRecordingWrapper(gym.Wrapper[Any, Any, Any, Any]):
             raise
         return observation, dict(info)
 
+    def set_validation_scenario_schedule(self, scenario_ids: tuple[str, ...]) -> None:
+        """Forward deterministic validation scheduling when the wrapped env supports it."""
+
+        try:
+            setter = self.env.get_wrapper_attr("set_validation_scenario_schedule")
+        except AttributeError:
+            return
+        setter(scenario_ids)
+
     def close(self) -> None:
         """Close the wrapped environment and writer once without retrying resources."""
 
@@ -331,14 +391,41 @@ def _parse_artifact_records(
         )
     except (json.JSONDecodeError, ValueError) as exc:
         raise ValueError(f"Episode seed artifact header is malformed: {artifact}") from exc
-    expected_header = {
-        "file_identity": _identity_payload(identity),
-        "record_type": _HEADER_RECORD_TYPE,
-        "role": role,
-        "schema_version": EPISODE_SEED_ARTIFACT_SCHEMA_VERSION,
-        "worker_index": worker_index,
+    header_fields = {
+        "file_identity",
+        "record_type",
+        "role",
+        "schema_version",
+        "worker_index",
     }
-    if header != expected_header:
+    if not isinstance(header, dict) or set(header) != header_fields:
+        raise ValueError(f"Episode seed artifact file identity header is malformed: {artifact}")
+    header_identity = header["file_identity"]
+    if not isinstance(header_identity, dict) or set(header_identity) != {"device", "inode"}:
+        raise ValueError(f"Episode seed artifact file identity header is malformed: {artifact}")
+    parsed_identity = (
+        _parsed_json_integer(header_identity["device"], "header device", minimum=0),
+        _parsed_json_integer(header_identity["inode"], "header inode", minimum=1),
+    )
+    parsed_schema_version = _parsed_json_integer(
+        header["schema_version"],
+        "header schema_version",
+        minimum=0,
+    )
+    parsed_worker_index = _parsed_json_integer(
+        header["worker_index"],
+        "header worker_index",
+        minimum=0,
+    )
+    if (
+        parsed_identity != identity
+        or header["record_type"] != _HEADER_RECORD_TYPE
+        or type(header["record_type"]) is not str
+        or header["role"] != role
+        or type(header["role"]) is not str
+        or parsed_schema_version != EPISODE_SEED_ARTIFACT_SCHEMA_VERSION
+        or parsed_worker_index != worker_index
+    ):
         raise ValueError(f"Episode seed artifact file identity header is malformed: {artifact}")
     records: list[dict[str, object]] = []
     for line_number, line in enumerate(lines[1:], start=2):
@@ -359,6 +446,20 @@ def _parse_artifact_records(
         if not isinstance(value, dict) or set(value) != _RECORD_FIELDS:
             raise ValueError(
                 f"Episode seed artifact record fields are malformed: {artifact}:{line_number}"
+            )
+        record_role = value["role"]
+        record_worker_index = _parsed_json_integer(
+            value["worker_index"],
+            "record worker_index",
+            minimum=0,
+        )
+        if (
+            type(record_role) is not str
+            or record_role != role
+            or record_worker_index != worker_index
+        ):
+            raise ValueError(
+                f"Episode seed artifact identity is malformed: {artifact}:{line_number}"
             )
         expected = _validate_reset_info(value, role=role, worker_index=worker_index)
         if value != expected:

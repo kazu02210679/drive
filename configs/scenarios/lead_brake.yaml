@@ -1,0 +1,6 @@
+scenario_id: phase5
+scenarios:
+  selection: lead_brake
+  curriculum:
+    mode: fixed
+    fixed_level: 1

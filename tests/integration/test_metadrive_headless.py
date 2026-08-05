@@ -32,7 +32,7 @@ def test_real_metadrive_headless_step_builds_finite_snapshot() -> None:
     env = create_metadrive_env(config.metadrive_dict())
 
     try:
-        seeds = EpisodeSeeds(config.seed, config.seed, config.seed)
+        seeds = EpisodeSeeds(config.seed, config.seed, config.seed, config.seed)
         runtime = NoOpScenarioRuntime(config.scenario_id)
         state = runtime.reset(env, seeds=seeds)
         reset_result = env.reset(seed=seeds.metadrive_scenario_index)

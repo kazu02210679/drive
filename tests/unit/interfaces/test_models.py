@@ -57,6 +57,7 @@ def make_seeds(**overrides: Any) -> EpisodeSeeds:
     values: dict[str, Any] = {
         "episode_rng_seed": 42,
         "metadrive_scenario_index": 7,
+        "scenario_selection_seed": 9,
         "scenario_parameter_seed": 11,
     }
     values.update(overrides)
@@ -162,6 +163,70 @@ def make_review(**overrides: Any) -> CriticReview:
     }
     values.update(overrides)
     return CriticReview(**values)
+
+
+def make_trace(**overrides: Any) -> DecisionTrace:
+    values: dict[str, Any] = {
+        "step_index": 1,
+        "raw_action": 0,
+        "required_action": 0,
+        "executed_action": 0,
+        "intervention_required": False,
+        "target_speed_mps": 8.0,
+        "shield_intervened": False,
+        "shield_reasons": (),
+        "claims": (make_claim(),),
+        "review": make_review(),
+        "reward_components": {"progress": 0.1},
+    }
+    values.update(overrides)
+    return DecisionTrace(**values)
+
+
+def test_decision_trace_requires_complete_scenario_metadata() -> None:
+    with pytest.raises(ValueError, match="scenario trace metadata must be complete"):
+        replace(make_trace(), scenario_id="lead_brake", difficulty_level=None)
+    with pytest.raises(ValueError, match="scenario trace metadata must be complete"):
+        replace(make_trace(), scenario_id=None, difficulty_level=1)
+
+
+@pytest.mark.parametrize(
+    ("scenario_id", "difficulty_level", "message"),
+    [
+        ("", 1, "scenario_id"),
+        (7, 1, "scenario_id"),
+        ("lead_brake", True, "difficulty_level"),
+        ("lead_brake", -1, "difficulty_level"),
+        ("lead_brake", 4, "difficulty_level"),
+    ],
+)
+def test_decision_trace_strictly_validates_complete_scenario_metadata(
+    scenario_id: object,
+    difficulty_level: object,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        make_trace(  # type: ignore[arg-type]
+            scenario_id=scenario_id,
+            difficulty_level=difficulty_level,
+        )
+
+
+def test_decision_trace_preserves_complete_phase5_episode_metadata() -> None:
+    trace = make_trace(
+        episode_rng_seed=42,
+        metadrive_scenario_index=7,
+        scenario_selection_seed=9,
+        scenario_parameter_seed=11,
+        role="train",
+        worker_index=0,
+        scenario_id="lead_brake",
+        difficulty_level=1,
+    )
+
+    assert trace.scenario_id == "lead_brake"
+    assert trace.difficulty_level == 1
+    json.dumps(asdict(trace))
 
 
 def test_models_are_frozen_and_json_serializable() -> None:

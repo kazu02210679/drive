@@ -1,4 +1,5 @@
 import hashlib
+import io
 import json
 import math
 import os
@@ -23,7 +24,18 @@ from mad_driving.training import RunMetadata, sha256_file
 from mad_driving.training import metadata as metadata_module
 from mad_driving.training import ownership as ownership_module
 from mad_driving.training import train as train_module
-from mad_driving.training.metadata import RESEARCH_CONTRACT_VERSION
+from mad_driving.training.curriculum import (
+    CurriculumState,
+    checkpoint_curriculum_sidecar_path,
+    read_curriculum_state,
+    write_checkpoint_curriculum_state,
+    write_curriculum_state,
+)
+from mad_driving.training.metadata import (
+    RESEARCH_CONTRACT_VERSION,
+    checkpoint_curriculum_artifact_inventory,
+    curriculum_state_artifact,
+)
 from mad_driving.training.train import TrainingResult, run_training
 
 
@@ -46,6 +58,7 @@ class FakeEnv(gym.Env[np.ndarray, int]):
         self.closed = False
         self.close_calls = 0
         self.reset_calls = 0
+        self.difficulty_levels: list[int] = []
 
     def reset(
         self,
@@ -59,9 +72,12 @@ class FakeEnv(gym.Env[np.ndarray, int]):
         episode_seed = role_offset + self.worker_index * 100 + self.reset_calls
         self.reset_calls += 1
         return np.zeros(24, dtype=np.float32), {
-            "episode_rng_seed": episode_seed,
-            "metadrive_scenario_index": episode_seed + 20_000,
+            "environment_seed": episode_seed,
+            "scenario_selection_seed": episode_seed + 20_000,
             "scenario_parameter_seed": episode_seed + 30_000,
+            "scenario_id": "nominal",
+            "difficulty_level": 0,
+            "scenario_parameters": {},
         }
 
     def step(
@@ -74,6 +90,9 @@ class FakeEnv(gym.Env[np.ndarray, int]):
     def close(self) -> None:
         self.closed = True
         self.close_calls += 1
+
+    def set_difficulty_level(self, level: int) -> None:
+        self.difficulty_levels.append(level)
 
 
 @dataclass(frozen=True)
@@ -147,6 +166,9 @@ class FakeVecEnv:
     def get_attr(self, attr_name: str) -> list[object]:
         return [env.get_wrapper_attr(attr_name) for env in self.envs]
 
+    def env_method(self, method_name: str, *args: object) -> list[object]:
+        return [getattr(env.unwrapped, method_name)(*args) for env in self.envs]
+
 
 class VecFactory:
     def __init__(self) -> None:
@@ -172,20 +194,25 @@ class CallbackFactory:
 
 class FakeCheckpointCallback:
     def __init__(self, **kwargs: Any) -> None:
+        self.controller = kwargs["controller"]
         self.save_freq = kwargs["save_freq"]
         self.save_path = Path(kwargs["save_path"])
         self.name_prefix = kwargs["name_prefix"]
 
     def on_fake_training(self, model: "FakePPO", produced_timesteps: int) -> None:
         train_env = model.init_kwargs["env"]
-        callback_calls = math.ceil(produced_timesteps / train_env.num_envs)
         start_timesteps = model.num_timesteps - produced_timesteps
-        for call in range(self.save_freq, callback_calls + 1, self.save_freq):
-            checkpoint_timesteps = start_timesteps + call * train_env.num_envs
-            model.write_checkpoint(
-                self.save_path / f"{self.name_prefix}_{checkpoint_timesteps}_steps.zip",
-                "periodic",
-            )
+        first_deadline = (start_timesteps // self.save_freq + 1) * self.save_freq
+        checkpoint_timesteps_values = {
+            math.ceil(deadline / train_env.num_envs) * train_env.num_envs
+            for deadline in range(first_deadline, model.num_timesteps + 1, self.save_freq)
+        }
+        for checkpoint_timesteps in sorted(checkpoint_timesteps_values):
+            if checkpoint_timesteps > model.num_timesteps:
+                continue
+            checkpoint = self.save_path / f"{self.name_prefix}_{checkpoint_timesteps}_steps.zip"
+            model.write_checkpoint(checkpoint, "periodic")
+            write_checkpoint_curriculum_state(self.controller.state, checkpoint)
 
 
 class CheckpointCallbackFactory:
@@ -202,6 +229,7 @@ class CheckpointCallbackFactory:
 
 class FakeEvalCallback:
     def __init__(self, **kwargs: Any) -> None:
+        self.controller = kwargs["controller"]
         self.eval_env = kwargs["eval_env"]
         self.eval_freq = kwargs["eval_freq"]
         self.best_model_save_path = Path(kwargs["best_model_save_path"])
@@ -213,9 +241,12 @@ class FakeEvalCallback:
         self.training_env_closed_during_evaluation.append(train_env.closed)
         for environment in self.eval_env.envs:
             environment.reset(seed=self.validation_episode_seed)
-        callback_calls = math.ceil(produced_timesteps / train_env.num_envs)
-        if callback_calls >= self.eval_freq:
-            model.write_checkpoint(self.best_model_save_path / "best_model.zip", "best")
+        start_timesteps = model.num_timesteps - produced_timesteps
+        next_deadline = (start_timesteps // self.eval_freq + 1) * self.eval_freq
+        if next_deadline <= model.num_timesteps:
+            checkpoint = self.best_model_save_path / "best_model.zip"
+            model.write_checkpoint(checkpoint, "best")
+            write_checkpoint_curriculum_state(self.controller.state, checkpoint)
 
 
 class EvalCallbackFactory:
@@ -340,7 +371,7 @@ class FakePPO:
     @classmethod
     def load(
         cls,
-        path: Path,
+        path: object,
         env: FakeVecEnv | None = None,
         device: str = "auto",
         custom_objects: dict[str, Any] | None = None,
@@ -348,7 +379,15 @@ class FakePPO:
         force_reset: bool = True,
         **kwargs: Any,
     ) -> "FakePPO":
-        source_bytes = Path(path).read_bytes()
+        if hasattr(path, "read") and hasattr(path, "seek"):
+            stream = path
+            stream.seek(0)  # type: ignore[attr-defined]
+            source_bytes = stream.read()  # type: ignore[attr-defined]
+            stream.seek(0)  # type: ignore[attr-defined]
+            checkpoint_source: object = io.BytesIO(source_bytes)
+        else:
+            source_bytes = Path(path).read_bytes()  # type: ignore[arg-type]
+            checkpoint_source = path
         cls.load_calls.append(
             {
                 "path": path,
@@ -369,8 +408,8 @@ class FakePPO:
         model.saved_path = None
         model.num_timesteps = cls.resume_num_timesteps
         contract = cls.default_contract()
-        if zipfile.is_zipfile(path):
-            with zipfile.ZipFile(path) as checkpoint:
+        if zipfile.is_zipfile(checkpoint_source):
+            with zipfile.ZipFile(checkpoint_source) as checkpoint:
                 if "ppo_contract.json" in checkpoint.namelist():
                     contract.update(json.loads(checkpoint.read("ppo_contract.json")))
         model._set_contract(contract)
@@ -446,6 +485,19 @@ def make_config(*, num_envs: int = 1, **training_overrides: Any) -> AppConfig:
     )
 
 
+def make_automatic_config() -> AppConfig:
+    payload = make_config().model_dump(mode="python")
+    payload["scenarios"]["selection"] = "auto"
+    payload["scenarios"]["curriculum"] = {
+        "mode": "automatic",
+        "initial_level": 0,
+        "success_rate_threshold": 0.8,
+        "collision_rate_threshold": 0.05,
+        "consecutive_evaluations": 2,
+    }
+    return AppConfig.model_validate(payload)
+
+
 @dataclass(frozen=True)
 class CompatibleSourceRun:
     run_dir: Path
@@ -454,6 +506,9 @@ class CompatibleSourceRun:
 
 def seed_compatible_source_run(
     tmp_path: Path,
+    *,
+    config: AppConfig | None = None,
+    curriculum_state: CurriculumState | None = None,
     **ppo_overrides: Any,
 ) -> CompatibleSourceRun:
     index = 0
@@ -462,21 +517,53 @@ def seed_compatible_source_run(
     run_dir = tmp_path / f"source-run-{index}"
     checkpoints_dir = run_dir / "checkpoints"
     checkpoints_dir.mkdir(parents=True)
-    config = make_config()
-    resolved_config = config.model_dump(mode="json")
+    selected_config = config or make_config()
+    resolved_config = selected_config.model_dump(mode="json")
     (run_dir / "config_resolved.yaml").write_text(
         yaml.safe_dump(resolved_config, allow_unicode=True, sort_keys=False),
         encoding="utf-8",
     )
-    metadata = RunMetadata(resolved_config=resolved_config)
-    metadata_module.write_run_metadata(metadata, run_dir / "run_metadata.json")
+    selected_state = curriculum_state or CurriculumState(
+        level=0,
+        consecutive_passes=0,
+        evaluations=0,
+    )
+    curriculum_path = run_dir / "curriculum_state.yaml"
+    write_curriculum_state(selected_state, curriculum_path)
     checkpoint = checkpoints_dir / "final_model.zip"
     FakePPO.write_checkpoint(
         checkpoint,
         "resume-source",
         {**FakePPO.default_contract(), **ppo_overrides},
     )
+    write_checkpoint_curriculum_state(selected_state, checkpoint)
+    metadata = RunMetadata(
+        resolved_config=resolved_config,
+        curriculum_state=curriculum_state_artifact(curriculum_path, selected_state),
+        checkpoint_curriculum_artifacts=checkpoint_curriculum_artifact_inventory(checkpoints_dir),
+    )
+    metadata_module.write_run_metadata(metadata, run_dir / "run_metadata.json")
     return CompatibleSourceRun(run_dir=run_dir, checkpoint=checkpoint)
+
+
+def add_periodic_checkpoint(
+    source: CompatibleSourceRun,
+    *,
+    state: CurriculumState | None = None,
+) -> Path:
+    """Publish a second valid source checkpoint and refresh its metadata inventory."""
+
+    selected_state = state or CurriculumState(level=0, consecutive_passes=0, evaluations=0)
+    checkpoint = source.run_dir / "checkpoints" / "ppo_checkpoint_8_steps.zip"
+    FakePPO.write_checkpoint(checkpoint, "periodic-resume-source")
+    write_checkpoint_curriculum_state(selected_state, checkpoint)
+    metadata_path = source.run_dir / "run_metadata.json"
+    payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    payload["checkpoint_curriculum_artifacts"] = [
+        dict(summary) for summary in checkpoint_curriculum_artifact_inventory(checkpoint.parent)
+    ]
+    metadata_path.write_text(json.dumps(payload), encoding="utf-8")
+    return checkpoint
 
 
 def run_with_fakes(
@@ -534,6 +621,34 @@ def test_nonempty_run_directory_is_rejected_before_any_side_effect(tmp_path: Pat
     assert str(raised.value) == f"Run directory is non-empty: {run_dir}"
     assert marker.read_bytes() == b"original\x00bytes"
     assert list(run_dir.iterdir()) == [marker]
+    assert environments.calls == []
+    assert FakePPO.instances == []
+
+
+def test_implicit_run_directory_race_is_rejected_without_deleting_competitor(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "implicit-race"
+    run_dir.mkdir()
+    environments = EnvFactory()
+
+    with pytest.raises(FileExistsError, match="already exists|ownership"):
+        run_training(
+            make_config(),
+            smoke=True,
+            run_dir=run_dir,
+            require_absent_run_dir=True,
+            env_factory=environments,
+            ppo_factory=FakePPO,
+            dummy_vec_env_factory=VecFactory(),
+            subproc_vec_env_factory=VecFactory(),
+            checkpoint_callback_factory=CheckpointCallbackFactory(),
+            eval_callback_factory=EvalCallbackFactory(),
+            reward_callback_factory=RewardCallbackFactory(),
+        )
+
+    assert run_dir.is_dir()
+    assert list(run_dir.iterdir()) == []
     assert environments.calls == []
     assert FakePPO.instances == []
 
@@ -1079,6 +1194,8 @@ def test_fresh_run_writes_complete_research_contract_metadata(tmp_path: Path) ->
 
     metadata = json.loads((run_dir / "run_metadata.json").read_text(encoding="utf-8"))
     summaries = metadata.pop("episode_seed_artifacts")
+    curriculum = metadata.pop("curriculum_state")
+    checkpoint_curriculum = metadata.pop("checkpoint_curriculum_artifacts")
     assert metadata == {
         "research_contract_version": RESEARCH_CONTRACT_VERSION,
         "observation_schema_version": 1,
@@ -1090,6 +1207,21 @@ def test_fresh_run_writes_complete_research_contract_metadata(tmp_path: Path) ->
         "resolved_config": config.model_dump(mode="json"),
         "resume": None,
     }
+    assert {descriptor["checkpoint_path"] for descriptor in checkpoint_curriculum} == {
+        "checkpoints/best_model.zip",
+        "checkpoints/final_model.zip",
+    }
+    assert all(descriptor["level"] == 0 for descriptor in checkpoint_curriculum)
+    assert all(descriptor["consecutive_passes"] == 0 for descriptor in checkpoint_curriculum)
+    assert all(descriptor["evaluations"] == 0 for descriptor in checkpoint_curriculum)
+    curriculum_path = run_dir / "curriculum_state.yaml"
+    assert curriculum == {
+        "path": "curriculum_state.yaml",
+        "sha256": hashlib.sha256(curriculum_path.read_bytes()).hexdigest(),
+        "level": 0,
+        "consecutive_passes": 0,
+        "evaluations": 0,
+    }
     assert [
         (summary["path"], summary["record_count"], summary["role"], summary["worker_index"])
         for summary in summaries
@@ -1100,7 +1232,7 @@ def test_fresh_run_writes_complete_research_contract_metadata(tmp_path: Path) ->
     for summary in summaries:
         artifact = run_dir / summary["path"]
         stat_result = os.stat(artifact, follow_symlinks=False)
-        assert summary["schema_version"] == 2
+        assert summary["schema_version"] == 4
         assert summary["file_identity"] == {
             "device": stat_result.st_dev,
             "inode": stat_result.st_ino,
@@ -1131,15 +1263,30 @@ def test_training_persists_actual_reset_seed_artifacts_by_role_and_worker(
         item["path"]: [
             json.loads(line)
             for line in (run_dir / item["path"]).read_text(encoding="utf-8").splitlines()
-            if "episode_rng_seed" in line
+            if "environment_seed" in line
         ]
         for item in summaries
     }
     train_worker_0 = records["episode_seeds/train-worker-000.jsonl"]
     train_worker_1 = records["episode_seeds/train-worker-001.jsonl"]
-    assert [record["episode_rng_seed"] for record in train_worker_0] == [0, 1]
-    assert [record["episode_rng_seed"] for record in train_worker_1] == [100, 101]
-    assert records["episode_seeds/validation-worker-000.jsonl"][0]["episode_rng_seed"] == 10_000
+    assert [record["environment_seed"] for record in train_worker_0] == [0, 1]
+    assert [record["environment_seed"] for record in train_worker_1] == [100, 101]
+    assert records["episode_seeds/validation-worker-000.jsonl"][0]["environment_seed"] == 10_000
+    assert all(
+        set(record)
+        == {
+            "role",
+            "worker_index",
+            "environment_seed",
+            "scenario_selection_seed",
+            "scenario_parameter_seed",
+            "scenario_id",
+            "difficulty_level",
+            "scenario_parameters",
+        }
+        for worker_records in records.values()
+        for record in worker_records
+    )
     assert all(environment.closed for environment in environments.created)
     assert not list(tmp_path.glob(".actual-reset-seeds.training-*"))
 
@@ -1337,7 +1484,7 @@ def test_malformed_parent_descriptor_collection_blocks_publication(
     assert not run_dir.exists()
 
 
-def test_callback_frequencies_are_scaled_by_num_envs(tmp_path: Path) -> None:
+def test_callback_frequencies_are_absolute_model_timesteps(tmp_path: Path) -> None:
     checkpoint = CallbackFactory()
     evaluation = EvalCallbackFactory()
     config = make_config(
@@ -1349,13 +1496,14 @@ def test_callback_frequencies_are_scaled_by_num_envs(tmp_path: Path) -> None:
     run_with_fakes(
         config,
         tmp_path / "scaled",
+        smoke=False,
         subproc_factory=VecFactory(),
         checkpoint_factory=checkpoint,
         eval_factory=evaluation,
     )
 
-    assert checkpoint.calls[0]["save_freq"] == 2_500
-    assert evaluation.calls[0]["eval_freq"] == 1_250
+    assert checkpoint.calls[0]["save_freq"] == 10_003
+    assert evaluation.calls[0]["eval_freq"] == 8_003
 
 
 def test_callback_frequencies_have_a_minimum_of_one(tmp_path: Path) -> None:
@@ -1377,6 +1525,20 @@ def test_callback_frequencies_have_a_minimum_of_one(tmp_path: Path) -> None:
 
     assert checkpoint.calls[0]["save_freq"] == 1
     assert evaluation.calls[0]["eval_freq"] == 1
+
+
+def test_training_wires_initial_curriculum_controller_and_owned_state_path(
+    tmp_path: Path,
+) -> None:
+    evaluation = EvalCallbackFactory()
+    run_dir = tmp_path / "curriculum-callback-wiring"
+
+    run_with_fakes(make_config(), run_dir, eval_factory=evaluation)
+
+    call = evaluation.calls[0]
+    controller = call["controller"]
+    assert controller.state == CurriculumState(0, 0, 0)
+    assert Path(call["curriculum_state_path"]).name == "curriculum_state.yaml"
 
 
 def test_failed_best_validation_does_not_publish_a_best_checkpoint(
@@ -1795,6 +1957,214 @@ class OperationFailingProcess(FakeProcess):
         raise OSError("terminate failed")
 
 
+class DeadlineProcess(FakeProcess):
+    def __init__(
+        self,
+        clock: list[float],
+        *,
+        exits_after_join: bool,
+    ) -> None:
+        super().__init__(exits_on_terminate=True, exits_on_kill=True)
+        self.clock = clock
+        self.exits_after_join = exits_after_join
+
+    def join(self, timeout: float | None = None) -> None:
+        self.join_calls.append(timeout)
+        assert timeout is not None
+        self.clock[0] += timeout
+        if self.exits_after_join:
+            self.alive = False
+            self.exitcode = 0
+
+
+class PostTerminateJoinProcess(FakeProcess):
+    def __init__(self, clock: list[float]) -> None:
+        super().__init__(exits_on_terminate=False, exits_on_kill=True)
+        self.clock = clock
+        self.terminated = False
+
+    def terminate(self) -> None:
+        self.terminate_calls += 1
+        self.terminated = True
+
+    def join(self, timeout: float | None = None) -> None:
+        self.join_calls.append(timeout)
+        assert timeout is not None
+        self.clock[0] += timeout
+        if self.terminated and timeout > 0:
+            self.alive = False
+            self.exitcode = -15
+
+
+class PlannedJoinProcess(FakeProcess):
+    def __init__(
+        self,
+        clock: list[float],
+        join_plan: list[tuple[bool, bool]],
+    ) -> None:
+        super().__init__(exits_on_terminate=False, exits_on_kill=False)
+        self.clock = clock
+        self.join_plan = list(join_plan)
+
+    def join(self, timeout: float | None = None) -> None:
+        self.join_calls.append(timeout)
+        assert timeout is not None
+        consume_timeout, exit_after_join = self.join_plan.pop(0)
+        if consume_timeout:
+            self.clock[0] += timeout
+        if exit_after_join:
+            self.alive = False
+            self.exitcode = -9 if self.kill_calls else (-15 if self.terminate_calls else 0)
+
+
+def test_graceful_shutdown_redistributes_fast_first_worker_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [10.0]
+    fast = PlannedJoinProcess(clock, [(False, True)])
+    slow = PlannedJoinProcess(clock, [(True, True)])
+    monkeypatch.setattr(train_module, "_monotonic", lambda: clock[0], raising=False)
+
+    workers_alive, escalated, operation_errors = train_module._stop_processes(
+        [fast, slow],
+        graceful_join=True,
+    )
+
+    assert fast.join_calls == [pytest.approx(1.5)]
+    assert slow.join_calls == [pytest.approx(3.0)]
+    assert clock[0] == pytest.approx(13.0)
+    assert workers_alive is False
+    assert escalated is False
+    assert operation_errors == ()
+
+
+def test_terminate_shutdown_redistributes_fast_first_worker_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [20.0]
+    fast = PlannedJoinProcess(clock, [(False, True)])
+    slow = PlannedJoinProcess(clock, [(True, True)])
+    monkeypatch.setattr(train_module, "_monotonic", lambda: clock[0], raising=False)
+
+    workers_alive, escalated, operation_errors = train_module._stop_processes(
+        [fast, slow],
+        graceful_join=False,
+    )
+
+    assert fast.join_calls == [pytest.approx(0.5)]
+    assert slow.join_calls == [pytest.approx(1.0)]
+    assert clock[0] == pytest.approx(21.0)
+    assert all(process.terminate_calls == 1 for process in (fast, slow))
+    assert all(process.kill_calls == 0 for process in (fast, slow))
+    assert workers_alive is False
+    assert escalated is True
+    assert operation_errors == ()
+
+
+def test_kill_shutdown_redistributes_fast_first_worker_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [30.0]
+    fast = PlannedJoinProcess(clock, [(True, False), (False, True)])
+    slow = PlannedJoinProcess(clock, [(True, False), (True, True)])
+    monkeypatch.setattr(train_module, "_monotonic", lambda: clock[0], raising=False)
+
+    workers_alive, escalated, operation_errors = train_module._stop_processes(
+        [fast, slow],
+        graceful_join=False,
+    )
+
+    assert fast.join_calls == [pytest.approx(0.5), pytest.approx(0.5)]
+    assert slow.join_calls == [pytest.approx(0.5), pytest.approx(1.0)]
+    assert clock[0] == pytest.approx(32.0)
+    assert all(process.terminate_calls == 1 for process in (fast, slow))
+    assert all(process.kill_calls == 1 for process in (fast, slow))
+    assert workers_alive is False
+    assert escalated is True
+    assert operation_errors == ()
+
+
+def test_multiworker_shutdown_uses_one_shared_five_second_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [100.0]
+    first = DeadlineProcess(clock, exits_after_join=True)
+    second = DeadlineProcess(clock, exits_after_join=False)
+    monkeypatch.setattr(
+        train_module,
+        "_monotonic",
+        lambda: clock[0],
+        raising=False,
+    )
+
+    workers_alive, escalated, operation_errors = train_module._stop_processes(
+        [first, second],
+        graceful_join=True,
+    )
+
+    assert first.join_calls == [1.5]
+    assert second.join_calls == [1.5, 1.0]
+    assert first.terminate_calls == 0
+    assert second.terminate_calls == 1
+    assert clock[0] == 104.0
+    assert workers_alive is False
+    assert escalated is True
+    assert operation_errors == ()
+
+
+def test_multiworker_shutdown_reserves_positive_fair_post_terminate_reaping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [200.0]
+    processes = [PostTerminateJoinProcess(clock), PostTerminateJoinProcess(clock)]
+    monkeypatch.setattr(train_module, "_monotonic", lambda: clock[0], raising=False)
+
+    workers_alive, escalated, operation_errors = train_module._stop_processes(
+        processes,
+        graceful_join=True,
+    )
+
+    assert workers_alive is False
+    assert escalated is True
+    assert operation_errors == ()
+    assert all(process.terminate_calls == 1 for process in processes)
+    assert all(process.kill_calls == 0 for process in processes)
+    assert all(len(process.join_calls) == 2 for process in processes)
+    assert all(
+        process.join_calls[1] is not None and process.join_calls[1] > 0 for process in processes
+    )
+    assert (
+        sum(
+            timeout
+            for process in processes
+            for timeout in process.join_calls
+            if timeout is not None
+        )
+        <= 5.0
+    )
+
+
+def test_failed_worker_shutdown_does_not_mark_close_audit_complete() -> None:
+    vector_env = RuntimeProcessVecEnv(
+        [
+            lambda: FakeEnv(
+                0,
+                config=make_config(),
+                role="train",
+                worker_index=0,
+            )
+        ],
+        exits_on_terminate=False,
+        exits_on_kill=False,
+    )
+    vector_env.remotes = (FakeRemote(),)
+
+    with pytest.raises(RuntimeError, match="cleanup could not be confirmed"):
+        train_module._close_vector_env(vector_env)
+
+    assert not getattr(vector_env, train_module._VECTOR_CLOSE_AUDIT_MARKER, False)
+
+
 class ProcessFailingSubprocVecEnv:
     latest: ClassVar["ProcessFailingSubprocVecEnv | None"] = None
 
@@ -1856,7 +2226,9 @@ class RemoteCloseFailingSubprocVecEnv:
 
 def test_subprocess_cleanup_confirms_workers_dead_before_reporting_construction_failure(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(train_module, "_monotonic", lambda: 0.0, raising=False)
     dummy = VecFactory()
 
     with pytest.raises(OSError, match="subprocess handshake failed"):
@@ -1873,10 +2245,10 @@ def test_subprocess_cleanup_confirms_workers_dead_before_reporting_construction_
     terminated, killed, already_dead = partial.processes
     assert terminated.terminate_calls == 1
     assert terminated.kill_calls == 0
-    assert terminated.join_calls == [1.0]
+    assert terminated.join_calls == [pytest.approx(0.5)]
     assert killed.terminate_calls == 1
     assert killed.kill_calls == 1
-    assert killed.join_calls == [1.0, 1.0]
+    assert killed.join_calls == [pytest.approx(1.0), pytest.approx(1.0)]
     assert already_dead.terminate_calls == 0
     assert already_dead.kill_calls == 0
     assert already_dead.join_calls == []
@@ -1885,7 +2257,11 @@ def test_subprocess_cleanup_confirms_workers_dead_before_reporting_construction_
     assert dummy.created == []
 
 
-def test_subprocess_cleanup_refuses_fallback_when_worker_survives(tmp_path: Path) -> None:
+def test_subprocess_cleanup_refuses_fallback_when_worker_survives(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(train_module, "_monotonic", lambda: 0.0, raising=False)
     dummy = VecFactory()
 
     with pytest.raises(OSError, match="subprocess handshake failed") as raised:
@@ -1902,7 +2278,7 @@ def test_subprocess_cleanup_refuses_fallback_when_worker_survives(tmp_path: Path
     process = partial.processes[0]
     assert process.terminate_calls == 1
     assert process.kill_calls == 1
-    assert process.join_calls == [1.0, 1.0]
+    assert process.join_calls == [pytest.approx(1.0), pytest.approx(1.0)]
     assert process.is_alive() is True
     assert dummy.created == []
     assert any("worker cleanup could not be confirmed" in note for note in raised.value.__notes__)
@@ -1991,6 +2367,26 @@ class UnconfirmedEscalatedProcess(FakeProcess):
         self.alive = False
 
 
+class DelayedGracefulProcess(FakeProcess):
+    def __init__(self) -> None:
+        super().__init__(exits_on_terminate=True, exits_on_kill=True)
+
+    def join(self, timeout: float | None = None) -> None:
+        self.join_calls.append(timeout)
+        if timeout is not None and timeout >= 2.0:
+            self.alive = False
+            self.exitcode = 0
+
+
+class DelayedCloseRemote(FakeRemote):
+    def __init__(self) -> None:
+        super().__init__()
+        self.sent: list[tuple[str, None]] = []
+
+    def send(self, message: tuple[str, None]) -> None:
+        self.sent.append(message)
+
+
 class RuntimeCloseFailingRemote(GracefulRemote):
     def close(self) -> None:
         super().close()
@@ -2073,7 +2469,7 @@ def test_successful_training_confirms_subprocess_training_worker_exited(
     remote = training.remotes[0]
     assert remote.sent == [("close", None)]
     assert remote.close_calls == 1
-    assert process.join_calls == [1.0]
+    assert process.join_calls == [pytest.approx(3.0)]
     assert process.terminate_calls == 0
     assert process.kill_calls == 0
     assert process.is_alive() is False
@@ -2124,7 +2520,7 @@ def test_preclosed_subprocess_still_requires_first_exitcode_audit() -> None:
     with pytest.raises(RuntimeError, match="exit code 1"):
         train_module._close_vector_env(vector_env)
 
-    assert process.join_calls == [1.0]
+    assert process.join_calls == [pytest.approx(3.0)]
 
 
 @pytest.mark.parametrize(
@@ -2180,6 +2576,7 @@ def test_subprocess_none_exitcode_after_escalation_is_unconfirmed() -> None:
     assert process.terminate_calls == 1
     assert process.kill_calls == 0
     assert process.is_alive() is False
+    assert not getattr(vector_env, train_module._VECTOR_CLOSE_AUDIT_MARKER, False)
 
 
 def test_nonzero_worker_exit_blocks_inventory_and_publication(
@@ -2259,6 +2656,30 @@ def test_runtime_cleanup_escalation_fails_once_after_stopping_worker() -> None:
         process.kill_calls,
         len(process.join_calls),
     ) == operation_counts
+
+
+def test_runtime_cleanup_allows_slow_graceful_metadrive_worker_exit() -> None:
+    vector_env = RuntimeProcessVecEnv(
+        [
+            lambda: FakeEnv(
+                0,
+                config=make_config(),
+                role="train",
+                worker_index=0,
+            )
+        ]
+    )
+    process = DelayedGracefulProcess()
+    remote = DelayedCloseRemote()
+    vector_env.processes = [process]
+    vector_env.remotes = (remote,)
+
+    train_module._close_vector_env(vector_env)
+
+    assert remote.sent == [("close", None)]
+    assert process.terminate_calls == 0
+    assert process.kill_calls == 0
+    assert process.exitcode == 0
 
 
 def test_runtime_subprocess_remote_close_failure_is_propagated() -> None:
@@ -2409,12 +2830,201 @@ def test_resume_records_provenance_preserves_source_and_keeps_timesteps(
         "config_diff": {},
         "start_num_timesteps": 12_500,
     }
-    assert FakePPO.load_calls[0]["path"] == source.checkpoint.resolve()
+    assert isinstance(FakePPO.load_calls[0]["path"], io.BytesIO)
+    assert FakePPO.load_calls[0]["source_bytes"] == source.checkpoint.read_bytes()
     assert FakePPO.instances[0].learn_kwargs is not None
     assert FakePPO.instances[0].learn_kwargs["reset_num_timesteps"] is False
     assert FakePPO.instances[0].num_timesteps == 17_596
     assert result.timesteps == 5_096
     assert source_tree_bytes(source.run_dir) == source_before
+
+
+def test_resume_restores_exact_automatic_curriculum_state_without_regression(
+    tmp_path: Path,
+) -> None:
+    config = make_automatic_config()
+    parent_state = CurriculumState(level=2, consecutive_passes=1, evaluations=7)
+    source = seed_compatible_source_run(
+        tmp_path,
+        config=config,
+        curriculum_state=parent_state,
+    )
+    destination = tmp_path / "curriculum-continued"
+
+    result, environments, *_ = run_with_fakes(
+        config,
+        destination,
+        resume_from=source.checkpoint,
+    )
+
+    restored = read_curriculum_state(result.run_dir / "curriculum_state.yaml")
+    assert restored == parent_state
+    metadata = json.loads((result.run_dir / "run_metadata.json").read_text(encoding="utf-8"))
+    assert metadata["curriculum_state"] == {
+        "path": "curriculum_state.yaml",
+        "sha256": sha256_file(result.run_dir / "curriculum_state.yaml"),
+        "level": 2,
+        "consecutive_passes": 1,
+        "evaluations": 7,
+    }
+    assert all(environment.difficulty_levels == [2] for environment in environments.created)
+
+
+@pytest.mark.parametrize("checkpoint_kind", ["periodic", "final"])
+@pytest.mark.parametrize(
+    "corruption",
+    ["missing", "null-metadata", "hash-mismatch", "malformed", "metadata-values"],
+)
+def test_resume_rejects_invalid_run_final_curriculum_artifact_before_destination(
+    tmp_path: Path,
+    checkpoint_kind: str,
+    corruption: str,
+) -> None:
+    source = seed_compatible_source_run(tmp_path)
+    selected_checkpoint = (
+        add_periodic_checkpoint(source) if checkpoint_kind == "periodic" else source.checkpoint
+    )
+    state_path = source.run_dir / "curriculum_state.yaml"
+    metadata_path = source.run_dir / "run_metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    if corruption == "missing":
+        state_path.unlink()
+    elif corruption == "null-metadata":
+        metadata["curriculum_state"] = None
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    elif corruption == "hash-mismatch":
+        state_path.write_text(
+            "level: 0\nconsecutive_passes: 0\nevaluations: 1\n",
+            encoding="utf-8",
+        )
+    elif corruption == "malformed":
+        state_path.write_text("level: [", encoding="utf-8")
+        metadata["curriculum_state"]["sha256"] = sha256_file(state_path)
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    else:
+        metadata["curriculum_state"]["evaluations"] = 1
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    destination = tmp_path / f"rejected-final-state-{checkpoint_kind}-{corruption}"
+    environments = EnvFactory()
+
+    with pytest.raises(ValueError, match="curriculum|Curriculum|Artifact"):
+        run_with_fakes(
+            make_config(),
+            destination,
+            resume_from=selected_checkpoint,
+            env_factory=environments,
+        )
+
+    assert not destination.exists()
+    assert environments.calls == []
+    assert FakePPO.load_calls == []
+
+
+@pytest.mark.parametrize("checkpoint_kind", ["periodic", "final"])
+def test_resume_validates_run_final_curriculum_reachability_against_parent_config(
+    tmp_path: Path,
+    checkpoint_kind: str,
+) -> None:
+    source = seed_compatible_source_run(tmp_path)
+    selected_checkpoint = (
+        add_periodic_checkpoint(source) if checkpoint_kind == "periodic" else source.checkpoint
+    )
+    unreachable = CurriculumState(level=1, consecutive_passes=0, evaluations=1)
+    state_path = source.run_dir / "curriculum_state.yaml"
+    write_curriculum_state(unreachable, state_path)
+    metadata_path = source.run_dir / "run_metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["curriculum_state"].update(
+        {
+            "sha256": sha256_file(state_path),
+            "level": unreachable.level,
+            "consecutive_passes": unreachable.consecutive_passes,
+            "evaluations": unreachable.evaluations,
+        }
+    )
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="fixed curriculum.*level"):
+        run_with_fakes(
+            make_config(),
+            tmp_path / f"unreachable-final-state-{checkpoint_kind}",
+            resume_from=selected_checkpoint,
+        )
+
+    assert FakePPO.load_calls == []
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    ["missing", "hash-mismatch", "malformed", "level-out-of-range", "metadata-mismatch"],
+)
+def test_resume_rejects_invalid_checkpoint_curriculum_state_before_destination(
+    tmp_path: Path,
+    corruption: str,
+) -> None:
+    source = seed_compatible_source_run(tmp_path)
+    state_path = checkpoint_curriculum_sidecar_path(source.checkpoint)
+    metadata_path = source.run_dir / "run_metadata.json"
+    if corruption == "missing":
+        state_path.unlink()
+    elif corruption == "hash-mismatch":
+        state_path.write_text(
+            "schema_version: 1\n"
+            f"checkpoint_sha256: {sha256_file(source.checkpoint)}\n"
+            "level: 0\nconsecutive_passes: 0\nevaluations: 1\n",
+            encoding="utf-8",
+        )
+    elif corruption == "malformed":
+        state_path.write_text("level: [", encoding="utf-8")
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["checkpoint_curriculum_artifacts"][0]["state_sha256"] = sha256_file(state_path)
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    elif corruption == "level-out-of-range":
+        state_path.write_text(
+            "schema_version: 1\n"
+            f"checkpoint_sha256: {sha256_file(source.checkpoint)}\n"
+            "level: 4\nconsecutive_passes: 0\nevaluations: 0\n",
+            encoding="utf-8",
+        )
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["checkpoint_curriculum_artifacts"][0].update(
+            {"state_sha256": sha256_file(state_path), "level": 4}
+        )
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    else:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["checkpoint_curriculum_artifacts"][0]["evaluations"] = 1
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    destination = tmp_path / f"rejected-curriculum-{corruption}"
+    environments = EnvFactory()
+
+    with pytest.raises(ValueError, match="curriculum|Curriculum"):
+        run_with_fakes(
+            make_config(),
+            destination,
+            resume_from=source.checkpoint,
+            env_factory=environments,
+        )
+
+    assert not destination.exists()
+    assert environments.calls == []
+    assert FakePPO.load_calls == []
+
+
+def test_resume_rejects_incompatible_curriculum_configuration(
+    tmp_path: Path,
+) -> None:
+    source = seed_compatible_source_run(tmp_path)
+    payload = make_config().model_dump(mode="python")
+    payload["scenarios"]["curriculum"]["success_rate_threshold"] = 0.9
+    incompatible = AppConfig.model_validate(payload)
+
+    with pytest.raises(ValueError, match="scenarios.curriculum.success_rate_threshold"):
+        run_with_fakes(
+            incompatible,
+            tmp_path / "incompatible-curriculum",
+            resume_from=source.checkpoint,
+        )
 
 
 @pytest.mark.parametrize(
@@ -2709,7 +3319,68 @@ def test_resume_rejects_invalid_resolved_source_config_before_destination(
     assert FakePPO.load_calls == []
 
 
-def test_resume_detects_checkpoint_change_during_load_before_destination_or_learning(
+@pytest.mark.parametrize(
+    ("path", "replacement"),
+    [
+        (("metadrive", "use_render"), 0),
+        (("shield", "imminent_ttc_s"), True),
+        (("shield", "imminent_ttc_s"), 1),
+    ],
+)
+def test_resume_rejects_type_changed_metadata_resolved_config_scalars(
+    tmp_path: Path,
+    path: tuple[str, str],
+    replacement: object,
+) -> None:
+    config = make_config()
+    source = seed_compatible_source_run(tmp_path, config=config)
+    metadata_path = source.run_dir / "run_metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["resolved_config"][path[0]][path[1]] = replacement
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    destination = tmp_path / f"type-changed-{path[1]}-{type(replacement).__name__}"
+    environments = EnvFactory()
+
+    with pytest.raises(ValueError, match="does not match"):
+        run_with_fakes(
+            config,
+            destination,
+            resume_from=source.checkpoint,
+            env_factory=environments,
+        )
+
+    assert not destination.exists()
+    assert environments.calls == []
+    assert FakePPO.load_calls == []
+
+
+@pytest.mark.parametrize("duplicate_scope", ["root", "nested"])
+def test_resume_rejects_duplicate_resolved_config_keys_before_destination_or_ppo_load(
+    tmp_path: Path,
+    duplicate_scope: str,
+) -> None:
+    source = seed_compatible_source_run(tmp_path)
+    config_path = source.run_dir / "config_resolved.yaml"
+    config_text = config_path.read_text(encoding="utf-8")
+    if duplicate_scope == "root":
+        config_text = config_text.replace("seed: 7\n", "seed: 7\nseed: 7\n", 1)
+    else:
+        config_text = config_text.replace(
+            "  seed: 42\n",
+            "  seed: 42\n  seed: 42\n",
+            1,
+        )
+    config_path.write_text(config_text, encoding="utf-8")
+    destination = tmp_path / f"duplicate-config-{duplicate_scope}"
+
+    with pytest.raises(ValueError, match="duplicate"):
+        run_with_fakes(make_config(), destination, resume_from=source.checkpoint)
+
+    assert not destination.exists()
+    assert FakePPO.load_calls == []
+
+
+def test_resume_load_uses_snapshot_if_checkpoint_path_changes_after_authentication(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2717,18 +3388,50 @@ def test_resume_detects_checkpoint_change_during_load_before_destination_or_lear
     destination = tmp_path / "changed-source"
     original_load = FakePPO.load.__func__
 
-    def changing_load(cls: type[FakePPO], path: Path, **kwargs: Any) -> FakePPO:
+    authenticated_bytes = source.checkpoint.read_bytes()
+
+    def changing_load(cls: type[FakePPO], path: object, **kwargs: Any) -> FakePPO:
         model = original_load(cls, path, **kwargs)
-        path.write_bytes(b"changed-during-load")
+        source.checkpoint.write_bytes(b"changed-during-load")
         return model
 
     monkeypatch.setattr(FakePPO, "load", classmethod(changing_load))
 
-    with pytest.raises(ValueError, match="changed"):
-        run_with_fakes(make_config(), destination, resume_from=source.checkpoint)
+    run_with_fakes(make_config(), destination, resume_from=source.checkpoint)
 
-    assert not destination.exists()
-    assert FakePPO.instances[0].learn_kwargs is None
+    assert destination.is_dir()
+    assert source.checkpoint.read_bytes() == b"changed-during-load"
+    assert FakePPO.load_calls[0]["source_bytes"] == authenticated_bytes
+
+
+def test_resume_loads_authenticated_checkpoint_snapshot_across_swap_and_restore_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = seed_compatible_source_run(tmp_path)
+    authenticated_bytes = source.checkpoint.read_bytes()
+    replacement = tmp_path / "replacement.zip"
+    FakePPO.write_checkpoint(replacement, "replacement-with-valid-contract")
+    replacement_bytes = replacement.read_bytes()
+    original_load = FakePPO.load.__func__
+
+    def swapping_load(cls: type[FakePPO], path: object, **kwargs: Any) -> FakePPO:
+        source.checkpoint.write_bytes(replacement_bytes)
+        try:
+            return original_load(cls, path, **kwargs)
+        finally:
+            source.checkpoint.write_bytes(authenticated_bytes)
+
+    monkeypatch.setattr(FakePPO, "load", classmethod(swapping_load))
+
+    run_with_fakes(
+        make_config(),
+        tmp_path / "immutable-checkpoint-resume",
+        resume_from=source.checkpoint,
+    )
+
+    assert FakePPO.load_calls[0]["source_bytes"] == authenticated_bytes
+    assert FakePPO.load_calls[0]["source_bytes"] != replacement_bytes
 
 
 def test_resume_loads_ppo_with_train_env_and_keeps_timesteps(tmp_path: Path) -> None:
@@ -2751,8 +3454,9 @@ def test_resume_loads_ppo_with_train_env_and_keeps_timesteps(tmp_path: Path) -> 
     assert private_workspace.name.startswith(".resume.training-")
     assert not private_workspace.exists()
     assert (tmp_path / "resume" / "tensorboard").is_dir()
-    assert FakePPO.load_calls[0] == {
-        "path": source.checkpoint.resolve(),
+    load_call = dict(FakePPO.load_calls[0])
+    assert isinstance(load_call.pop("path"), io.BytesIO)
+    assert load_call == {
         "source_bytes": source_bytes,
         "env": model.init_kwargs["env"],
         "device": "cpu",

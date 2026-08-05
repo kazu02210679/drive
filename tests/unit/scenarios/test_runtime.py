@@ -17,10 +17,24 @@ from mad_driving.scenarios import (
     ScenarioStepResult,
     ScenarioTransition,
 )
+from mad_driving.scenarios.runtime import typed_collision_flags
 
 
 class FakeEnvironment:
     pass
+
+
+def test_typed_collision_flags_returns_only_supported_active_boolean_flags() -> None:
+    flags = typed_collision_flags(
+        {"crash_vehicle": True, "crash_human": False, "crash_building": True}
+    )
+
+    assert flags == frozenset({"crash_vehicle", "crash_building"})
+
+
+def test_typed_collision_flags_rejects_non_boolean_values() -> None:
+    with pytest.raises(TypeError, match="crash_vehicle.*boolean"):
+        typed_collision_flags({"crash_vehicle": 1})
 
 
 def test_scenarios_package_imports_in_a_fresh_process() -> None:
@@ -48,6 +62,7 @@ def test_noop_runtime_has_stable_lifecycle_outputs() -> None:
     seeds = EpisodeSeeds(
         episode_rng_seed=42,
         metadrive_scenario_index=7,
+        scenario_selection_seed=9,
         scenario_parameter_seed=11,
     )
     state = runtime.reset(FakeEnvironment(), seeds=seeds)
@@ -107,7 +122,7 @@ def test_scenario_state_copies_and_freezes_parameters() -> None:
     parameters = {"crossing_speed_mps": 3.0}
     state = ScenarioState(
         scenario_id="crossing",
-        seeds=EpisodeSeeds(1, 2, 3),
+        seeds=EpisodeSeeds(1, 2, 3, 4),
         parameters=parameters,
     )
     parameters["crossing_speed_mps"] = 99.0
@@ -123,7 +138,7 @@ def test_scenario_state_recursively_freezes_nested_parameter_aliases() -> None:
     parameters = {"curriculum": [schedule]}
     state = ScenarioState(
         scenario_id="crossing",
-        seeds=EpisodeSeeds(1, 2, 3),
+        seeds=EpisodeSeeds(1, 2, 3, 4),
         parameters=parameters,
     )
 
@@ -156,13 +171,13 @@ def test_scenario_state_rejects_non_json_or_non_mapping_parameters(
     with pytest.raises(ValueError, match=message):
         ScenarioState(
             scenario_id="crossing",
-            seeds=EpisodeSeeds(1, 2, 3),
+            seeds=EpisodeSeeds(1, 2, 3, 4),
             parameters=parameters,  # type: ignore[arg-type]
         )
 
 
 def test_scenario_transition_is_immutable() -> None:
-    state = ScenarioState("crossing", EpisodeSeeds(1, 2, 3), {})
+    state = ScenarioState("crossing", EpisodeSeeds(1, 2, 3, 4), {})
     transition = ScenarioTransition(
         state=state,
         outcome=ScenarioStepResult(success=False, failure=False),
@@ -185,7 +200,7 @@ def test_scenario_step_result_rejects_invalid_or_contradictory_outcomes(
 
 
 def test_scenario_transition_validates_owned_types() -> None:
-    state = ScenarioState("crossing", EpisodeSeeds(1, 2, 3), {})
+    state = ScenarioState("crossing", EpisodeSeeds(1, 2, 3, 4), {})
     with pytest.raises(TypeError, match="state"):
         ScenarioTransition(state=object(), outcome=ScenarioStepResult(False, False))  # type: ignore[arg-type]
     with pytest.raises(TypeError, match="outcome"):

@@ -1,3 +1,4 @@
+import json
 import math
 import zipfile
 from collections.abc import Callable
@@ -9,6 +10,7 @@ import numpy as np
 import pytest
 from gymnasium.utils.env_checker import check_env
 from numpy.typing import NDArray
+from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 
 from mad_driving.config.loader import load_config
@@ -16,6 +18,8 @@ from mad_driving.config.models import AppConfig
 from mad_driving.envs import MultiAgentSpeedEnv, create_control_metadrive_env
 from mad_driving.interfaces import DecisionTrace
 from mad_driving.training import run_training
+from mad_driving.training.curriculum import CurriculumState, read_curriculum_state
+from mad_driving.training.metadata import RESEARCH_CONTRACT_VERSION
 
 SEED = 42
 ACTION_SEQUENCE = tuple(index % 4 for index in range(100))
@@ -61,6 +65,57 @@ EXPECTED_REWARD_COMPONENT_KEYS = (
     "standstill_penalty",
     "shield_intervention_penalty",
 )
+PHASE5_RECORD_FIELDS = {
+    "role",
+    "worker_index",
+    "environment_seed",
+    "scenario_selection_seed",
+    "scenario_parameter_seed",
+    "scenario_id",
+    "difficulty_level",
+    "scenario_parameters",
+}
+
+
+def assert_finite_deterministic_policy(checkpoint: Path) -> None:
+    model = PPO.load(checkpoint, device="cpu")
+    for name, tensor in model.policy.state_dict().items():
+        if tensor.is_floating_point():
+            assert bool(tensor.isfinite().all()), f"non-finite policy tensor: {name}"
+    observation = np.zeros(24, dtype=np.float32)
+    assert np.isfinite(observation).all()
+    first_action, _ = model.predict(observation, deterministic=True)
+    second_action, _ = model.predict(observation, deterministic=True)
+    np.testing.assert_array_equal(first_action, second_action)
+    action = int(np.asarray(first_action).item())
+    assert 0 <= action < 4
+
+
+def assert_phase5_training_artifacts(
+    run_dir: Path,
+    *,
+    expected_state: CurriculumState,
+) -> None:
+    assert read_curriculum_state(run_dir / "curriculum_state.yaml") == expected_state
+    metadata = json.loads((run_dir / "run_metadata.json").read_text(encoding="utf-8"))
+    assert metadata["research_contract_version"] == RESEARCH_CONTRACT_VERSION == 6
+    assert metadata["observation_shape"] == [24]
+    assert metadata["action_order"] == ["KEEP", "SLOW", "PREPARE_STOP", "STOP"]
+    assert metadata["curriculum_state"]["level"] == expected_state.level
+    assert metadata["curriculum_state"]["evaluations"] == expected_state.evaluations
+    assert metadata["episode_seed_artifacts"]
+    for summary in metadata["episode_seed_artifacts"]:
+        assert summary["schema_version"] == 4
+        artifact = run_dir / summary["path"]
+        records = [
+            json.loads(line) for line in artifact.read_text(encoding="utf-8").splitlines()[1:]
+        ]
+        assert summary["record_count"] == len(records)
+        for record in records:
+            assert set(record) == PHASE5_RECORD_FIELDS
+            assert record["role"] in {"train", "validation"}
+            assert not 20_000 <= record["scenario_selection_seed"] < 21_000
+            assert not 20_000 <= record["scenario_parameter_seed"] < 21_000
 
 
 def assert_valid_observation(
@@ -271,8 +326,13 @@ def test_real_rl_environment_repeats_same_seed_initial_observation_and_traces() 
 def test_real_single_metadrive_training_uses_isolated_subprocess_validation(
     tmp_path: Path,
 ) -> None:
-    payload = load_config("configs/base.yaml").model_dump(mode="python")
-    payload["metadrive"]["horizon"] = 8
+    payload = load_config(
+        "configs/base.yaml",
+        "configs/scenarios/lead_brake.yaml",
+    ).model_dump(mode="python")
+    payload["metadrive"]["horizon"] = 120
+    payload["scenarios"]["lead_brake"]["trigger_s"] = {"minimum": 0.1, "maximum": 0.1}
+    payload["scenarios"]["lead_brake"]["survival_s"] = 0.1
     payload["training"].update(
         {
             "n_steps": 8,
@@ -300,9 +360,61 @@ def test_real_single_metadrive_training_uses_isolated_subprocess_validation(
     assert result.timesteps == 8
     assert zipfile.is_zipfile(result.best_checkpoint)
     assert zipfile.is_zipfile(result.final_checkpoint)
+    assert_finite_deterministic_policy(result.best_checkpoint)
+    assert_finite_deterministic_policy(result.final_checkpoint)
     assert len(CapturingDummyVecEnv.created) == 1
     assert all(vector.closed for vector in CapturingDummyVecEnv.created)
     assert len(CapturingSubprocVecEnv.created) == 1
     validation_vector = CapturingSubprocVecEnv.created[0]
     assert validation_vector.closed is True
     assert [process.exitcode for process in validation_vector.processes] == [0]
+    assert_phase5_training_artifacts(
+        result.run_dir,
+        expected_state=CurriculumState(level=1, consecutive_passes=0, evaluations=1),
+    )
+
+
+@pytest.mark.integration
+def test_real_automatic_curriculum_advances_after_one_scheduled_validation(
+    tmp_path: Path,
+) -> None:
+    payload = load_config("configs/base.yaml").model_dump(mode="python")
+    payload["scenario_id"] = "phase5"
+    payload["metadrive"]["horizon"] = 120
+    payload["scenarios"]["selection"] = "auto"
+    payload["scenarios"]["curriculum"] = {
+        "mode": "automatic",
+        "initial_level": 0,
+        "success_rate_threshold": 1.0,
+        "collision_rate_threshold": 0.0,
+        "consecutive_evaluations": 1,
+    }
+    payload["scenarios"]["lead_brake"]["survival_s"] = 0.1
+    payload["training"].update(
+        {
+            "n_steps": 8,
+            "batch_size": 8,
+            "n_epochs": 1,
+            "smoke_timesteps": 8,
+            "checkpoint_interval_steps": 8,
+            "eval_interval_steps": 8,
+            "eval_episodes": 1,
+        }
+    )
+    config = AppConfig.model_validate(payload)
+
+    result = run_training(
+        config,
+        smoke=True,
+        run_dir=tmp_path / "automatic-curriculum-training",
+    )
+
+    assert result.timesteps == 8
+    assert zipfile.is_zipfile(result.best_checkpoint)
+    assert zipfile.is_zipfile(result.final_checkpoint)
+    assert_finite_deterministic_policy(result.best_checkpoint)
+    assert_finite_deterministic_policy(result.final_checkpoint)
+    assert_phase5_training_artifacts(
+        result.run_dir,
+        expected_state=CurriculumState(level=1, consecutive_passes=0, evaluations=1),
+    )

@@ -16,6 +16,7 @@ class EpisodeSeeds:
 
     episode_rng_seed: int
     metadrive_scenario_index: int
+    scenario_selection_seed: int
     scenario_parameter_seed: int
 
 
@@ -46,10 +47,11 @@ class EpisodeSeedAllocator:
         sequence = np.random.SeedSequence(
             [episode_rng_seed, _ROLE_CODES[self.role], self.worker_index]
         )
-        road, parameters = sequence.spawn(2)
+        road, selection, parameters = sequence.spawn(3)
         return EpisodeSeeds(
             episode_rng_seed=episode_rng_seed,
             metadrive_scenario_index=self._bounded(road),
+            scenario_selection_seed=self._bounded(selection),
             scenario_parameter_seed=self._bounded(parameters),
         )
 

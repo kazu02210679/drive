@@ -3,7 +3,16 @@
 from math import isclose
 from typing import Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, PositiveInt, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    FiniteFloat,
+    PositiveInt,
+    model_validator,
+)
+
+OCCLUDED_CROSSING_ACTOR_HALF_WIDTH_M = 0.2
 
 
 class StrictFrozenModel(BaseModel):
@@ -31,12 +40,107 @@ class SeedRangeConfig(StrictTypedFrozenModel):
         return range(self.seed_start, self.seed_start + self.seed_count)
 
 
+class FloatRangeConfig(StrictTypedFrozenModel):
+    """One finite inclusive floating-point range."""
+
+    minimum: FiniteFloat
+    maximum: FiniteFloat
+
+    @model_validator(mode="after")
+    def validate_order(self) -> Self:
+        if self.minimum > self.maximum:
+            raise ValueError("minimum must not exceed maximum")
+        return self
+
+
+class PositiveFloatRangeConfig(FloatRangeConfig):
+    """One finite range whose complete sampling domain is strictly positive."""
+
+    @model_validator(mode="after")
+    def validate_positive_minimum(self) -> Self:
+        if self.minimum <= 0.0:
+            raise ValueError("minimum must be strictly positive")
+        return self
+
+
+class CurriculumConfig(StrictTypedFrozenModel):
+    """Validated curriculum settings for Phase 5 scenarios."""
+
+    mode: Literal["fixed", "automatic"] = "fixed"
+    fixed_level: int = Field(default=0, ge=0, le=3)
+    initial_level: int = Field(default=0, ge=0, le=3)
+    success_rate_threshold: FiniteFloat = Field(default=0.80, ge=0.0, le=1.0)
+    collision_rate_threshold: FiniteFloat = Field(default=0.05, ge=0.0, le=1.0)
+    maximum_unnecessary_stop_duration_s: FiniteFloat = Field(default=1.0, ge=0.0)
+    consecutive_evaluations: PositiveInt = 2
+
+
+class LeadBrakeScenarioConfig(StrictTypedFrozenModel):
+    """Validated parameter ranges for the Lead Brake scenario."""
+
+    initial_gap_m: PositiveFloatRangeConfig = PositiveFloatRangeConfig(minimum=35.0, maximum=55.0)
+    speed_fraction: PositiveFloatRangeConfig = PositiveFloatRangeConfig(minimum=0.80, maximum=1.00)
+    trigger_s: PositiveFloatRangeConfig = PositiveFloatRangeConfig(minimum=1.0, maximum=3.0)
+    mild_deceleration_mps2: PositiveFloatRangeConfig = PositiveFloatRangeConfig(
+        minimum=2.0, maximum=4.0
+    )
+    severe_deceleration_mps2: PositiveFloatRangeConfig = PositiveFloatRangeConfig(
+        minimum=4.0, maximum=8.0
+    )
+    survival_s: FiniteFloat = Field(default=4.0, gt=0.0)
+
+
+class CutInScenarioConfig(StrictTypedFrozenModel):
+    """Validated parameter ranges for the Cut-in scenario."""
+
+    initial_gap_m: PositiveFloatRangeConfig = PositiveFloatRangeConfig(minimum=20.0, maximum=40.0)
+    trigger_s: PositiveFloatRangeConfig = PositiveFloatRangeConfig(minimum=1.0, maximum=3.0)
+    merge_duration_s: PositiveFloatRangeConfig = PositiveFloatRangeConfig(minimum=1.5, maximum=3.0)
+    speed_fraction: PositiveFloatRangeConfig = PositiveFloatRangeConfig(minimum=0.75, maximum=1.05)
+    survival_s: FiniteFloat = Field(default=3.0, gt=0.0)
+
+
+class OccludedCrossingScenarioConfig(StrictTypedFrozenModel):
+    """Validated parameter ranges for the Level-3 cyclist crossing scenario."""
+
+    conflict_distance_m: PositiveFloatRangeConfig = PositiveFloatRangeConfig(
+        minimum=20.0, maximum=40.0
+    )
+    crossing_start_offset_m: PositiveFloatRangeConfig = PositiveFloatRangeConfig(
+        minimum=6.0, maximum=12.0
+    )
+    crossing_speed_mps: PositiveFloatRangeConfig = PositiveFloatRangeConfig(
+        minimum=2.0, maximum=6.0
+    )
+    trigger_s: PositiveFloatRangeConfig = PositiveFloatRangeConfig(minimum=1.0, maximum=3.0)
+    survival_s: FiniteFloat = Field(default=2.0, gt=0.0)
+    occluder_lane_edge_offset_m: FiniteFloat = Field(default=0.5, ge=0.5)
+    reveal_lateral_m: FiniteFloat = Field(default=3.0, gt=0.0)
+    secondary_lead_gap_m: PositiveFloatRangeConfig = PositiveFloatRangeConfig(
+        minimum=35.0, maximum=55.0
+    )
+    secondary_lead_speed_fraction: PositiveFloatRangeConfig = PositiveFloatRangeConfig(
+        minimum=0.80, maximum=1.00
+    )
+
+    @model_validator(mode="after")
+    def validate_hidden_at_reset(self) -> Self:
+        if self.crossing_start_offset_m.minimum <= self.reveal_lateral_m:
+            raise ValueError("crossing_start_offset_m.minimum must exceed reveal_lateral_m")
+        return self
+
+
 class ScenarioSplitsConfig(StrictTypedFrozenModel):
     """Disjoint scenario seed ranges for training and evaluation roles."""
 
     train: SeedRangeConfig = SeedRangeConfig(seed_start=0, seed_count=10_000)
     validation: SeedRangeConfig = SeedRangeConfig(seed_start=10_000, seed_count=1_000)
     test: SeedRangeConfig = SeedRangeConfig(seed_start=20_000, seed_count=1_000)
+    selection: Literal["auto", "nominal", "lead_brake", "cut_in", "occluded_crossing"] = "nominal"
+    curriculum: CurriculumConfig = CurriculumConfig()
+    lead_brake: LeadBrakeScenarioConfig = LeadBrakeScenarioConfig()
+    cut_in: CutInScenarioConfig = CutInScenarioConfig()
+    occluded_crossing: OccludedCrossingScenarioConfig = OccludedCrossingScenarioConfig()
 
     @model_validator(mode="after")
     def validate_disjoint_ranges(self) -> Self:
@@ -47,6 +151,22 @@ class ScenarioSplitsConfig(StrictTypedFrozenModel):
             for second in ranges[index + 1 :]
         ):
             raise ValueError("scenario seed ranges must not overlap")
+        if self.curriculum.mode == "automatic":
+            if self.selection != "auto":
+                raise ValueError("automatic curriculum requires scenario selection 'auto'")
+            return self
+        allowed_selections = {
+            0: frozenset({"nominal"}),
+            1: frozenset({"lead_brake"}),
+            2: frozenset({"lead_brake", "cut_in", "auto"}),
+            3: frozenset({"occluded_crossing"}),
+        }[self.curriculum.fixed_level]
+        if self.selection not in allowed_selections:
+            raise ValueError(
+                "fixed curriculum scenario selection must match its level: "
+                f"level {self.curriculum.fixed_level} allows "
+                f"{sorted(allowed_selections)!r}"
+            )
         return self
 
 
@@ -271,6 +391,46 @@ class AppConfig(StrictFrozenModel):
     observation: ObservationConfig = Field(default_factory=ObservationConfig)
     reward: RewardConfig = Field(default_factory=RewardConfig)
     training: PPOConfig = Field(default_factory=PPOConfig)
+
+    @model_validator(mode="after")
+    def validate_scenario_durations_fit_horizon(self) -> Self:
+        capacity_s = self.metadrive.horizon * self.metadrive.decision_dt_s
+        crossing = self.scenarios.occluded_crossing
+        required_durations_s = {
+            "lead_brake": (
+                self.scenarios.lead_brake.trigger_s.maximum + self.scenarios.lead_brake.survival_s
+            ),
+            "cut_in": (
+                self.scenarios.cut_in.trigger_s.maximum
+                + self.scenarios.cut_in.merge_duration_s.maximum
+                + self.scenarios.cut_in.survival_s
+            ),
+            "occluded_crossing": (
+                crossing.trigger_s.maximum
+                + (
+                    crossing.crossing_start_offset_m.maximum
+                    + self.metadrive.lane_width_m / 2.0
+                    + OCCLUDED_CROSSING_ACTOR_HALF_WIDTH_M
+                )
+                / crossing.crossing_speed_mps.minimum
+                + crossing.survival_s
+            ),
+        }
+        over_capacity = {
+            scenario_id: duration_s
+            for scenario_id, duration_s in required_durations_s.items()
+            if duration_s > capacity_s
+        }
+        if over_capacity:
+            details = ", ".join(
+                f"{scenario_id}={duration_s:.6g}s"
+                for scenario_id, duration_s in over_capacity.items()
+            )
+            raise ValueError(
+                "scenario worst-case duration exceeds MetaDrive horizon "
+                f"({capacity_s:.6g}s): {details}"
+            )
+        return self
 
     def metadrive_dict(self) -> dict[str, Any]:
         """Return a plain dictionary accepted by MetaDrive."""

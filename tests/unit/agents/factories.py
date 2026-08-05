@@ -167,6 +167,7 @@ def make_frame(
         or EpisodeSeeds(
             episode_rng_seed=42,
             metadrive_scenario_index=7,
+            scenario_selection_seed=9,
             scenario_parameter_seed=11,
         ),
         observation=make_snapshot() if observation is None else observation,

@@ -4,9 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from math import cos, inf, pi, sin
-from numbers import Integral
 from typing import TYPE_CHECKING, Any
-from uuid import UUID
 
 from mad_driving.interfaces import (
     ActorState,
@@ -18,6 +16,7 @@ from mad_driving.interfaces import (
     SceneObservation,
 )
 from mad_driving.interfaces.actor_state import ActorType
+from mad_driving.scenarios.actor_ids import stable_actor_id
 from mad_driving.scenarios.seeding import EpisodeSeeds
 from mad_driving.world_model.validation import (
     ConfigReader,
@@ -240,20 +239,40 @@ class SceneSnapshotBuilder:
     ) -> tuple[ActorState, ...]:
         ego_lane = self._current_lane(ego_vehicle)
         ego_lane_index = self._canonical_lane_index(ego_vehicle, ego_lane)
+        scenario_actor_ids = self._scenario_actor_ids(env)
         actors: list[ActorState] = []
         for object_key, simulator_object in env.engine.get_objects().items():
             if simulator_object is ego_vehicle or not self._has_actor_state(simulator_object):
                 continue
-            position = xy_pair(f"actor[{object_key}].position", simulator_object.position)
-            velocity = xy_pair(f"actor[{object_key}].velocity", simulator_object.velocity)
-            last_velocity = xy_pair(
-                f"actor[{object_key}].last_velocity",
-                getattr(simulator_object, "last_velocity", velocity),
+            actor_id = stable_actor_id(object_key, simulator_object)
+            managed_state = (
+                self._scenario_actor_state(env, actor_id)
+                if actor_id in scenario_actor_ids
+                else None
             )
+            if managed_state is None:
+                position = xy_pair(f"actor[{object_key}].position", simulator_object.position)
+                velocity = xy_pair(f"actor[{object_key}].velocity", simulator_object.velocity)
+                last_velocity = xy_pair(
+                    f"actor[{object_key}].last_velocity",
+                    getattr(simulator_object, "last_velocity", velocity),
+                )
+                acceleration = self._acceleration(velocity, last_velocity, interval_s)
+                actor_heading = simulator_object.heading_theta
+                managed_lane_index = None
+            else:
+                position = managed_state.position_xy_m
+                velocity = managed_state.velocity_xy_mps
+                acceleration = managed_state.acceleration_xy_mps2
+                actor_heading = managed_state.heading_rad
+                managed_lane_index = managed_state.lane_index
             dx = position[0] - ego_position[0]
             dy = position[1] - ego_position[1]
-            actor_id = self._actor_id(object_key, simulator_object)
-            actor_lane = self._current_lane(simulator_object)
+            actor_lane = (
+                self._lane_for_index(env, managed_lane_index)
+                if managed_lane_index is not None
+                else self._current_lane(simulator_object)
+            )
             visible = visible_actor_ids is None or actor_id in visible_actor_ids
             actors.append(
                 ActorState(
@@ -261,9 +280,9 @@ class SceneSnapshotBuilder:
                     actor_type=self._actor_type(simulator_object),
                     position_xy_m=position,
                     velocity_xy_mps=velocity,
-                    acceleration_xy_mps2=self._acceleration(velocity, last_velocity, interval_s),
+                    acceleration_xy_mps2=acceleration,
                     heading_rad=self._normalized_heading(
-                        f"actor[{actor_id}].heading_theta", simulator_object.heading_theta
+                        f"actor[{actor_id}].heading_theta", actor_heading
                     ),
                     length_m=finite_float(f"actor[{actor_id}].length", simulator_object.LENGTH),
                     width_m=finite_float(f"actor[{actor_id}].width", simulator_object.WIDTH),
@@ -275,6 +294,7 @@ class SceneSnapshotBuilder:
                         actor_lane,
                         position,
                         config,
+                        managed_lane_index=managed_lane_index,
                     ),
                     visible=visible,
                     occluded=not visible,
@@ -284,18 +304,6 @@ class SceneSnapshotBuilder:
         if len(actor_ids) != len(set(actor_ids)):
             raise ValueError("simulator actors produced a duplicate actor_id")
         return tuple(sorted(actors, key=lambda actor: actor.actor_id))
-
-    @staticmethod
-    def _actor_id(object_key: object, simulator_object: Any) -> str:
-        actor_id = str(getattr(simulator_object, "name", object_key))
-        try:
-            UUID(actor_id)
-        except ValueError:
-            return actor_id
-        random_seed = getattr(simulator_object, "random_seed", None)
-        if isinstance(random_seed, bool) or not isinstance(random_seed, Integral):
-            return actor_id
-        return f"metadrive-{type(simulator_object).__name__}-{int(random_seed)}"
 
     @staticmethod
     def _normalized_heading(name: str, value: Any) -> float:
@@ -318,16 +326,52 @@ class SceneSnapshotBuilder:
         actor_lane: Any | None,
         actor_position: tuple[float, float],
         config: ConfigReader,
+        *,
+        managed_lane_index: tuple[str, str, int] | None = None,
     ) -> bool:
         if ego_lane_index is None:
             return False
-        if self._canonical_lane_index(actor_vehicle, actor_lane) != ego_lane_index:
+        actor_lane_index = (
+            tuple(managed_lane_index)
+            if managed_lane_index is not None
+            else self._canonical_lane_index(actor_vehicle, actor_lane)
+        )
+        if actor_lane_index != ego_lane_index:
             return False
         if actor_lane is None:
             return False
         _, lateral_position = actor_lane.local_coordinates(actor_position)
         lateral_position = finite_float("actor.lane_lateral_m", lateral_position)
         return abs(lateral_position) <= self._lane_width_m(actor_lane, config) / 2.0
+
+    @staticmethod
+    def _scenario_actor_ids(env: Any) -> frozenset[str]:
+        getter = getattr(env, "scenario_actor_ids", None)
+        if not callable(getter):
+            return frozenset()
+        actor_ids = tuple(getter())
+        if not all(isinstance(actor_id, str) and actor_id for actor_id in actor_ids):
+            raise ValueError("scenario_actor_ids must contain non-empty strings")
+        if len(actor_ids) != len(set(actor_ids)):
+            raise ValueError("scenario_actor_ids must not contain duplicates")
+        return frozenset(actor_ids)
+
+    @staticmethod
+    def _scenario_actor_state(env: Any, actor_id: str) -> Any:
+        getter = getattr(env, "scenario_actor_state", None)
+        if not callable(getter):
+            raise RuntimeError("scenario actor state getter is unavailable")
+        state = getter(actor_id)
+        if getattr(state, "actor_id", None) != actor_id:
+            raise RuntimeError("scenario actor state returned an unexpected actor ID")
+        return state
+
+    @staticmethod
+    def _lane_for_index(env: Any, lane_index: tuple[str, str, int]) -> Any:
+        try:
+            return env.engine.current_map.road_network.get_lane(lane_index)
+        except (AttributeError, KeyError, TypeError) as error:
+            raise RuntimeError("scenario actor lane index is unavailable") from error
 
     @staticmethod
     def _lane_width_m(lane: Any, config: ConfigReader) -> float:

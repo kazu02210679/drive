@@ -4,7 +4,108 @@ MetaDrive上の1台の自車内部に、複数の決定論的な専門Agentと�
 
 最上位要件は [`docs/multi_agent_driving_mvp_spec.md`](docs/multi_agent_driving_mvp_spec.md) です。
 
+## Phase 5 scenarios and curriculum
+
+Phase 5 adds deterministic Lead Brake, Cut-in, and Occluded Crossing hazards plus
+a validation-driven Levels 0--3 curriculum. The Coordinator contract is unchanged:
+the Agent still receives exactly one 24-dimensional `float32` observation and
+chooses from `KEEP=0`, `SLOW=1`, `PREPARE_STOP=2`, and `STOP=3`. Scenario identity,
+scenario parameters, and seed identities are provenance only; they are never added
+to the Agent observation.
+
+Configuration is loaded as one base YAML followed by ordered recursive overlays.
+The training CLI accepts repeatable `--overlay` arguments:
+
+```powershell
+# Fixed Level 1: Lead Brake
+python -m mad_driving.cli.train --config configs/base.yaml --overlay configs/scenarios/lead_brake.yaml --smoke --run-dir runs/phase5_lead_brake_smoke
+
+# Fixed Level 2: Cut-in
+python -m mad_driving.cli.train --config configs/base.yaml --overlay configs/scenarios/cut_in.yaml --smoke --run-dir runs/phase5_cut_in_smoke
+
+# Fixed Level 3: Occluded Crossing with its seeded secondary lead vehicle
+python -m mad_driving.cli.train --config configs/base.yaml --overlay configs/scenarios/occluded_crossing.yaml --smoke --run-dir runs/phase5_occluded_crossing_smoke
+```
+
+The same merge is available from Python as
+`load_config("configs/base.yaml", "configs/scenarios/lead_brake.yaml")`.
+Overlay order is significant, mapping/scalar conflicts are rejected, and only the
+fully resolved configuration is written to `config_resolved.yaml`.
+
+Curriculum levels have a stable mapping:
+
+- Level 0: `nominal`.
+- Level 1: `lead_brake`.
+- Level 2: either a concrete fixed `lead_brake`/`cut_in` selection, or `auto` for a
+  uniform seeded choice between them. The dedicated Cut-in overlay remains concrete.
+- Level 3: `occluded_crossing` plus its secondary lead vehicle.
+
+`fixed` mode holds `fixed_level`. `automatic` mode starts at `initial_level` and
+advances exactly one level only after the configured number of consecutive
+scheduled validations satisfy both the success-rate and collision-rate thresholds.
+Only validation episodes can update it; test episodes are rejected. Level changes
+are queued in training and validation environments and activate on the next reset.
+For example, an automatic overlay can contain:
+
+```yaml
+scenario_id: phase5
+scenarios:
+  selection: auto
+  curriculum:
+    mode: automatic
+    initial_level: 0
+    success_rate_threshold: 0.80
+    collision_rate_threshold: 0.05
+    maximum_unnecessary_stop_duration_s: 1.0
+    consecutive_evaluations: 2
+```
+
+Every actual reset is appended and `fsync`ed to a schema-v4 per-worker JSONL file.
+Each record has exactly `role`, `worker_index`, `environment_seed`,
+`scenario_selection_seed`, `scenario_parameter_seed`, `scenario_id`,
+`difficulty_level`, and recursively finite JSON-safe `scenario_parameters`.
+`environment_seed` is the Gymnasium episode RNG identity;
+`scenario_selection_seed` independently drives the Phase 5 scenario choice; and
+`scenario_parameter_seed` independently drives concrete parameter sampling. The
+MetaDrive road index is derived from a third independent child seed. Train
+`[0, 10000)`, validation `[10000, 11000)`, and test
+`[20000, 21000)` scenario identities remain disjoint. Test seeds are never used for
+training, validation, checkpoint selection, or curriculum progression.
+
+Automatic curriculum validation uses typed per-episode records. Safe STOP commands
+longer than `maximum_unnecessary_stop_duration_s` do not count as successful, and
+Level 2 validation alternates Lead Brake and Cut-in so each scenario must meet the
+success threshold independently. Best reward comparison resets at level changes and
+archives `best_model_level_<level>.zip`; Phase 6 performs final model selection on a
+fixed all-level validation suite.
+
+`curriculum_state.yaml` is atomically replaced with flush/`fsync` semantics. Every
+periodic, best, and final `*.zip` also has an adjacent `*.zip.curriculum.yaml`
+sidecar containing the exact curriculum state at that checkpoint's lifecycle point
+and the checkpoint SHA-256. Research contract v6 inventories both checkpoint and
+sidecar hashes in `run_metadata.json`. Resume resolves the sidecar bound to the
+selected checkpoint, reads and hashes one immutable byte snapshot, rejects path
+replacement races and malformed/duplicate-key data, and restores that exact state
+after validating curriculum compatibility. It never substitutes the run-final state
+for an earlier periodic or best checkpoint.
+
+`--run-dir` remains available for an explicit fresh destination. When omitted, the
+CLI atomically reserves a collision-free directory below configured
+`training.run_root`, so the exact nominal smoke command is safe to run directly.
+
+Useful commands:
+
+```powershell
+python -m mad_driving.cli.train --help
+python -m mad_driving.cli.train --config configs/base.yaml --smoke
+python -m mad_driving.cli.train --config configs/base.yaml --smoke --run-dir runs/phase5_nominal_smoke
+python -m pytest tests/integration/test_phase5_metadrive_headless.py -m integration -q
+```
+
 ## Current status
+
+Phase 5 scenario generation, curriculum progression, provenance, and exact resume are
+implemented. The Phase 4.2 control and PPO behavior described below remains preserved.
 
 Phase 4.2（comparison-validity remediation）まで実装済みです。Phase 1の厳密な設定検証とMetaDrive境界、Phase 2の専門Agent、Phase 3の安全制御、Phase 4のGymnasium/PPO経路に加え、次を含みます。
 
@@ -83,8 +184,8 @@ JSONには最終Snapshot・Claims・Reviewに加え、`final_trace`、4 Action�
 Windows PowerShell:
 
 ```powershell
-# Headless CPU smoke (replace <UNIQUE_RUN_ID>; destination must be fresh)
-.venv\Scripts\python.exe -m mad_driving.cli.train --config configs/base.yaml --smoke --run-dir runs/phase4_smoke_seed42_<UNIQUE_RUN_ID>
+# Headless CPU smoke (allocates a fresh directory under training.run_root)
+.venv\Scripts\python.exe -m mad_driving.cli.train --config configs/base.yaml --smoke
 
 # Standard 500,000-timestep run
 .venv\Scripts\python.exe -m mad_driving.cli.train --config configs/base.yaml --run-dir runs/phase4_standard_seed42
@@ -96,8 +197,8 @@ Windows PowerShell:
 Linux:
 
 ```bash
-# Headless CPU smoke (replace <UNIQUE_RUN_ID>; destination must be fresh)
-.venv/bin/python -m mad_driving.cli.train --config configs/base.yaml --smoke --run-dir runs/phase4_smoke_seed42_<UNIQUE_RUN_ID>
+# Headless CPU smoke (allocates a fresh directory under training.run_root)
+.venv/bin/python -m mad_driving.cli.train --config configs/base.yaml --smoke
 
 # Standard 500,000-timestep run
 .venv/bin/python -m mad_driving.cli.train --config configs/base.yaml --run-dir runs/phase4_standard_seed42
@@ -108,7 +209,14 @@ Linux:
 
 `configs/base.yaml`がsmokeとtrainingの共通canonical configです。`metadrive.start_seed`と`metadrive.num_scenarios`はsmoke用の既定値で、PPO環境はroleごとに`scenarios.<role>`の範囲へ上書きします。
 
-新規学習とresumeは必須の`--run-dir`で、存在しない、または空のdestinationを明示した場合だけ受け付けます。`<UNIQUE_RUN_ID>`は毎回新しい識別子へ置換してください。非空directoryを上書きしません。Resume sourceはread-onlyとして扱い、checkpoint SHA-256、親run/config、config差分、開始step、Observation/Action schemaを新しいrunの`run_metadata.json`へ記録します。source hostでcanonicalizeしたhistorical parent pathはcross-host provenance文字列として保持します。全runは`research_contract_version=4`、`observation_schema_version=1`です。各train/validation環境の実際のreset情報はdescriptor-boundな`episode_seeds/<role>-worker-<index>.jsonl`へ耐久書き込みします。parentはwriterがopenな間にVecEnv control channelからrole/worker/path/platform identityを保持し、close後のinventoryはそのparent-held identityに対して検証します。metadataの`episode_seed_artifacts`は相対path、role、worker、件数、schema version、検証済みplatform file identity、同一byte readのSHA-256を示します。
+`--run-dir` is optional for new training and resume runs. If omitted, the CLI reserves
+a unique empty destination under `training.run_root`; if supplied, it must still be
+absent or empty and is never overwritten. Resume authenticates one immutable checkpoint
+byte snapshot, restores the curriculum sidecar bound to that checkpoint, and records the
+parent checkpoint/config/diff/start step in the new run. Current runs use
+`research_contract_version=6` and `observation_schema_version=1`. Per-worker schema-v4
+episode seed JSONL artifacts retain descriptor-bound identity, exact counts, and SHA-256
+digests in `run_metadata.json`.
 
 `training.num_envs=1`ではtrainをparent processの`DummyVecEnv`、validationを1 workerの`SubprocVecEnv`にします。`num_envs>1`ではtrainを`SubprocVecEnv`、validation worker 0をparent processの`DummyVecEnv`にします。この相補構成でMetaDrive engineを1 processに1つに保ちつつ、学習中にperiodic evaluationとbest-checkpoint選択を行います。各評価直前にvalidation VecEnvをAppConfigのroot `seed`で再seedし、比較するcheckpointごとに同じepisode-seed列を再生します。
 
@@ -117,20 +225,24 @@ Linux:
 ```text
 <run-dir>/
 ├── config_resolved.yaml
-├── run_metadata.json
+├── run_metadata.json              # research contract v6 and artifact digests
+├── curriculum_state.yaml          # final run curriculum state
 ├── episode_seeds/
 │   ├── train-worker-000.jsonl
 │   └── validation-worker-000.jsonl
 ├── checkpoints/
 │   ├── best_model.zip
+│   ├── best_model.zip.curriculum.yaml
 │   ├── final_model.zip
-│   └── ppo_checkpoint_<steps>_steps.zip  # interval到達時のみ
+│   ├── final_model.zip.curriculum.yaml
+│   ├── ppo_checkpoint_<steps>_steps.zip  # interval到達時のみ
+│   └── ppo_checkpoint_<steps>_steps.zip.curriculum.yaml
 └── tensorboard/
     └── PPO_<n>/
         └── events.out.tfevents.*
 ```
 
-旧Task 11の再生成seed列と、path occupantをidentity trust sourceにした後続runは実run証拠として廃止しました。`runs/phase4_1_worker_identity_final_smoke_20260721_a`と`runs/phase4_1_worker_identity_final_smoke_20260721_b`は旧research contract v2、`runs/phase4_2_review_fix_v3_smoke_20260721_c`と`runs/phase4_2_review_fix_v3_smoke_20260721_d`は旧v3の履歴証拠です。最新のv4 evidenceは`runs/phase4_2_oracle_v4_smoke_20260721_g`と`runs/phase4_2_oracle_v4_smoke_20260721_h`です。両runは5,000 step時点で同一の5-episode periodic validationを行い、その後6,144 stepまで学習しました。両final checkpointは6,144 stepで再読込でき、各100 decision stepsのObservationとRewardはすべて有限かつ同一でした。詳細は [`docs/phase4_implementation_log.md`](docs/phase4_implementation_log.md) にあります。
+旧Task 11の再生成seed列と、path occupantをidentity trust sourceにした後続runは実run証拠として廃止しました。`runs/phase4_1_worker_identity_final_smoke_20260721_a`と`runs/phase4_1_worker_identity_final_smoke_20260721_b`は旧research contract v2、`runs/phase4_2_review_fix_v3_smoke_20260721_c`と`runs/phase4_2_review_fix_v3_smoke_20260721_d`は旧v3の履歴証拠です。Phase 4のhistorical v4 evidenceは`runs/phase4_2_oracle_v4_smoke_20260721_g`と`runs/phase4_2_oracle_v4_smoke_20260721_h`です。両runは5,000 step時点で同一の5-episode periodic validationを行い、その後6,144 stepまで学習しました。両final checkpointは6,144 stepで再読込でき、各100 decision stepsのObservationとRewardはすべて有限かつ同一でした。詳細は [`docs/phase4_implementation_log.md`](docs/phase4_implementation_log.md) にあります。
 
 ## Verify
 

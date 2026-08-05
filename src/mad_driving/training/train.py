@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import os
 import shutil
 import tempfile
@@ -10,18 +11,29 @@ from dataclasses import dataclass
 from functools import partial
 from numbers import Integral
 from pathlib import Path
+from time import monotonic as _monotonic
 from typing import Any, Protocol, TypeVar
 
 import gymnasium as gym
 import yaml
 from stable_baselines3 import PPO
-from stable_baselines3.common.callbacks import CheckpointCallback
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 
 from mad_driving.config.models import AppConfig
 from mad_driving.envs.multi_agent_speed_env import MultiAgentSpeedEnv
 from mad_driving.scenarios import EnvironmentRole
-from mad_driving.training.callbacks import RewardComponentsCallback, SeededEvalCallback
+from mad_driving.training.callbacks import (
+    CurriculumCheckpointCallback,
+    CurriculumEvalCallback,
+    RewardComponentsCallback,
+)
+from mad_driving.training.curriculum import (
+    CURRICULUM_STATE_FILENAME,
+    CurriculumController,
+    CurriculumState,
+    write_checkpoint_curriculum_state,
+    write_curriculum_state,
+)
 from mad_driving.training.episode_seeds import (
     EpisodeSeedArtifactDescriptor,
     EpisodeSeedRecordingWrapper,
@@ -30,8 +42,9 @@ from mad_driving.training.episode_seeds import (
 from mad_driving.training.metadata import (
     ResumeMetadata,
     RunMetadata,
+    checkpoint_curriculum_artifact_inventory,
+    curriculum_state_artifact,
     resolve_resume_source,
-    sha256_file,
     validate_resume_contract,
     write_run_metadata,
 )
@@ -61,6 +74,10 @@ VecEnvFactory = Callable[[list[Callable[[], gym.Env[Any, Any]]]], Any]
 GenericFactory = Callable[..., FactoryResult]
 _STAGING_PREFIX = ".training-"
 _VECTOR_CLOSE_AUDIT_MARKER = "_mad_driving_close_audit_complete"
+_GRACEFUL_PROCESS_JOIN_TIMEOUT_SECONDS = 5.0
+_GRACEFUL_JOIN_PHASE_SECONDS = 3.0
+_TERMINATE_JOIN_PHASE_SECONDS = 1.0
+_KILL_JOIN_PHASE_SECONDS = 1.0
 
 
 @dataclass(frozen=True)
@@ -245,29 +262,51 @@ def _stop_processes(
 
     escalated = False
     operation_errors: list[Exception] = []
-    for process in processes:
-        join = getattr(process, "join", None)
-        if graceful_join and callable(join):
-            if error := _attempt_process_operation(join, 1.0):
+    started_at = _monotonic()
+    deadline = started_at + _GRACEFUL_PROCESS_JOIN_TIMEOUT_SECONDS
+
+    def join_for(candidates: list[object], phase_seconds: float) -> None:
+        joinable = [
+            (process, join)
+            for process in candidates
+            if callable(join := getattr(process, "join", None))
+        ]
+        if not joinable:
+            return
+        phase_deadline = min(deadline, _monotonic() + phase_seconds)
+        for index, (_process, join) in enumerate(joinable):
+            phase_remaining = max(0.0, phase_deadline - _monotonic())
+            remaining_candidates = len(joinable) - index
+            timeout = phase_remaining / remaining_candidates
+            if error := _attempt_process_operation(join, timeout):
                 operation_errors.append(error)
+
+    if graceful_join:
+        join_for(processes, _GRACEFUL_JOIN_PHASE_SECONDS)
+
+    terminated_processes: list[object] = []
+    for process in processes:
         if _process_is_alive(process):
             escalated = True
+            terminated_processes.append(process)
             terminate = getattr(process, "terminate", None)
             if callable(terminate):
                 if error := _attempt_process_operation(terminate):
                     operation_errors.append(error)
-            if callable(join):
-                if error := _attempt_process_operation(join, 1.0):
-                    operation_errors.append(error)
+
+    join_for(terminated_processes, _TERMINATE_JOIN_PHASE_SECONDS)
+
+    killed_processes: list[object] = []
+    for process in processes:
         if _process_is_alive(process):
             escalated = True
+            killed_processes.append(process)
             kill = getattr(process, "kill", None)
             if callable(kill):
                 if error := _attempt_process_operation(kill):
                     operation_errors.append(error)
-            if callable(join):
-                if error := _attempt_process_operation(join, 1.0):
-                    operation_errors.append(error)
+
+    join_for(killed_processes, _KILL_JOIN_PHASE_SECONDS)
     return (
         any(_process_is_alive(process) for process in processes),
         escalated,
@@ -282,17 +321,17 @@ def _close_vector_env(resource: object | None) -> None:
         return
     if getattr(resource, _VECTOR_CLOSE_AUDIT_MARKER, False):
         return
-    try:
-        setattr(resource, _VECTOR_CLOSE_AUDIT_MARKER, True)
-    except Exception as exc:
-        raise _VectorEnvCleanupError(
-            "Vector environment close idempotence could not be established"
-        ) from exc
     processes = getattr(resource, "processes", None)
     if not isinstance(processes, list):
         close = getattr(resource, "close", None)
         if callable(close):
             close()
+        try:
+            setattr(resource, _VECTOR_CLOSE_AUDIT_MARKER, True)
+        except Exception as exc:
+            raise _VectorEnvCleanupError(
+                "Vector environment close idempotence could not be established"
+            ) from exc
         return
 
     remotes = tuple(getattr(resource, "remotes", ()))
@@ -320,15 +359,18 @@ def _close_vector_env(resource: object | None) -> None:
         cleanup_errors.append(
             _VectorEnvCleanupError("Subprocess worker required terminate/kill escalation")
         )
+    exit_codes_confirmed = True
     for worker_index, process in enumerate(processes):
         exitcode = getattr(process, "exitcode", None)
         if exitcode is None:
+            exit_codes_confirmed = False
             cleanup_errors.append(
                 _VectorEnvCleanupError(
                     f"Subprocess worker {worker_index} shutdown exit code is unconfirmed"
                 )
             )
         elif isinstance(exitcode, bool) or not isinstance(exitcode, Integral):
+            exit_codes_confirmed = False
             cleanup_errors.append(
                 _VectorEnvCleanupError(
                     f"Subprocess worker {worker_index} returned malformed exit code"
@@ -359,6 +401,15 @@ def _close_vector_env(resource: object | None) -> None:
         cleanup_errors.append(
             _VectorEnvCleanupError("Subprocess worker cleanup could not be confirmed")
         )
+    elif exit_codes_confirmed:
+        try:
+            setattr(resource, _VECTOR_CLOSE_AUDIT_MARKER, True)
+        except Exception as error:
+            cleanup_errors.append(
+                _VectorEnvCleanupError(
+                    f"Vector environment close audit could not be recorded: {error}"
+                )
+            )
     if cleanup_errors:
         details = "; ".join(str(error) for error in cleanup_errors)
         raise _VectorEnvCleanupError(details) from cleanup_errors[0]
@@ -470,8 +521,17 @@ def _build_eval_env(
     )
 
 
-def _scaled_frequency(interval_steps: int, num_envs: int) -> int:
-    return max(interval_steps // num_envs, 1)
+def _initial_curriculum_state(config: AppConfig) -> CurriculumState:
+    curriculum = config.scenarios.curriculum
+    level = curriculum.fixed_level if curriculum.mode == "fixed" else curriculum.initial_level
+    return CurriculumState(level=level, consecutive_passes=0, evaluations=0)
+
+
+def _broadcast_difficulty_level(vector_env: object, level: int) -> None:
+    env_method = getattr(vector_env, "env_method", None)
+    if not callable(env_method):
+        raise RuntimeError("Vector environment cannot restore the curriculum difficulty level")
+    env_method("set_difficulty_level", level)
 
 
 def _write_resolved_config(config: AppConfig, destination: Path) -> None:
@@ -563,12 +623,13 @@ def run_training(
     smoke: bool,
     run_dir: str | Path,
     resume_from: str | Path | None = None,
+    require_absent_run_dir: bool = False,
     env_factory: EnvironmentFactory = _default_env_factory,
     ppo_factory: GenericFactory[Any] = PPO,
     dummy_vec_env_factory: VecEnvFactory = DummyVecEnv,
     subproc_vec_env_factory: VecEnvFactory = SubprocVecEnv,
-    checkpoint_callback_factory: GenericFactory[Any] = CheckpointCallback,
-    eval_callback_factory: GenericFactory[Any] = SeededEvalCallback,
+    checkpoint_callback_factory: GenericFactory[Any] = CurriculumCheckpointCallback,
+    eval_callback_factory: GenericFactory[Any] = CurriculumEvalCallback,
     reward_callback_factory: GenericFactory[Any] = RewardComponentsCallback,
 ) -> TrainingResult:
     """Train or resume one PPO policy and close every environment on exit."""
@@ -579,6 +640,15 @@ def run_training(
     if resume_path is not None and not resume_path.is_file():
         raise FileNotFoundError(f"Resume checkpoint not found: {resume_path}")
     resume_source = None if resume_path is None else resolve_resume_source(resume_path, config)
+    curriculum_state = (
+        _initial_curriculum_state(config)
+        if resume_source is None
+        else resume_source.curriculum_state
+    )
+    curriculum_controller = CurriculumController(
+        config.scenarios.curriculum,
+        curriculum_state,
+    )
     if resume_source is not None:
         canonical_destination = destination.resolve()
         if (
@@ -589,8 +659,12 @@ def run_training(
                 f"Resume destination must be separate from the source run: {destination}"
             )
 
-    ownership = RunDirectoryOwnership.acquire(destination)
+    ownership = RunDirectoryOwnership.acquire(
+        destination,
+        require_absent=require_absent_run_dir,
+    )
     workspace = ownership.workspace
+    curriculum_state_path = workspace / CURRICULUM_STATE_FILENAME
     checkpoints_dir = workspace / "checkpoints"
     tensorboard_dir = workspace / "tensorboard"
     requested_timesteps = (
@@ -611,6 +685,7 @@ def run_training(
     model_logger_closed = False
     primary_error: BaseException | None = None
     try:
+        write_curriculum_state(curriculum_state, curriculum_state_path)
         train_env = _build_train_env(
             config,
             train_owner,
@@ -623,6 +698,9 @@ def run_training(
             dummy_vec_env_factory=dummy_vec_env_factory,
             subproc_vec_env_factory=subproc_vec_env_factory,
         )
+        if resume_source is not None:
+            _broadcast_difficulty_level(train_env, curriculum_state.level)
+            _broadcast_difficulty_level(eval_env, curriculum_state.level)
 
         if resume_source is None:
             model = ppo_factory(
@@ -644,16 +722,11 @@ def run_training(
             )
         else:
             model = ppo_factory.load(  # type: ignore[attr-defined]
-                resume_source.checkpoint,
+                io.BytesIO(resume_source.checkpoint_bytes),
                 env=train_env,
                 device="cpu",
                 tensorboard_log=str(tensorboard_dir),
             )
-            if sha256_file(resume_source.checkpoint) != resume_source.checkpoint_sha256:
-                raise ValueError(
-                    "Resume checkpoint changed while it was being validated and loaded: "
-                    f"{resume_source.checkpoint}"
-                )
             validate_resume_contract(model, config, resume_source.metadata)
 
         raw_start_timesteps = model.num_timesteps
@@ -682,6 +755,10 @@ def run_training(
             RunMetadata(
                 resolved_config=config.model_dump(mode="json"),
                 resume=resume_metadata,
+                curriculum_state=curriculum_state_artifact(
+                    curriculum_state_path,
+                    curriculum_controller.state,
+                ),
             ),
             workspace / "run_metadata.json",
         )
@@ -689,33 +766,40 @@ def run_training(
         staged_final_checkpoint = staging_dir / final_checkpoint.name
         staged_best_checkpoint = staging_dir / best_checkpoint.name
         checkpoint_callback = checkpoint_callback_factory(
-            save_freq=_scaled_frequency(
-                config.training.checkpoint_interval_steps,
-                config.training.num_envs,
-            ),
+            controller=curriculum_controller,
+            save_freq=config.training.checkpoint_interval_steps,
             save_path=str(staging_dir),
             name_prefix="ppo_checkpoint",
         )
         eval_callback = eval_callback_factory(
             eval_env=eval_env,
             validation_episode_seed=config.seed,
+            controller=curriculum_controller,
+            curriculum_state_path=curriculum_state_path,
             best_model_save_path=str(staging_dir),
-            eval_freq=_scaled_frequency(
-                min(config.training.eval_interval_steps, requested_timesteps),
-                config.training.num_envs,
+            eval_freq=(
+                min(config.training.eval_interval_steps, requested_timesteps)
+                if smoke
+                else config.training.eval_interval_steps
             ),
             n_eval_episodes=config.training.eval_episodes,
             deterministic=True,
             render=False,
         )
         reward_callback = reward_callback_factory()
-        callbacks = [reward_callback, checkpoint_callback, eval_callback]
+        callbacks = [reward_callback, eval_callback, checkpoint_callback]
         model.learn(
             total_timesteps=requested_timesteps,
             callback=callbacks,
             reset_num_timesteps=resume_source is None,
         )
         model.save(staged_final_checkpoint)
+        if not staged_final_checkpoint.is_file():
+            raise FileNotFoundError(f"Final checkpoint was not produced: {staged_final_checkpoint}")
+        write_checkpoint_curriculum_state(
+            curriculum_controller.state,
+            staged_final_checkpoint,
+        )
         trusted_seed_descriptors = (
             *_collect_episode_seed_artifact_descriptors(
                 train_env,
@@ -730,11 +814,10 @@ def run_training(
         )
         if not staged_best_checkpoint.is_file():
             raise FileNotFoundError(f"Best checkpoint was not produced: {staged_best_checkpoint}")
-        if not staged_final_checkpoint.is_file():
-            raise FileNotFoundError(f"Final checkpoint was not produced: {staged_final_checkpoint}")
         model_logger_closed = True
         _close_model_logger(model)
         _promote_checkpoint_artifacts(staging_dir, checkpoints_dir)
+        checkpoint_curriculum_artifacts = checkpoint_curriculum_artifact_inventory(checkpoints_dir)
         try:
             _cleanup_checkpoint_staging(staging_dir, checkpoints_dir)
         except Exception as exc:
@@ -754,10 +837,16 @@ def run_training(
             workspace,
             expected_descriptors=trusted_seed_descriptors,
         )
+        write_curriculum_state(curriculum_controller.state, curriculum_state_path)
         write_run_metadata(
             RunMetadata(
                 resolved_config=config.model_dump(mode="json"),
                 resume=resume_metadata,
+                curriculum_state=curriculum_state_artifact(
+                    curriculum_state_path,
+                    curriculum_controller.state,
+                ),
+                checkpoint_curriculum_artifacts=checkpoint_curriculum_artifacts,
                 episode_seed_artifacts=episode_seed_artifacts,
             ),
             workspace / "run_metadata.json",
