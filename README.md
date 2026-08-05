@@ -240,7 +240,7 @@ Python 3.11を使用します。Windowsの非ASCIIパスでも再現できるよ
 ```powershell
 py -3.11 -m venv .venv
 .venv\Scripts\python.exe -m pip install uv==0.8.0
-.venv\Scripts\uv.exe sync --no-editable --group dev --extra training
+.venv\Scripts\uv.exe sync --no-editable --group dev --extra training --extra evaluation
 ```
 
 ### Linux
@@ -248,7 +248,7 @@ py -3.11 -m venv .venv
 ```bash
 python3.11 -m venv .venv
 .venv/bin/python -m pip install uv==0.8.0
-.venv/bin/uv sync --no-editable --group dev --extra training
+.venv/bin/uv sync --no-editable --group dev --extra training --extra evaluation
 ```
 
 ## Run
