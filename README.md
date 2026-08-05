@@ -4,6 +4,17 @@ MetaDrive上の1台の自車内部に、複数の決定論的な専門Agentと�
 
 最上位要件は [`docs/multi_agent_driving_mvp_spec.md`](docs/multi_agent_driving_mvp_spec.md) です。
 
+## Architecture map
+
+実装済みのPhase 1〜6と、正式評価までに残る境界を1枚で確認できます。
+
+- [`architecture-map.html`](architecture-map.html): Flowと依存関係を探索する画面
+- [`architecture-map.json`](architecture-map.json): 根拠とcoverage gapを含む機械可読データ
+
+ローカルではrepository rootで`python -m http.server 4173`を実行し、
+`http://localhost:4173/architecture-map.html`を開いてください。現在のsmoke成果物は
+評価基盤の確認用であり、正式な5-policy-seed研究結果ではありません。
+
 ## Phase 6 evaluation workflow
 
 Phase 6の評価パイプラインは実装済みです。実MetaDriveで固定比較表を走行し、
