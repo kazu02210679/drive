@@ -1,0 +1,2623 @@
+{
+  "schemaVersion": "1.0.0",
+  "generatedAt": "2026-08-05",
+  "generatedFrom": "docs/multi_agent_driving_mvp_spec.md",
+  "project": {
+    "id": "multi-agent-driving-mvp",
+    "title": "車内マルチエージェント運転シミュレーション MVP",
+    "summary": "MetaDrive上の単一自車で、決定論的な専門Agent、PPO Coordinator、Safety Shieldを組み合わせ、4段階の速度判断を学習・比較するMVP。",
+    "repositoryStatus": "implemented-through-phase-6",
+    "objective": "MetaDrive上の単一自車で、独立した専門Agentの判断をPPO Coordinatorが統合し、Safety Shieldを通して安全な速度行動を実行する。",
+    "researchHypothesis": "単一予測器より、異なる根拠を持つ専門Agentの独立分析とCriticレビューを統合する方が、危険見逃しと過剰停止を抑えられるかを検証する。",
+    "learnedComponent": "PPO Coordinator only",
+    "implementationStatusNote": "Phase 1-6はmainのmerge commit 7249b08まで実装済み。GitHub Actions 30973490220は1,696 tests、coverage 90.79%で成功。正式5-seed実験は未実行。"
+  },
+  "categories": [
+    {
+      "id": "orchestration",
+      "label": "Orchestration",
+      "color": "#7c82ff"
+    },
+    {
+      "id": "simulation",
+      "label": "Simulation",
+      "color": "#49a8ff"
+    },
+    {
+      "id": "data",
+      "label": "Data contract",
+      "color": "#49c6b3"
+    },
+    {
+      "id": "agent",
+      "label": "Decision agents",
+      "color": "#f0bd45"
+    },
+    {
+      "id": "coordination",
+      "label": "Coordination",
+      "color": "#b285ff"
+    },
+    {
+      "id": "safety",
+      "label": "Safety",
+      "color": "#ff6f72"
+    },
+    {
+      "id": "control",
+      "label": "Vehicle control",
+      "color": "#66c77a"
+    },
+    {
+      "id": "learning",
+      "label": "Learning & evaluation",
+      "color": "#e58bc8"
+    },
+    {
+      "id": "observability",
+      "label": "Observability",
+      "color": "#9aa1ad"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "config-loader",
+      "label": "Config Loader",
+      "category": "orchestration",
+      "phase": "phase-1",
+      "status": "implemented",
+      "description": "YAML設定を検証・統合し、実行ごとの再現可能な設定を作る入口。",
+      "responsibilities": [
+        "未知キーと範囲外値を起動時に拒否",
+        "base/train/eval/agents/reward/shield/scenario設定を統合",
+        "config_resolved.yamlとして保存"
+      ],
+      "inputs": [
+        "configs/*.yaml",
+        "CLI arguments"
+      ],
+      "outputs": [
+        "Resolved configuration"
+      ],
+      "sourcePaths": [
+        "src/mad_driving/config/models.py",
+        "src/mad_driving/config/loader.py",
+        "configs/"
+      ],
+      "invariants": [
+        "同一設定とseedで再現可能",
+        "設定不正時はfail fast"
+      ],
+      "position": {
+        "x": 80,
+        "y": 150
+      },
+      "evidence": [
+        "src/mad_driving/config/models.py",
+        "src/mad_driving/config/loader.py",
+        "configs/"
+      ],
+      "coverageGap": ""
+    },
+    {
+      "id": "scenario-manager",
+      "label": "Scenario Manager",
+      "category": "simulation",
+      "phase": "phase-5",
+      "status": "implemented",
+      "description": "Lead Brake、Cut-in、Occluded Crossingをseed付きで生成し、curriculumとtrain/eval分割を管理する。",
+      "responsibilities": [
+        "手続き生成シナリオの初期化",
+        "train seedとeval seedの分離",
+        "Curriculum Level 0–3の管理",
+        "Actor生成条件のJSONL記録"
+      ],
+      "inputs": [
+        "Resolved configuration",
+        "seed",
+        "difficulty level"
+      ],
+      "outputs": [
+        "Scenario definition",
+        "Actor conditions"
+      ],
+      "sourcePaths": [
+        "src/mad_driving/scenarios/manager.py",
+        "src/mad_driving/scenarios/lead_brake.py",
+        "src/mad_driving/scenarios/cut_in.py",
+        "src/mad_driving/scenarios/occluded_crossing.py"
+      ],
+      "invariants": [
+        "同一seedで同一初期条件",
+        "train/eval seedsを重複させない"
+      ],
+      "position": {
+        "x": 80,
+        "y": 340
+      },
+      "evidence": [
+        "src/mad_driving/scenarios/manager.py",
+        "src/mad_driving/scenarios/lead_brake.py",
+        "src/mad_driving/scenarios/cut_in.py",
+        "src/mad_driving/scenarios/occluded_crossing.py"
+      ],
+      "coverageGap": ""
+    },
+    {
+      "id": "environment-wrapper",
+      "label": "MultiAgentSpeedEnv",
+      "category": "orchestration",
+      "phase": "phase-4",
+      "status": "implemented",
+      "description": "reset/stepの全処理を束ね、24次元ObservationとGymnasium準拠の結果を返す中心オーケストレータ。",
+      "responsibilities": [
+        "reset時の全状態初期化",
+        "step時の判断・制御・報酬・ログ処理",
+        "terminated/truncated判定",
+        "Gymnasium env_checker準拠"
+      ],
+      "inputs": [
+        "Discrete(4) action",
+        "Resolved configuration"
+      ],
+      "outputs": [
+        "observation",
+        "reward",
+        "terminated",
+        "truncated",
+        "info"
+      ],
+      "sourcePaths": [
+        "src/mad_driving/envs/multi_agent_speed_env.py"
+      ],
+      "invariants": [
+        "Observationは常に24次元の有限float32",
+        "例外時は安全側fallbackまたはtruncated"
+      ],
+      "position": {
+        "x": 300,
+        "y": 245
+      },
+      "evidence": [
+        "src/mad_driving/envs/multi_agent_speed_env.py"
+      ],
+      "coverageGap": ""
+    },
+    {
+      "id": "metadrive-simulation",
+      "label": "MetaDrive Simulation",
+      "category": "simulation",
+      "phase": "phase-1",
+      "status": "implemented",
+      "description": "手続き生成道路、自車、周辺車両、障害物を持つ正解状態のシミュレーション。",
+      "responsibilities": [
+        "headless reset/step/close",
+        "正解状態の提供",
+        "物理シミュレーションの進行"
+      ],
+      "inputs": [
+        "Scenario definition",
+        "normalized steering/throttle/brake"
+      ],
+      "outputs": [
+        "Simulator state",
+        "collision/off-road/arrival signals"
+      ],
+      "sourcePaths": [
+        "src/mad_driving/envs/multi_agent_speed_env.py"
+      ],
+      "invariants": [
+        "学習入力にRGB画像を使用しない",
+        "単一自車のみを学習対象とする"
+      ],
+      "position": {
+        "x": 300,
+        "y": 430
+      },
+      "evidence": [
+        "src/mad_driving/envs/multi_agent_speed_env.py"
+      ],
+      "coverageGap": ""
+    },
+    {
+      "id": "snapshot-builder",
+      "label": "Scene Snapshot Builder",
+      "category": "data",
+      "phase": "phase-1",
+      "status": "implemented",
+      "description": "MetaDriveの正解状態を、全Agentが同じ時刻に読む不変のSceneSnapshotへ変換する。",
+      "responsibilities": [
+        "EgoStateとActorStateの正規化",
+        "遮蔽・停止要求・衝突点距離の集約",
+        "値域とNaN/infの検証"
+      ],
+      "inputs": [
+        "Simulator state",
+        "previous action",
+        "previous shield intervention"
+      ],
+      "outputs": [
+        "SceneSnapshot"
+      ],
+      "sourcePaths": [
+        "src/mad_driving/world_model/snapshot_builder.py",
+        "src/mad_driving/world_model/validation.py"
+      ],
+      "interfaces": [
+        "ActorState",
+        "EgoState",
+        "SceneSnapshot"
+      ],
+      "invariants": [
+        "frozen/JSON serializable",
+        "各decision stepでAgent全員が同一Snapshotを読む"
+      ],
+      "position": {
+        "x": 510,
+        "y": 430
+      },
+      "evidence": [
+        "src/mad_driving/world_model/snapshot_builder.py",
+        "src/mad_driving/world_model/validation.py"
+      ],
+      "coverageGap": ""
+    },
+    {
+      "id": "scene-snapshot",
+      "label": "SceneSnapshot",
+      "category": "data",
+      "phase": "phase-1",
+      "status": "implemented",
+      "description": "自車、周辺Actor、遮蔽、停止要求、履歴を含む共有の読み取り専用データ契約。",
+      "responsibilities": [
+        "Agent入力の単一ソース",
+        "DecisionTraceと再現テストの基準"
+      ],
+      "inputs": [
+        "EgoState",
+        "ActorState[]",
+        "scenario metadata",
+        "history"
+      ],
+      "outputs": [
+        "SceneSnapshot"
+      ],
+      "sourcePaths": [
+        "src/mad_driving/interfaces/actor_state.py",
+        "src/mad_driving/interfaces/scene_snapshot.py"
+      ],
+      "invariants": [
+        "Agentが内部状態を直接共有しない",
+        "不正Actor状態を受け入れない"
+      ],
+      "position": {
+        "x": 710,
+        "y": 430
+      },
+      "evidence": [
+        "src/mad_driving/interfaces/actor_state.py",
+        "src/mad_driving/interfaces/scene_snapshot.py"
+      ],
+      "coverageGap": ""
+    },
+    {
+      "id": "nominal-agent",
+      "label": "Nominal Motion Agent",
+      "category": "agent",
+      "phase": "phase-2",
+      "status": "implemented",
+      "description": "観測済みActorの5秒先までの通常運動を予測し、最小TTCと連続的な衝突確率を評価する。",
+      "responsibilities": [
+        "constant-velocity/acceleration予測",
+        "前方車・cut-in・crossing actor評価",
+        "最も危険なActorのRiskClaimを1件提出"
+      ],
+      "inputs": [
+        "SceneSnapshot"
+      ],
+      "outputs": [
+        "RiskClaim"
+      ],
+      "sourcePaths": [
+        "src/mad_driving/agents/nominal.py"
+      ],
+      "invariants": [
+        "遮蔽Actorを存在するものとして補完しない",
+        "Safety Shieldの最悪ケース計算を複製しない"
+      ],
+      "position": {
+        "x": 930,
+        "y": 145
+      },
+      "evidence": [
+        "src/mad_driving/agents/nominal.py"
+      ],
+      "coverageGap": ""
+    },
+    {
+      "id": "hazard-agent",
+      "label": "Hazard Agent",
+      "category": "agent",
+      "phase": "phase-2",
+      "status": "implemented",
+      "description": "低確率でも重大な最悪ケースを評価し、worst-case TTCとstopping marginを提出する。",
+      "responsibilities": [
+        "前方車最大制動ケース",
+        "crossing actor最大進入速度ケース",
+        "遮蔽境界からの仮想Actor出現ケース",
+        "停止余裕が負ならseverityを上げる"
+      ],
+      "inputs": [
+        "SceneSnapshot"
+      ],
+      "outputs": [
+        "RiskClaim"
+      ],
+      "sourcePaths": [
+        "src/mad_driving/agents/hazard.py",
+        "src/mad_driving/agents/kinematics.py"
+      ],
+      "invariants": [
+        "推奨速度は危険増加時に緩和しない",
+        "物理量は有限"
+      ],
+      "position": {
+        "x": 930,
+        "y": 315
+      },
+      "evidence": [
+        "src/mad_driving/agents/hazard.py",
+        "src/mad_driving/agents/kinematics.py"
+      ],
+      "coverageGap": ""
+    },
+    {
+      "id": "rule-agent",
+      "label": "Rule Agent",
+      "category": "agent",
+      "phase": "phase-2",
+      "status": "implemented",
+      "description": "速度上限、停止要求、衝突・off-roadなど、学習へ委ねない交通制約を決定論的に提出する。",
+      "responsibilities": [
+        "speed limit制約",
+        "scenario-defined stop requirement",
+        "hard stop条件",
+        "交差点進入禁止条件"
+      ],
+      "inputs": [
+        "SceneSnapshot"
+      ],
+      "outputs": [
+        "RiskClaim"
+      ],
+      "sourcePaths": [
+        "src/mad_driving/agents/rule.py"
+      ],
+      "invariants": [
+        "機械学習を使用しない",
+        "hard violation予測時はhard_stop_required"
+      ],
+      "position": {
+        "x": 930,
+        "y": 485
+      },
+      "evidence": [
+        "src/mad_driving/agents/rule.py"
+      ],
+      "coverageGap": ""
+    },
+    {
+      "id": "critic-agent",
+      "label": "Critic Agent",
+      "category": "agent",
+      "phase": "phase-2",
+      "status": "implemented",
+      "description": "Snapshotと各RiskClaimを横断し、矛盾、見落とし、期限切れ、不正値を1回のCross Reviewで検査する。",
+      "responsibilities": [
+        "Agent間の推奨速度差を検出",
+        "遮蔽や停止余裕の見落としを検出",
+        "evidence・confidence・有効期限を検証",
+        "CriticReviewを生成"
+      ],
+      "inputs": [
+        "SceneSnapshot",
+        "RiskClaim[]"
+      ],
+      "outputs": [
+        "CriticReview"
+      ],
+      "sourcePaths": [
+        "src/mad_driving/agents/critic.py",
+        "src/mad_driving/interfaces/critic_review.py"
+      ],
+      "invariants": [
+        "他Agentを再実行しない",
+        "MVPではCross Reviewは1回のみ"
+      ],
+      "position": {
+        "x": 930,
+        "y": 655
+      },
+      "evidence": [
+        "src/mad_driving/agents/critic.py",
+        "src/mad_driving/interfaces/critic_review.py"
+      ],
+      "coverageGap": ""
+    },
+    {
+      "id": "risk-claims",
+      "label": "RiskClaim Contracts",
+      "category": "data",
+      "phase": "phase-2",
+      "status": "implemented",
+      "description": "危険仮説、信頼度、severity、TTC、停止余裕、推奨最大速度、根拠をAgent間で渡す構造化契約。",
+      "responsibilities": [
+        "Agent出力を共通schemaに統一",
+        "JSON化可能な証跡を保持"
+      ],
+      "inputs": [
+        "Agent analyses"
+      ],
+      "outputs": [
+        "RiskClaim[]"
+      ],
+      "sourcePaths": [
+        "src/mad_driving/interfaces/risk_claim.py"
+      ],
+      "invariants": [
+        "probability/confidence/severityは0..1",
+        "非有限値を禁止",
+        "recommended_max_speed_mpsは0以上"
+      ],
+      "position": {
+        "x": 1160,
+        "y": 315
+      },
+      "evidence": [
+        "src/mad_driving/interfaces/risk_claim.py"
+      ],
+      "coverageGap": ""
+    },
+    {
+      "id": "observation-builder",
+      "label": "Observation Builder",
+      "category": "coordination",
+      "phase": "phase-4",
+      "status": "implemented",
+      "description": "Ego、3 Agent、Critic、履歴を固定順の24次元float32ベクトルにする。",
+      "responsibilities": [
+        "6+4+5+3+4+2次元を固定順で連結",
+        "値を[-1,1]または[0,1]へ正規化",
+        "欠損TTCを上限値へ変換"
+      ],
+      "inputs": [
+        "SceneSnapshot",
+        "RiskClaim[]",
+        "CriticReview",
+        "history"
+      ],
+      "outputs": [
+        "24D observation"
+      ],
+      "sourcePaths": [
+        "src/mad_driving/coordinator/observation.py"
+      ],
+      "invariants": [
+        "shape=(24,)",
+        "dtype=float32",
+        "NaN/infなし"
+      ],
+      "position": {
+        "x": 1370,
+        "y": 315
+      },
+      "evidence": [
+        "src/mad_driving/coordinator/observation.py"
+      ],
+      "coverageGap": ""
+    },
+    {
+      "id": "ppo-coordinator",
+      "label": "PPO Coordinator",
+      "category": "coordination",
+      "phase": "phase-4",
+      "status": "implemented",
+      "description": "唯一の学習対象。24次元ObservationからKEEP/SLOW/PREPARE_STOP/STOPを選ぶ。",
+      "responsibilities": [
+        "Discrete(4) action選択",
+        "rollout単位でのみ重み更新",
+        "checkpoint保存・再開"
+      ],
+      "inputs": [
+        "24D observation"
+      ],
+      "outputs": [
+        "raw action: 0..3"
+      ],
+      "sourcePaths": [
+        "src/mad_driving/training/train.py",
+        "configs/base.yaml"
+      ],
+      "invariants": [
+        "エピソード途中で重みを更新しない",
+        "steeringを直接出力しない"
+      ],
+      "position": {
+        "x": 1580,
+        "y": 315
+      },
+      "evidence": [
+        "src/mad_driving/training/train.py",
+        "configs/base.yaml"
+      ],
+      "coverageGap": ""
+    },
+    {
+      "id": "action-mapping",
+      "label": "4-Level Action Mapping",
+      "category": "coordination",
+      "phase": "phase-3",
+      "status": "implemented",
+      "description": "離散行動をspeed limitに基づく目標速度へ変換する。",
+      "responsibilities": [
+        "KEEP → speed limit",
+        "SLOW → min(current, 0.60×limit)",
+        "PREPARE_STOP → min(current, 0.25×limit)",
+        "STOP → 0 m/s"
+      ],
+      "inputs": [
+        "raw action",
+        "current speed",
+        "speed limit"
+      ],
+      "outputs": [
+        "requested action",
+        "requested target speed"
+      ],
+      "sourcePaths": [
+        "src/mad_driving/control/action_mapper.py",
+        "src/mad_driving/control/actions.py"
+      ],
+      "invariants": [
+        "目標速度を瞬時適用しない",
+        "低レベルPIDで加減速度上限を守る"
+      ],
+      "position": {
+        "x": 1790,
+        "y": 315
+      },
+      "evidence": [
+        "src/mad_driving/control/action_mapper.py",
+        "src/mad_driving/control/actions.py"
+      ],
+      "coverageGap": ""
+    },
+    {
+      "id": "safety-shield",
+      "label": "Safety Shield",
+      "category": "safety",
+      "phase": "phase-3",
+      "status": "implemented",
+      "description": "学習モデルと独立した決定論的な最終防護。物理的に危険な行動だけを安全側へ上書きする。",
+      "responsibilities": [
+        "hard stop・負のstopping margin・TTC閾値を評価",
+        "KEEP/SLOWをPREPARE_STOPまたはSTOPへ強制変更",
+        "intervention理由をDecisionTraceへ記録"
+      ],
+      "inputs": [
+        "requested action",
+        "SceneSnapshot",
+        "RiskClaim[]",
+        "CriticReview"
+      ],
+      "outputs": [
+        "executed action",
+        "shield reasons"
+      ],
+      "sourcePaths": [
+        "src/mad_driving/safety/shield.py"
+      ],
+      "invariants": [
+        "危険側へ変更しない",
+        "Coordinatorと独立",
+        "決定論的"
+      ],
+      "position": {
+        "x": 2000,
+        "y": 315
+      },
+      "evidence": [
+        "src/mad_driving/safety/shield.py"
+      ],
+      "coverageGap": ""
+    },
+    {
+      "id": "lane-policy",
+      "label": "Lane-Keeping Longitudinal Policy",
+      "category": "control",
+      "phase": "phase-3",
+      "status": "implemented",
+      "description": "決定論的な車線追従とspeed PIDで、実行行動をMetaDriveの正規化Actionへ変換する。",
+      "responsibilities": [
+        "route情報によるlane keeping steering",
+        "target speedへのPID throttle/brake",
+        "anti-windup",
+        "episode reset時のcontroller初期化"
+      ],
+      "inputs": [
+        "executed action",
+        "target speed",
+        "navigation state"
+      ],
+      "outputs": [
+        "normalized steering/throttle/brake"
+      ],
+      "sourcePaths": [
+        "src/mad_driving/control/lane_keeping_policy.py",
+        "src/mad_driving/control/pid.py"
+      ],
+      "invariants": [
+        "横方向は学習しない",
+        "最大加速・通常減速・緊急減速上限を守る"
+      ],
+      "position": {
+        "x": 2210,
+        "y": 315
+      },
+      "evidence": [
+        "src/mad_driving/control/lane_keeping_policy.py",
+        "src/mad_driving/control/pid.py"
+      ],
+      "coverageGap": ""
+    },
+    {
+      "id": "reward-engine",
+      "label": "Reward Engine",
+      "category": "learning",
+      "phase": "phase-4",
+      "status": "implemented",
+      "description": "進捗と到着を報酬化し、衝突、near-miss、違反、jerk、不要制動、停止、Shield介入を分解して減点する。",
+      "responsibilities": [
+        "reward_componentsをinfoへ出力",
+        "Near-missをTTC連続関数で評価",
+        "将来情報はObservationに入れずreward計算だけに使用"
+      ],
+      "inputs": [
+        "previous/current snapshot",
+        "DecisionTrace",
+        "terminal state"
+      ],
+      "outputs": [
+        "scalar reward",
+        "reward_components"
+      ],
+      "sourcePaths": [
+        "src/mad_driving/envs/reward.py",
+        "configs/base.yaml"
+      ],
+      "invariants": [
+        "閾値跨ぎの不連続を避ける",
+        "collision/off-road等でterminated"
+      ],
+      "position": {
+        "x": 1370,
+        "y": 615
+      },
+      "evidence": [
+        "src/mad_driving/envs/reward.py",
+        "configs/base.yaml"
+      ],
+      "coverageGap": ""
+    },
+    {
+      "id": "training-pipeline",
+      "label": "Training Pipeline",
+      "category": "learning",
+      "phase": "phase-4",
+      "status": "implemented",
+      "description": "Stable-Baselines3 PPOのrollout、checkpoint、TensorBoard、curriculumを管理する。",
+      "responsibilities": [
+        "5,000 timestep smoke training",
+        "500,000 timestep standard training",
+        "checkpoint保存・再開",
+        "curriculum進行"
+      ],
+      "inputs": [
+        "Gymnasium Environment",
+        "reward",
+        "train seeds"
+      ],
+      "outputs": [
+        "Coordinator weights",
+        "checkpoints",
+        "train metrics"
+      ],
+      "sourcePaths": [
+        "src/mad_driving/training/train.py",
+        "src/mad_driving/training/callbacks.py",
+        "src/mad_driving/training/curriculum.py"
+      ],
+      "invariants": [
+        "rollout収集後にのみ更新",
+        "seedと依存関係を固定"
+      ],
+      "position": {
+        "x": 1580,
+        "y": 615
+      },
+      "evidence": [
+        "src/mad_driving/training/train.py",
+        "src/mad_driving/training/callbacks.py",
+        "src/mad_driving/training/curriculum.py"
+      ],
+      "coverageGap": ""
+    },
+    {
+      "id": "evaluation-pipeline",
+      "label": "Evaluation & Comparison",
+      "category": "learning",
+      "phase": "phase-6",
+      "status": "implemented",
+      "description": "B0/B1/B2/Proposedとablationを同一eval seedsで比較し、安全性・効率・快適性・Agent固有指標を集計する。",
+      "responsibilities": [
+        "checkpoint評価",
+        "baseline/ablation比較",
+        "CSVとMarkdown report生成",
+        "p50/p95/p99 decision latency計測"
+      ],
+      "inputs": [
+        "checkpoints",
+        "eval seeds",
+        "DecisionTrace[]"
+      ],
+      "outputs": [
+        "eval_metrics.csv",
+        "comparison.csv",
+        "Markdown report"
+      ],
+      "sourcePaths": [
+        "src/mad_driving/cli/evaluate.py",
+        "src/mad_driving/evaluation/runner.py",
+        "src/mad_driving/evaluation/metrics.py",
+        "src/mad_driving/evaluation/compare.py",
+        "src/mad_driving/visualization/report.py"
+      ],
+      "invariants": [
+        "全方式で同一eval seeds",
+        "目標未達も失敗シナリオと共に報告"
+      ],
+      "position": {
+        "x": 1790,
+        "y": 615
+      },
+      "evidence": [
+        "src/mad_driving/cli/evaluate.py",
+        "src/mad_driving/evaluation/runner.py",
+        "src/mad_driving/evaluation/metrics.py",
+        "src/mad_driving/evaluation/compare.py",
+        "src/mad_driving/visualization/report.py"
+      ],
+      "coverageGap": ""
+    },
+    {
+      "id": "decision-trace",
+      "label": "Decision Trace",
+      "category": "observability",
+      "phase": "phase-2",
+      "status": "implemented",
+      "description": "stepごとのRiskClaim、CriticReview、requested/executed action、Shield理由、reward内訳をJSONLで残す。",
+      "responsibilities": [
+        "判断根拠の監査可能性",
+        "episode replayと失敗分析",
+        "schema準拠のJSONL出力"
+      ],
+      "inputs": [
+        "snapshot",
+        "claims",
+        "review",
+        "actions",
+        "reward_components"
+      ],
+      "outputs": [
+        "episode_<id>_trace.jsonl",
+        "episode summary"
+      ],
+      "sourcePaths": [
+        "src/mad_driving/interfaces/decision_trace.py",
+        "src/mad_driving/evaluation/models.py",
+        "src/mad_driving/evaluation/serialization.py"
+      ],
+      "invariants": [
+        "全stepでrequestedとexecutedを区別",
+        "例外・fallbackも記録"
+      ],
+      "position": {
+        "x": 1160,
+        "y": 785
+      },
+      "evidence": [
+        "src/mad_driving/interfaces/decision_trace.py",
+        "src/mad_driving/evaluation/models.py",
+        "src/mad_driving/evaluation/serialization.py"
+      ],
+      "coverageGap": ""
+    },
+    {
+      "id": "run-directory",
+      "label": "Run Directory",
+      "category": "observability",
+      "phase": "phase-1",
+      "status": "implemented",
+      "description": "設定、metadata、checkpoint、trace、metrics、plot、GIFをrun_id単位で再現可能に保存する。",
+      "responsibilities": [
+        "run directory作成",
+        "artifactパスの一元管理",
+        "stderrを含む失敗記録"
+      ],
+      "inputs": [
+        "resolved config",
+        "metadata",
+        "all artifacts"
+      ],
+      "outputs": [
+        "runs/<run_id>/..."
+      ],
+      "sourcePaths": [
+        "src/mad_driving/training/metadata.py",
+        "src/mad_driving/evaluation/workspace.py",
+        "src/mad_driving/evaluation/bundle.py"
+      ],
+      "invariants": [
+        "既存runを暗黙上書きしない",
+        "再開に必要な情報を保持"
+      ],
+      "position": {
+        "x": 1580,
+        "y": 785
+      },
+      "evidence": [
+        "src/mad_driving/training/metadata.py",
+        "src/mad_driving/evaluation/workspace.py",
+        "src/mad_driving/evaluation/bundle.py"
+      ],
+      "coverageGap": ""
+    },
+    {
+      "id": "visualization-pipeline",
+      "label": "Visualization Pipeline",
+      "category": "observability",
+      "phase": "phase-6",
+      "status": "implemented",
+      "description": "episode GIF、判断overlay、学習曲線、衝突率、不要制動、Agent disagreementを生成する。",
+      "responsibilities": [
+        "GIF overlayへscenario/seed/action/Shield/reward表示",
+        "metrics plot生成",
+        "1エピソードの可視化CLI"
+      ],
+      "inputs": [
+        "DecisionTrace",
+        "render frames",
+        "metrics CSV"
+      ],
+      "outputs": [
+        "episode GIF",
+        "PNG plots"
+      ],
+      "sourcePaths": [
+        "src/mad_driving/visualization/overlay.py",
+        "src/mad_driving/visualization/plots.py",
+        "src/mad_driving/visualization/report.py",
+        "src/mad_driving/cli/render_episode.py"
+      ],
+      "invariants": [
+        "表示値とtraceを一致させる",
+        "headless実行可能"
+      ],
+      "position": {
+        "x": 2000,
+        "y": 615
+      },
+      "evidence": [
+        "src/mad_driving/visualization/overlay.py",
+        "src/mad_driving/visualization/plots.py",
+        "src/mad_driving/visualization/report.py",
+        "src/mad_driving/cli/render_episode.py"
+      ],
+      "coverageGap": ""
+    },
+    {
+      "id": "method-profile",
+      "label": "Method Profile",
+      "category": "orchestration",
+      "phase": "phase-6",
+      "status": "implemented",
+      "description": "7方式のAgent構成、Critic利用、既定Shield modeを中央定義する。",
+      "responsibilities": [
+        "方式IDを実行時構成へ解決",
+        "比較方式の構成差を固定",
+        "provenance用snapshotを生成"
+      ],
+      "inputs": [
+        "method.id"
+      ],
+      "outputs": [
+        "MethodProfile",
+        "MethodProfileSnapshot"
+      ],
+      "sourcePaths": [
+        "src/mad_driving/methods.py"
+      ],
+      "invariants": [
+        "未登録方式はfail fast",
+        "方式定義は単一ソース"
+      ],
+      "position": {
+        "x": 80,
+        "y": 950
+      },
+      "evidence": [
+        "src/mad_driving/methods.py"
+      ],
+      "coverageGap": ""
+    },
+    {
+      "id": "agent-suite",
+      "label": "AgentSuite",
+      "category": "agent",
+      "phase": "phase-6",
+      "status": "implemented",
+      "description": "Method Profileに従い専門Agentを組み立て、ClaimとCritic reviewを同一stepで収集する。",
+      "responsibilities": [
+        "Agent構成を生成",
+        "意図的ablationとruntime failureを区別",
+        "Critic reviewを実行"
+      ],
+      "inputs": [
+        "MethodProfile",
+        "SceneObservation"
+      ],
+      "outputs": [
+        "AgentAnalysisResult",
+        "RiskClaim[]",
+        "CriticReview"
+      ],
+      "sourcePaths": [
+        "src/mad_driving/agents/suite.py"
+      ],
+      "invariants": [
+        "expected_agent_idsを保持",
+        "Agent例外を構造化failureへ変換"
+      ],
+      "position": {
+        "x": 300,
+        "y": 950
+      },
+      "evidence": [
+        "src/mad_driving/agents/suite.py"
+      ],
+      "coverageGap": ""
+    },
+    {
+      "id": "evaluation-plan",
+      "label": "Evaluation Plan",
+      "category": "orchestration",
+      "phase": "phase-6",
+      "status": "implemented",
+      "description": "track、方式、checkpoint、5 scenario cells、test seedを固定した評価行列。",
+      "responsibilities": [
+        "決定・システム・ablation trackを列挙",
+        "checkpoint bindingを固定",
+        "episode keyを決定"
+      ],
+      "inputs": [
+        "configs/evaluation/*.yaml"
+      ],
+      "outputs": [
+        "EvaluationPlanConfig",
+        "EvaluationRunSpec[]"
+      ],
+      "sourcePaths": [
+        "src/mad_driving/evaluation/models.py",
+        "src/mad_driving/evaluation/plans.py",
+        "configs/evaluation/phase6_smoke.yaml"
+      ],
+      "invariants": [
+        "test seedは選抜に不使用",
+        "B0はpolicy seedで重複しない"
+      ],
+      "position": {
+        "x": 80,
+        "y": 1140
+      },
+      "evidence": [
+        "src/mad_driving/evaluation/models.py",
+        "src/mad_driving/evaluation/plans.py",
+        "configs/evaluation/phase6_smoke.yaml"
+      ],
+      "coverageGap": ""
+    },
+    {
+      "id": "policy-adapter",
+      "label": "Policy Adapter",
+      "category": "coordination",
+      "phase": "phase-6",
+      "status": "implemented",
+      "description": "B0の可視状態ルールと認証済みPPO checkpointを共通評価interfaceへ接続する。",
+      "responsibilities": [
+        "B0 actionを推論",
+        "PPO archiveとmetadataを照合",
+        "24D observationからactionを推論"
+      ],
+      "inputs": [
+        "EvaluationRunSpec",
+        "checkpoint",
+        "visible scene or 24D observation"
+      ],
+      "outputs": [
+        "Discrete(4) action"
+      ],
+      "sourcePaths": [
+        "src/mad_driving/evaluation/policies.py",
+        "src/mad_driving/evaluation/metadrive.py"
+      ],
+      "invariants": [
+        "checkpoint hashと方式を照合",
+        "B0にoracle truthを渡さない"
+      ],
+      "position": {
+        "x": 300,
+        "y": 1140
+      },
+      "evidence": [
+        "src/mad_driving/evaluation/policies.py",
+        "src/mad_driving/evaluation/metadrive.py"
+      ],
+      "coverageGap": ""
+    },
+    {
+      "id": "oracle-truth",
+      "label": "Oracle Truth",
+      "category": "data",
+      "phase": "phase-6",
+      "status": "implemented",
+      "description": "Agent出力から独立したPrivilegedWorldStateとして物理TTC、停止余裕、衝突、規則違反を保持する。",
+      "responsibilities": [
+        "方式非依存reward truthを保持",
+        "安全指標をstepへ渡す",
+        "policy observationから分離"
+      ],
+      "inputs": [
+        "MetaDrive ground truth"
+      ],
+      "outputs": [
+        "PrivilegedWorldState"
+      ],
+      "sourcePaths": [
+        "src/mad_driving/interfaces/scene_frame.py",
+        "src/mad_driving/world_model/snapshot_builder.py"
+      ],
+      "invariants": [
+        "Agent Claimをoracleに代用しない",
+        "24D observationへ混入しない"
+      ],
+      "position": {
+        "x": 510,
+        "y": 950
+      },
+      "evidence": [
+        "src/mad_driving/interfaces/scene_frame.py",
+        "src/mad_driving/world_model/snapshot_builder.py"
+      ],
+      "coverageGap": ""
+    },
+    {
+      "id": "step-jsonl",
+      "label": "Step JSONL",
+      "category": "observability",
+      "phase": "phase-6",
+      "status": "implemented",
+      "description": "DecisionTraceとoracle truthをEvaluationStepRecordとしてstrict JSONLへ逐次保存する。",
+      "responsibilities": [
+        "step identityを検証",
+        "決定・Shield・oracle・latencyを保存",
+        "strict replayを可能にする"
+      ],
+      "inputs": [
+        "DecisionTrace",
+        "PrivilegedWorldState",
+        "step outcome"
+      ],
+      "outputs": [
+        "episode_<seed>_trace.jsonl"
+      ],
+      "sourcePaths": [
+        "src/mad_driving/evaluation/runner.py",
+        "src/mad_driving/evaluation/serialization.py",
+        "src/mad_driving/evaluation/models.py"
+      ],
+      "invariants": [
+        "schema外fieldを拒否",
+        "step indexとseedを連続検証"
+      ],
+      "position": {
+        "x": 710,
+        "y": 950
+      },
+      "evidence": [
+        "src/mad_driving/evaluation/runner.py",
+        "src/mad_driving/evaluation/serialization.py",
+        "src/mad_driving/evaluation/models.py"
+      ],
+      "coverageGap": ""
+    },
+    {
+      "id": "episode-metrics",
+      "label": "Episode Metrics",
+      "category": "learning",
+      "phase": "phase-6",
+      "status": "implemented",
+      "description": "strict step recordsを安全性、効率、快適性、Agent固有指標へ還元する。",
+      "responsibilities": [
+        "1 episodeを1 metric rowへ集約",
+        "oracle safety metricを集計",
+        "latency percentileを計算"
+      ],
+      "inputs": [
+        "EvaluationStepRecord[]"
+      ],
+      "outputs": [
+        "EpisodeMetrics",
+        "eval_metrics.csv"
+      ],
+      "sourcePaths": [
+        "src/mad_driving/evaluation/metrics.py"
+      ],
+      "invariants": [
+        "同一episode identityのみ集計",
+        "ゼロ分母規則を固定"
+      ],
+      "position": {
+        "x": 930,
+        "y": 950
+      },
+      "evidence": [
+        "src/mad_driving/evaluation/metrics.py"
+      ],
+      "coverageGap": ""
+    },
+    {
+      "id": "validation-matrix",
+      "label": "Validation Matrix",
+      "category": "learning",
+      "phase": "phase-6",
+      "status": "implemented",
+      "description": "policy seedごとに固定validation suiteでcheckpoint候補を採点する。",
+      "responsibilities": [
+        "候補checkpointを認証",
+        "固定scenario matrixを評価",
+        "選抜scoreを記録"
+      ],
+      "inputs": [
+        "completed training runs",
+        "validation seeds"
+      ],
+      "outputs": [
+        "CheckpointScore[]"
+      ],
+      "sourcePaths": [
+        "src/mad_driving/evaluation/selection.py"
+      ],
+      "invariants": [
+        "test episodeを選抜に使わない",
+        "候補集合を完全照合"
+      ],
+      "position": {
+        "x": 1160,
+        "y": 950
+      },
+      "evidence": [
+        "src/mad_driving/evaluation/selection.py"
+      ],
+      "coverageGap": "The score types and deterministic selection logic exist, but formal selection_scores generation is not connected to the CLI/orchestration."
+    },
+    {
+      "id": "checkpoint-selection",
+      "label": "Checkpoint Selection",
+      "category": "learning",
+      "phase": "phase-6",
+      "status": "implemented",
+      "description": "固定tie-breakでpolicy seedごとに1 checkpointを選ぶ。",
+      "responsibilities": [
+        "安全性とrewardで順位付け",
+        "tie-breakを決定論化",
+        "選抜provenanceを保存"
+      ],
+      "inputs": [
+        "CheckpointScore[]"
+      ],
+      "outputs": [
+        "model_selection.csv",
+        "selected_checkpoints.json"
+      ],
+      "sourcePaths": [
+        "src/mad_driving/evaluation/selection.py"
+      ],
+      "invariants": [
+        "formal runは認証済みscore必須",
+        "smokeは未選抜を明示"
+      ],
+      "position": {
+        "x": 1370,
+        "y": 950
+      },
+      "evidence": [
+        "src/mad_driving/evaluation/selection.py"
+      ],
+      "coverageGap": "No checkpoint has been selected for a formal five-policy-seed benchmark."
+    },
+    {
+      "id": "matched-test-episodes",
+      "label": "Matched Test Episodes",
+      "category": "data",
+      "phase": "phase-6",
+      "status": "implemented",
+      "description": "同じscenario cellとtest seedで揃えた方式別episode metrics。",
+      "responsibilities": [
+        "比較keyを完全照合",
+        "track内の方式を対応付け",
+        "欠損episodeを拒否"
+      ],
+      "inputs": [
+        "eval_metrics.csv",
+        "Evaluation Plan"
+      ],
+      "outputs": [
+        "matched method pairs"
+      ],
+      "sourcePaths": [
+        "src/mad_driving/evaluation/compare.py"
+      ],
+      "invariants": [
+        "異なるseedを混ぜない",
+        "decision/system/ablationを分離"
+      ],
+      "position": {
+        "x": 510,
+        "y": 1140
+      },
+      "evidence": [
+        "src/mad_driving/evaluation/compare.py"
+      ],
+      "coverageGap": ""
+    },
+    {
+      "id": "comparison-csv",
+      "label": "Comparison CSV",
+      "category": "observability",
+      "phase": "phase-6",
+      "status": "implemented",
+      "description": "対応のあるtest episodeから方式差と統計量を出力する。",
+      "responsibilities": [
+        "matched differenceを計算",
+        "集約値と区間を記録",
+        "比較provenanceを保持"
+      ],
+      "inputs": [
+        "Matched Test Episodes"
+      ],
+      "outputs": [
+        "metrics/comparison.csv"
+      ],
+      "sourcePaths": [
+        "src/mad_driving/evaluation/compare.py"
+      ],
+      "invariants": [
+        "完全な比較行列のみ公開",
+        "非有限値を拒否"
+      ],
+      "position": {
+        "x": 710,
+        "y": 1140
+      },
+      "evidence": [
+        "src/mad_driving/evaluation/compare.py"
+      ],
+      "coverageGap": ""
+    },
+    {
+      "id": "tensorboard-events",
+      "label": "TensorBoard Events",
+      "category": "observability",
+      "phase": "phase-6",
+      "status": "implemented",
+      "description": "認証済みtraining runから取り込むPPO scalar event stream。",
+      "responsibilities": [
+        "event file identityを固定",
+        "scalar seriesを読み取る",
+        "checkpoint timestepと対応付ける"
+      ],
+      "inputs": [
+        "runs/<run_id>/tensorboard"
+      ],
+      "outputs": [
+        "authenticated scalar events"
+      ],
+      "sourcePaths": [
+        "src/mad_driving/evaluation/training_metrics.py"
+      ],
+      "invariants": [
+        "offline extraction",
+        "source event bytesを変更しない"
+      ],
+      "position": {
+        "x": 930,
+        "y": 1140
+      },
+      "evidence": [
+        "src/mad_driving/evaluation/training_metrics.py"
+      ],
+      "coverageGap": ""
+    },
+    {
+      "id": "training-metrics-csv",
+      "label": "Training Metrics CSV",
+      "category": "observability",
+      "phase": "phase-6",
+      "status": "implemented",
+      "description": "TensorBoard scalarを方式・policy seed・timestep付きCSVへ正規化する。",
+      "responsibilities": [
+        "tagを固定schemaへ変換",
+        "run provenanceを付与",
+        "学習曲線入力を生成"
+      ],
+      "inputs": [
+        "TensorBoard Events"
+      ],
+      "outputs": [
+        "metrics/train_metrics.csv"
+      ],
+      "sourcePaths": [
+        "src/mad_driving/evaluation/training_metrics.py"
+      ],
+      "invariants": [
+        "event順序を決定論化",
+        "NaNと重複stepを拒否"
+      ],
+      "position": {
+        "x": 1160,
+        "y": 1140
+      },
+      "evidence": [
+        "src/mad_driving/evaluation/training_metrics.py"
+      ],
+      "coverageGap": ""
+    },
+    {
+      "id": "persisted-records-frames",
+      "label": "Persisted Records / Frames",
+      "category": "data",
+      "phase": "phase-6",
+      "status": "implemented",
+      "description": "manifest検証済みのstep records、episode summaries、top-down RGB frames、metrics。",
+      "responsibilities": [
+        "offline可視化入力を提供",
+        "frameとstepを対応付け",
+        "source bundleを読み取り専用で扱う"
+      ],
+      "inputs": [
+        "published evaluation bundle"
+      ],
+      "outputs": [
+        "verified records",
+        "verified frames"
+      ],
+      "sourcePaths": [
+        "src/mad_driving/visualization/__init__.py",
+        "src/mad_driving/evaluation/bundle.py"
+      ],
+      "invariants": [
+        "manifest検証前に読まない",
+        "source bundleを上書きしない"
+      ],
+      "position": {
+        "x": 1370,
+        "y": 1140
+      },
+      "evidence": [
+        "src/mad_driving/visualization/__init__.py",
+        "src/mad_driving/evaluation/bundle.py"
+      ],
+      "coverageGap": ""
+    },
+    {
+      "id": "report-artifacts",
+      "label": "Plots + GIFs + Markdown Report",
+      "category": "observability",
+      "phase": "phase-6",
+      "status": "implemented",
+      "description": "保存済みrecordsとframesだけから比較plot、episode GIF、Markdown reportを生成する。",
+      "responsibilities": [
+        "6種のPNG plotを生成",
+        "step同期GIFを生成",
+        "provenance付きreportを生成"
+      ],
+      "inputs": [
+        "Persisted Records / Frames"
+      ],
+      "outputs": [
+        "plots/*.png",
+        "renders/*.gif",
+        "comparison_report.md"
+      ],
+      "sourcePaths": [
+        "src/mad_driving/visualization/plots.py",
+        "src/mad_driving/visualization/overlay.py",
+        "src/mad_driving/visualization/report.py"
+      ],
+      "invariants": [
+        "MetaDriveなしでoffline生成",
+        "表示値はpersisted record由来"
+      ],
+      "position": {
+        "x": 1580,
+        "y": 1140
+      },
+      "evidence": [
+        "src/mad_driving/visualization/plots.py",
+        "src/mad_driving/visualization/overlay.py",
+        "src/mad_driving/visualization/report.py"
+      ],
+      "coverageGap": "Only smoke-labelled reports have been generated; no formal research report exists."
+    },
+    {
+      "id": "staging-bundle",
+      "label": "Staging Bundle",
+      "category": "orchestration",
+      "phase": "phase-6",
+      "status": "implemented",
+      "description": "完成前のepisodeと最終評価成果物を非公開の兄弟directoryへ構築する。",
+      "responsibilities": [
+        "private stagingを作成",
+        "全artifactを組み立て",
+        "失敗時に未完成結果を公開しない"
+      ],
+      "inputs": [
+        "authenticated sources",
+        "evaluation outputs"
+      ],
+      "outputs": [
+        ".<name>.staging-*"
+      ],
+      "sourcePaths": [
+        "src/mad_driving/evaluation/workspace.py",
+        "src/mad_driving/evaluation/bundle.py"
+      ],
+      "invariants": [
+        "既存出力を上書きしない",
+        "staging外へ書かない"
+      ],
+      "position": {
+        "x": 1790,
+        "y": 1140
+      },
+      "evidence": [
+        "src/mad_driving/evaluation/workspace.py",
+        "src/mad_driving/evaluation/bundle.py"
+      ],
+      "coverageGap": ""
+    },
+    {
+      "id": "bundle-validation-manifest",
+      "label": "Validation + SHA-256 Manifest",
+      "category": "safety",
+      "phase": "phase-6",
+      "status": "implemented",
+      "description": "artifact集合、schema、cross-file provenanceを検証し、各fileのSHA-256 manifestを確定する。",
+      "responsibilities": [
+        "bundle completenessを検証",
+        "path境界を検証",
+        "evaluation_manifest.jsonを生成・再検証"
+      ],
+      "inputs": [
+        "Staging Bundle"
+      ],
+      "outputs": [
+        "evaluation_manifest.json",
+        "verified staging bundle"
+      ],
+      "sourcePaths": [
+        "src/mad_driving/evaluation/bundle.py",
+        "src/mad_driving/visualization/__init__.py"
+      ],
+      "invariants": [
+        "symlink/reparse pointを拒否",
+        "manifest自身以外をhashで拘束"
+      ],
+      "position": {
+        "x": 2000,
+        "y": 1140
+      },
+      "evidence": [
+        "src/mad_driving/evaluation/bundle.py",
+        "src/mad_driving/visualization/__init__.py"
+      ],
+      "coverageGap": ""
+    },
+    {
+      "id": "atomic-publication",
+      "label": "Atomic Publication",
+      "category": "orchestration",
+      "phase": "phase-6",
+      "status": "implemented",
+      "description": "完全検証済みstaging bundleだけを最終destinationへno-replaceで公開する。",
+      "responsibilities": [
+        "最終事前検証",
+        "atomic rename",
+        "既存destinationを拒否"
+      ],
+      "inputs": [
+        "verified staging bundle"
+      ],
+      "outputs": [
+        "immutable evaluation bundle"
+      ],
+      "sourcePaths": [
+        "src/mad_driving/evaluation/workspace.py",
+        "src/mad_driving/evaluation/bundle.py"
+      ],
+      "invariants": [
+        "partial bundleを公開しない",
+        "既存成果物を変更しない"
+      ],
+      "position": {
+        "x": 2210,
+        "y": 1140
+      },
+      "evidence": [
+        "src/mad_driving/evaluation/workspace.py",
+        "src/mad_driving/evaluation/bundle.py"
+      ],
+      "coverageGap": "Atomic publication is smoke-verified; no formal five-seed bundle has been published."
+    }
+  ],
+  "edges": [
+    {
+      "id": "config-loader-to-scenario-manager",
+      "source": "config-loader",
+      "target": "scenario-manager",
+      "label": "scenario config",
+      "contract": "validated YAML"
+    },
+    {
+      "id": "config-loader-to-environment-wrapper",
+      "source": "config-loader",
+      "target": "environment-wrapper",
+      "label": "resolved config",
+      "contract": "typed config"
+    },
+    {
+      "id": "config-loader-to-ppo-coordinator",
+      "source": "config-loader",
+      "target": "ppo-coordinator",
+      "label": "PPO config",
+      "contract": "hyperparameters"
+    },
+    {
+      "id": "config-loader-to-safety-shield",
+      "source": "config-loader",
+      "target": "safety-shield",
+      "label": "shield thresholds",
+      "contract": "deterministic limits"
+    },
+    {
+      "id": "scenario-manager-to-metadrive-simulation",
+      "source": "scenario-manager",
+      "target": "metadrive-simulation",
+      "label": "actors & road",
+      "contract": "seeded scenario",
+      "primary": true
+    },
+    {
+      "id": "environment-wrapper-to-scenario-manager",
+      "source": "environment-wrapper",
+      "target": "scenario-manager",
+      "label": "reset(seed)",
+      "contract": "Gymnasium reset"
+    },
+    {
+      "id": "environment-wrapper-to-snapshot-builder",
+      "source": "environment-wrapper",
+      "target": "snapshot-builder",
+      "label": "decision step",
+      "contract": "orchestration"
+    },
+    {
+      "id": "metadrive-simulation-to-snapshot-builder",
+      "source": "metadrive-simulation",
+      "target": "snapshot-builder",
+      "label": "ground-truth state",
+      "contract": "simulator API",
+      "primary": true
+    },
+    {
+      "id": "snapshot-builder-to-scene-snapshot",
+      "source": "snapshot-builder",
+      "target": "scene-snapshot",
+      "label": "build",
+      "contract": "SceneSnapshot",
+      "primary": true
+    },
+    {
+      "id": "scene-snapshot-to-nominal-agent",
+      "source": "scene-snapshot",
+      "target": "nominal-agent",
+      "label": "same snapshot",
+      "contract": "read-only",
+      "primary": true
+    },
+    {
+      "id": "scene-snapshot-to-hazard-agent",
+      "source": "scene-snapshot",
+      "target": "hazard-agent",
+      "label": "same snapshot",
+      "contract": "read-only",
+      "primary": true
+    },
+    {
+      "id": "scene-snapshot-to-rule-agent",
+      "source": "scene-snapshot",
+      "target": "rule-agent",
+      "label": "same snapshot",
+      "contract": "read-only",
+      "primary": true
+    },
+    {
+      "id": "scene-snapshot-to-critic-agent",
+      "source": "scene-snapshot",
+      "target": "critic-agent",
+      "label": "context",
+      "contract": "read-only"
+    },
+    {
+      "id": "nominal-agent-to-risk-claims",
+      "source": "nominal-agent",
+      "target": "risk-claims",
+      "label": "RiskClaim",
+      "contract": "normal risk",
+      "primary": true
+    },
+    {
+      "id": "hazard-agent-to-risk-claims",
+      "source": "hazard-agent",
+      "target": "risk-claims",
+      "label": "RiskClaim",
+      "contract": "worst case",
+      "primary": true
+    },
+    {
+      "id": "rule-agent-to-risk-claims",
+      "source": "rule-agent",
+      "target": "risk-claims",
+      "label": "RiskClaim",
+      "contract": "hard constraints",
+      "primary": true
+    },
+    {
+      "id": "risk-claims-to-critic-agent",
+      "source": "risk-claims",
+      "target": "critic-agent",
+      "label": "cross review",
+      "contract": "RiskClaim[]",
+      "primary": true
+    },
+    {
+      "id": "scene-snapshot-to-observation-builder",
+      "source": "scene-snapshot",
+      "target": "observation-builder",
+      "label": "ego + history",
+      "contract": "6 + 2 dims"
+    },
+    {
+      "id": "risk-claims-to-observation-builder",
+      "source": "risk-claims",
+      "target": "observation-builder",
+      "label": "agent features",
+      "contract": "4 + 5 + 3 dims",
+      "primary": true
+    },
+    {
+      "id": "critic-agent-to-observation-builder",
+      "source": "critic-agent",
+      "target": "observation-builder",
+      "label": "CriticReview",
+      "contract": "4 dims",
+      "primary": true
+    },
+    {
+      "id": "observation-builder-to-ppo-coordinator",
+      "source": "observation-builder",
+      "target": "ppo-coordinator",
+      "label": "24D observation",
+      "contract": "finite float32",
+      "primary": true
+    },
+    {
+      "id": "ppo-coordinator-to-action-mapping",
+      "source": "ppo-coordinator",
+      "target": "action-mapping",
+      "label": "raw action",
+      "contract": "Discrete(4)",
+      "primary": true
+    },
+    {
+      "id": "action-mapping-to-safety-shield",
+      "source": "action-mapping",
+      "target": "safety-shield",
+      "label": "requested action",
+      "contract": "action + target speed",
+      "primary": true
+    },
+    {
+      "id": "scene-snapshot-to-safety-shield",
+      "source": "scene-snapshot",
+      "target": "safety-shield",
+      "label": "physics state",
+      "contract": "SceneSnapshot"
+    },
+    {
+      "id": "risk-claims-to-safety-shield",
+      "source": "risk-claims",
+      "target": "safety-shield",
+      "label": "risk constraints",
+      "contract": "RiskClaim[]"
+    },
+    {
+      "id": "critic-agent-to-safety-shield",
+      "source": "critic-agent",
+      "target": "safety-shield",
+      "label": "unresolved conflict",
+      "contract": "CriticReview"
+    },
+    {
+      "id": "safety-shield-to-lane-policy",
+      "source": "safety-shield",
+      "target": "lane-policy",
+      "label": "executed action",
+      "contract": "safe target speed",
+      "primary": true
+    },
+    {
+      "id": "lane-policy-to-metadrive-simulation",
+      "source": "lane-policy",
+      "target": "metadrive-simulation",
+      "label": "steer / throttle / brake",
+      "contract": "normalized MetaDrive action",
+      "primary": true,
+      "cycle": true
+    },
+    {
+      "id": "environment-wrapper-to-reward-engine",
+      "source": "environment-wrapper",
+      "target": "reward-engine",
+      "label": "transition",
+      "contract": "s, a, s'"
+    },
+    {
+      "id": "reward-engine-to-training-pipeline",
+      "source": "reward-engine",
+      "target": "training-pipeline",
+      "label": "reward",
+      "contract": "scalar + components"
+    },
+    {
+      "id": "environment-wrapper-to-training-pipeline",
+      "source": "environment-wrapper",
+      "target": "training-pipeline",
+      "label": "rollout",
+      "contract": "Gymnasium API"
+    },
+    {
+      "id": "training-pipeline-to-ppo-coordinator",
+      "source": "training-pipeline",
+      "target": "ppo-coordinator",
+      "label": "weight update",
+      "contract": "after rollout only",
+      "cycle": true
+    },
+    {
+      "id": "environment-wrapper-to-decision-trace",
+      "source": "environment-wrapper",
+      "target": "decision-trace",
+      "label": "step trace",
+      "contract": "DecisionTrace"
+    },
+    {
+      "id": "decision-trace-to-run-directory",
+      "source": "decision-trace",
+      "target": "run-directory",
+      "label": "JSONL",
+      "contract": "trace schema"
+    },
+    {
+      "id": "training-pipeline-to-run-directory",
+      "source": "training-pipeline",
+      "target": "run-directory",
+      "label": "checkpoints & metrics",
+      "contract": "run artifacts"
+    },
+    {
+      "id": "run-directory-to-evaluation-pipeline",
+      "source": "run-directory",
+      "target": "evaluation-pipeline",
+      "label": "checkpoint + traces",
+      "contract": "saved artifacts"
+    },
+    {
+      "id": "evaluation-pipeline-to-visualization-pipeline",
+      "source": "evaluation-pipeline",
+      "target": "visualization-pipeline",
+      "label": "metrics",
+      "contract": "CSV + report"
+    },
+    {
+      "id": "decision-trace-to-visualization-pipeline",
+      "source": "decision-trace",
+      "target": "visualization-pipeline",
+      "label": "overlay data",
+      "contract": "step-aligned trace"
+    },
+    {
+      "id": "visualization-pipeline-to-run-directory",
+      "source": "visualization-pipeline",
+      "target": "run-directory",
+      "label": "GIF & plots",
+      "contract": "rendered artifacts"
+    },
+    {
+      "id": "method-profile-to-agent-suite",
+      "source": "method-profile",
+      "target": "agent-suite",
+      "label": "resolve method",
+      "contract": "MethodProfile",
+      "primary": true
+    },
+    {
+      "id": "agent-suite-to-critic-agent",
+      "source": "agent-suite",
+      "target": "critic-agent",
+      "label": "cross review",
+      "contract": "CriticReview",
+      "primary": true
+    },
+    {
+      "id": "agent-suite-to-safety-shield",
+      "source": "agent-suite",
+      "target": "safety-shield",
+      "label": "claims + failures",
+      "contract": "AgentAnalysisResult",
+      "primary": true
+    },
+    {
+      "id": "evaluation-plan-to-policy-adapter",
+      "source": "evaluation-plan",
+      "target": "policy-adapter",
+      "label": "run spec + checkpoint",
+      "contract": "EvaluationRunSpec",
+      "primary": true
+    },
+    {
+      "id": "policy-adapter-to-environment-wrapper",
+      "source": "policy-adapter",
+      "target": "environment-wrapper",
+      "label": "Discrete(4) action",
+      "contract": "EvaluationPolicy",
+      "primary": true
+    },
+    {
+      "id": "decision-trace-to-step-jsonl",
+      "source": "decision-trace",
+      "target": "step-jsonl",
+      "label": "decision evidence",
+      "contract": "DecisionTrace",
+      "primary": true
+    },
+    {
+      "id": "oracle-truth-to-step-jsonl",
+      "source": "oracle-truth",
+      "target": "step-jsonl",
+      "label": "physical truth",
+      "contract": "PrivilegedWorldState",
+      "primary": true
+    },
+    {
+      "id": "step-jsonl-to-episode-metrics",
+      "source": "step-jsonl",
+      "target": "episode-metrics",
+      "label": "strict reduction",
+      "contract": "EvaluationStepRecord[]",
+      "primary": true
+    },
+    {
+      "id": "validation-matrix-to-checkpoint-selection",
+      "source": "validation-matrix",
+      "target": "checkpoint-selection",
+      "label": "rank candidates",
+      "contract": "CheckpointScore[]",
+      "primary": true
+    },
+    {
+      "id": "matched-test-episodes-to-comparison-csv",
+      "source": "matched-test-episodes",
+      "target": "comparison-csv",
+      "label": "paired comparison",
+      "contract": "matched EpisodeMetrics",
+      "primary": true
+    },
+    {
+      "id": "tensorboard-events-to-training-metrics-csv",
+      "source": "tensorboard-events",
+      "target": "training-metrics-csv",
+      "label": "offline extract",
+      "contract": "scalar events",
+      "primary": true
+    },
+    {
+      "id": "persisted-records-frames-to-report-artifacts",
+      "source": "persisted-records-frames",
+      "target": "report-artifacts",
+      "label": "offline render",
+      "contract": "verified records + frames",
+      "primary": true
+    },
+    {
+      "id": "staging-bundle-to-bundle-validation-manifest",
+      "source": "staging-bundle",
+      "target": "bundle-validation-manifest",
+      "label": "validate and hash",
+      "contract": "complete staged artifacts",
+      "primary": true
+    },
+    {
+      "id": "bundle-validation-manifest-to-atomic-publication",
+      "source": "bundle-validation-manifest",
+      "target": "atomic-publication",
+      "label": "publish verified bundle",
+      "contract": "SHA-256-bound bundle",
+      "primary": true
+    }
+  ],
+  "flows": [
+    {
+      "id": "decision-cycle",
+      "label": "Decision cycle",
+      "description": "各decision stepでSnapshotを共有し、専門Agentの独立分析、Criticレビュー、学習判断、安全上書き、低レベル制御を順に実行する。",
+      "actor": "MetaDrive Environment / PPO Coordinator",
+      "trigger": "MetaDriveがdecision stepのシミュレーション状態を公開する。",
+      "outcome": "安全側へfilterされた縦方向Actionと決定論的なsteeringで、次のシミュレーション状態へ進む。",
+      "evidence": [
+        "docs/multi_agent_driving_mvp_spec.md",
+        "src/mad_driving/envs/multi_agent_speed_env.py",
+        "src/mad_driving/agents/suite.py",
+        "src/mad_driving/coordinator/observation.py",
+        "src/mad_driving/safety/shield.py",
+        "tests/unit/envs/test_multi_agent_speed_env.py"
+      ],
+      "stages": [
+        {
+          "id": "observe",
+          "label": "Observe",
+          "description": "シミュレータの状態を正規化し、全Agentが共有する不変Snapshotを作る。",
+          "nodeIds": [
+            "metadrive-simulation",
+            "snapshot-builder",
+            "scene-snapshot"
+          ],
+          "backstage": "MetaDrive state → Snapshot Builder → SceneSnapshot",
+          "produces": [
+            "時刻・Ego・周辺Actorを持つ構造化Snapshot"
+          ]
+        },
+        {
+          "id": "analyze",
+          "label": "Analyze & review",
+          "description": "Nominal / Hazard / Ruleが独立分析し、Criticが矛盾と見落としを検査する。",
+          "nodeIds": [
+            "nominal-agent",
+            "hazard-agent",
+            "rule-agent",
+            "risk-claims",
+            "critic-agent"
+          ],
+          "backstage": "3つの観点をRiskClaimへ統一し、CriticReviewを生成",
+          "produces": [
+            "速度制約・危険度・信頼度・根拠・レビュー"
+          ]
+        },
+        {
+          "id": "decide",
+          "label": "Decide",
+          "description": "固定長Observationへ統合し、PPO Coordinatorが4段階の速度Actionを選ぶ。",
+          "nodeIds": [
+            "observation-builder",
+            "ppo-coordinator",
+            "action-mapping"
+          ],
+          "backstage": "RiskClaims + CriticReview + history → 24D float32 observation",
+          "produces": [
+            "Discrete(4)の速度判断と目標速度"
+          ]
+        },
+        {
+          "id": "protect",
+          "label": "Protect & act",
+          "description": "Safety Shieldが危険Actionを安全側へ上書きし、決定論Policyが車両を制御する。",
+          "nodeIds": [
+            "safety-shield",
+            "lane-policy",
+            "metadrive-simulation"
+          ],
+          "backstage": "Action filter → speed PID / lane keeping → MetaDrive control",
+          "produces": [
+            "shield介入情報と次のシミュレーション状態"
+          ]
+        }
+      ],
+      "nodeIds": [
+        "metadrive-simulation",
+        "snapshot-builder",
+        "scene-snapshot",
+        "nominal-agent",
+        "hazard-agent",
+        "rule-agent",
+        "critic-agent",
+        "risk-claims",
+        "observation-builder",
+        "ppo-coordinator",
+        "action-mapping",
+        "safety-shield",
+        "lane-policy"
+      ],
+      "edgeIds": [
+        "metadrive-simulation-to-snapshot-builder",
+        "snapshot-builder-to-scene-snapshot",
+        "scene-snapshot-to-nominal-agent",
+        "scene-snapshot-to-hazard-agent",
+        "scene-snapshot-to-rule-agent",
+        "scene-snapshot-to-critic-agent",
+        "nominal-agent-to-risk-claims",
+        "hazard-agent-to-risk-claims",
+        "rule-agent-to-risk-claims",
+        "risk-claims-to-critic-agent",
+        "scene-snapshot-to-observation-builder",
+        "risk-claims-to-observation-builder",
+        "critic-agent-to-observation-builder",
+        "observation-builder-to-ppo-coordinator",
+        "ppo-coordinator-to-action-mapping",
+        "action-mapping-to-safety-shield",
+        "scene-snapshot-to-safety-shield",
+        "risk-claims-to-safety-shield",
+        "critic-agent-to-safety-shield",
+        "safety-shield-to-lane-policy",
+        "lane-policy-to-metadrive-simulation"
+      ],
+      "safety": [
+        "4 Agentは同じSceneSnapshotを独立に分析し、RiskClaimで通信する",
+        "Agent例外・欠損値は安全側の入力へfallbackする",
+        "Safety Shieldは学習モデルから独立し、危険側へActionを変更しない",
+        "ObservationにNaN・infがあればSTOPへfallbackする"
+      ],
+      "coverageGap": "Camera perception, natural-language Agent debate, V2X, and multiple ego vehicles are outside this MVP.",
+      "outputs": [
+        "Discrete(4) requested action",
+        "Safety-filtered executed action",
+        "DecisionTrace"
+      ]
+    },
+    {
+      "id": "training-loop",
+      "label": "Training loop",
+      "description": "環境からrolloutを収集し、rewardを使ってCoordinatorのみを更新する。",
+      "actor": "Training Pipeline / PPO Coordinator",
+      "trigger": "学習runを開始し、Environment Wrapperをresetする。",
+      "outcome": "rollout境界でCoordinatorの重みを更新し、checkpointとmetricsを保存する。",
+      "evidence": [
+        "docs/multi_agent_driving_mvp_spec.md",
+        "src/mad_driving/training/train.py",
+        "src/mad_driving/training/callbacks.py",
+        "src/mad_driving/envs/reward.py",
+        "tests/integration/test_ppo_checkpoint.py"
+      ],
+      "stages": [
+        {
+          "id": "rollout",
+          "label": "Collect rollout",
+          "description": "Wrapperがstepを実行し、Observation・Action・終了状態をrollout bufferへ蓄積する。",
+          "nodeIds": [
+            "environment-wrapper",
+            "ppo-coordinator"
+          ],
+          "backstage": "Gymnasium reset/step + PPO policy inference",
+          "produces": [
+            "rollout transitionsとepisode info"
+          ]
+        },
+        {
+          "id": "score",
+          "label": "Score behavior",
+          "description": "走行の安全性・効率・快適性を成分別Rewardへ変換する。",
+          "nodeIds": [
+            "reward-engine",
+            "environment-wrapper"
+          ],
+          "backstage": "reward componentsを合成しinfoへ記録",
+          "produces": [
+            "scalar reward + reward_components"
+          ]
+        },
+        {
+          "id": "update",
+          "label": "Update at boundary",
+          "description": "rollout収集後だけPPO更新を実行し、次の収集へ進む。",
+          "nodeIds": [
+            "training-pipeline",
+            "ppo-coordinator"
+          ],
+          "backstage": "advantages / loss / optimizer step / checkpoint",
+          "produces": [
+            "更新済みCoordinator weightsとtraining metrics"
+          ]
+        }
+      ],
+      "nodeIds": [
+        "environment-wrapper",
+        "reward-engine",
+        "training-pipeline",
+        "ppo-coordinator"
+      ],
+      "edgeIds": [
+        "environment-wrapper-to-reward-engine",
+        "reward-engine-to-training-pipeline",
+        "environment-wrapper-to-training-pipeline",
+        "training-pipeline-to-ppo-coordinator"
+      ],
+      "safety": [
+        "学習対象はPPO Coordinatorのみ",
+        "1エピソード途中ではモデル重みを更新しない",
+        "Observationは常に24次元の有限値",
+        "Rewardの将来情報はObservationへ混入させない"
+      ],
+      "coverageGap": "Formal training over policy seeds 42-46 has not been run; only the six single-seed smoke profiles completed 6,144 transitions each.",
+      "outputs": [
+        "Authenticated checkpoints",
+        "Training metrics",
+        "Run metadata"
+      ]
+    },
+    {
+      "id": "evidence-loop",
+      "label": "Evidence & evaluation",
+      "description": "全判断をtraceへ保存し、同一eval seedsで比較、GIFとplotへ変換する。",
+      "actor": "Evaluation Pipeline / Researcher",
+      "trigger": "checkpointまたはbaselineを、固定したevaluation seedsで実行する。",
+      "outcome": "比較可能なJSONL / CSV / plots / GIF / reportをrun directoryへ保存する。",
+      "evidence": [
+        "docs/multi_agent_driving_mvp_spec.md",
+        "docs/phase6_implementation_log.md",
+        "src/mad_driving/evaluation/runner.py",
+        "src/mad_driving/evaluation/compare.py",
+        "src/mad_driving/evaluation/bundle.py",
+        "tests/integration/test_phase6_pipeline.py"
+      ],
+      "stages": [
+        {
+          "id": "capture",
+          "label": "Capture evidence",
+          "description": "各decision stepの入力・Agent出力・Action・Shield介入をtraceへ記録する。",
+          "nodeIds": [
+            "environment-wrapper",
+            "decision-trace"
+          ],
+          "backstage": "step result → DecisionTrace schema → JSONL writer",
+          "produces": [
+            "再生可能なstep-aligned trace"
+          ]
+        },
+        {
+          "id": "persist",
+          "label": "Persist run",
+          "description": "checkpoint、設定、metrics、traceを1つのrun directoryへ集約する。",
+          "nodeIds": [
+            "decision-trace",
+            "run-directory"
+          ],
+          "backstage": "run idとseedでartifact pathsを固定",
+          "produces": [
+            "比較単位となるrun artifacts"
+          ]
+        },
+        {
+          "id": "compare",
+          "label": "Compare variants",
+          "description": "同一seedでbaseline・ablation・Proposedの安全性と効率を集計する。",
+          "nodeIds": [
+            "run-directory",
+            "evaluation-pipeline"
+          ],
+          "backstage": "checkpoint load → seeded evaluation → metrics aggregation",
+          "produces": [
+            "CSV metricsとcomparison report"
+          ]
+        },
+        {
+          "id": "explain",
+          "label": "Explain results",
+          "description": "metricsとtraceをplot、GIF overlay、失敗事例へ変換する。",
+          "nodeIds": [
+            "evaluation-pipeline",
+            "visualization-pipeline",
+            "run-directory"
+          ],
+          "backstage": "metrics + trace → plots / GIF / report assets",
+          "produces": [
+            "人が検証できる可視化Evidence"
+          ]
+        }
+      ],
+      "nodeIds": [
+        "environment-wrapper",
+        "decision-trace",
+        "run-directory",
+        "evaluation-pipeline",
+        "visualization-pipeline"
+      ],
+      "edgeIds": [
+        "environment-wrapper-to-decision-trace",
+        "decision-trace-to-run-directory",
+        "run-directory-to-evaluation-pipeline",
+        "evaluation-pipeline-to-visualization-pipeline",
+        "decision-trace-to-visualization-pipeline",
+        "visualization-pipeline-to-run-directory"
+      ],
+      "safety": [
+        "B0 / B1 / B2 / Proposedを同一eval seedsで比較する",
+        "DecisionTraceはstep単位でschema準拠のJSONLへ保存する",
+        "GIF overlayとmetricsは同じstep idへ整列する",
+        "欠損artifactは評価成功として扱わず、coverage gapとして残す"
+      ],
+      "coverageGap": "The inspected 55-episode smoke bundle verifies the pipeline only and is not a formal research result.",
+      "outputs": [
+        "Strict JSONL",
+        "CSV metrics",
+        "PNG/GIF",
+        "Markdown report"
+      ]
+    },
+    {
+      "id": "phase6-evaluation-runtime",
+      "label": "Phase 6 / Evaluation runtime",
+      "description": "方式定義と固定評価計画から実MetaDrive episodeを実行し、方式非依存oracleを含むstep evidenceをmetricsとcheckpoint選抜へ変換する。",
+      "actor": "Evaluation Plan / Policy Adapter / MultiAgentSpeedEnv",
+      "trigger": "認証済みtraining runと固定validation/test matrixを評価CLIへ渡す。",
+      "outcome": "方式・track・scenario・seedが拘束されたEpisode Metricsと、formal時は選抜済みcheckpointを得る。",
+      "evidence": [
+        "docs/superpowers/specs/2026-07-23-phase6-evaluation-design.md",
+        "docs/superpowers/plans/2026-07-23-phase6-evaluation.md",
+        "docs/phase6_implementation_log.md",
+        "src/mad_driving/evaluation/plans.py",
+        "src/mad_driving/evaluation/policies.py",
+        "src/mad_driving/evaluation/runner.py",
+        "src/mad_driving/evaluation/selection.py",
+        "tests/integration/test_phase6_metadrive_headless.py"
+      ],
+      "stages": [
+        {
+          "id": "compose-method",
+          "label": "Method Profile → AgentSuite / Critic / Shield",
+          "description": "中央Method ProfileからAgentSuite、Critic利用、Shield mode、期待Agent集合を解決する。",
+          "nodeIds": [
+            "method-profile",
+            "agent-suite",
+            "critic-agent",
+            "safety-shield"
+          ],
+          "backstage": "get_method_profile → AgentSuite.from_config → Critic review / SafetyShield",
+          "produces": [
+            "比較方式ごとの認証可能なruntime topology"
+          ]
+        },
+        {
+          "id": "execute-plan",
+          "label": "Evaluation Plan → Policy Adapter → MultiAgentSpeedEnv",
+          "description": "固定run specでB0またはPPO policyを組み立て、予定scenarioとShield modeを環境へ設定して走行する。",
+          "nodeIds": [
+            "evaluation-plan",
+            "policy-adapter",
+            "environment-wrapper"
+          ],
+          "backstage": "EvaluationRunSpec → VisibleTtcRulePolicy / PpoPolicyAdapter → MultiAgentSpeedEnv",
+          "produces": [
+            "track・method・scenario cell・test seedに拘束されたepisode"
+          ]
+        },
+        {
+          "id": "reduce-evidence",
+          "label": "DecisionTrace + Oracle Truth → Step JSONL → Episode Metrics",
+          "description": "各stepの判断根拠と方式非依存物理truthをstrict recordへ保存し、episode単位の指標へ還元する。",
+          "nodeIds": [
+            "decision-trace",
+            "oracle-truth",
+            "step-jsonl",
+            "episode-metrics"
+          ],
+          "backstage": "DecisionTrace + PrivilegedWorldState → EvaluationStepRecord JSONL → reduce_episode",
+          "produces": [
+            "episode trace、summary、metrics/eval_metrics.csv"
+          ]
+        },
+        {
+          "id": "select-checkpoint",
+          "label": "Validation Matrix → Checkpoint Selection",
+          "description": "固定validation suiteの認証済みscoreだけでpolicy seedごとのcheckpointを決定する。",
+          "nodeIds": [
+            "validation-matrix",
+            "checkpoint-selection"
+          ],
+          "backstage": "CheckpointCandidate inventory → CheckpointScore matrix → deterministic tie-break",
+          "produces": [
+            "model_selection.csv と selected_checkpoints.json"
+          ]
+        }
+      ],
+      "nodeIds": [
+        "method-profile",
+        "agent-suite",
+        "critic-agent",
+        "safety-shield",
+        "evaluation-plan",
+        "policy-adapter",
+        "environment-wrapper",
+        "decision-trace",
+        "oracle-truth",
+        "step-jsonl",
+        "episode-metrics",
+        "validation-matrix",
+        "checkpoint-selection"
+      ],
+      "edgeIds": [
+        "environment-wrapper-to-decision-trace",
+        "method-profile-to-agent-suite",
+        "agent-suite-to-critic-agent",
+        "agent-suite-to-safety-shield",
+        "evaluation-plan-to-policy-adapter",
+        "policy-adapter-to-environment-wrapper",
+        "decision-trace-to-step-jsonl",
+        "oracle-truth-to-step-jsonl",
+        "step-jsonl-to-episode-metrics",
+        "validation-matrix-to-checkpoint-selection"
+      ],
+      "safety": [
+        "Method Profileが意図的ablationとruntime Agent failureを分離する",
+        "Policy Adapterはcheckpoint hash、method profile、24D schemaを認証する",
+        "Oracle TruthはAgent Claimと分離し、policy observationへ入れない",
+        "validation seedでcheckpointを選び、test seedを選抜へ使わない"
+      ],
+      "coverageGap": "Formal fixed-validation selection_scores generation and its CLI/orchestration connection remain incomplete; the formal five-policy-seed run is fail-closed and has not been executed.",
+      "outputs": [
+        "EpisodeMetrics",
+        "Authenticated checkpoint selection artifacts when scores are supplied"
+      ]
+    },
+    {
+      "id": "phase6-artifact-publication",
+      "label": "Phase 6 / Evidence publication",
+      "description": "matched test結果とtraining events、保存済みrecords/framesをoffline成果物へ変換し、完全検証済みbundleだけをatomic publishする。",
+      "actor": "Comparison / Visualization / Evaluation Bundle",
+      "trigger": "全予定episodeと認証済みtraining sourceがprivate stagingへ揃う。",
+      "outcome": "comparison CSV、training metrics、PNG、GIF、Markdown reportをSHA-256 manifest付きでno-replace公開する。",
+      "evidence": [
+        "docs/superpowers/specs/2026-07-23-phase6-evaluation-design.md",
+        "docs/phase6_implementation_log.md",
+        "src/mad_driving/evaluation/bundle.py",
+        "src/mad_driving/evaluation/workspace.py",
+        "src/mad_driving/visualization/report.py",
+        "tests/integration/test_phase6_pipeline.py"
+      ],
+      "stages": [
+        {
+          "id": "compare-tests",
+          "label": "Matched Test Episodes → Comparison CSV",
+          "description": "方式間で一致するtest episodeだけを対応付け、差分と統計量をCSVへ固定する。",
+          "nodeIds": [
+            "matched-test-episodes",
+            "comparison-csv"
+          ],
+          "backstage": "track + scenario_cell_id + test_seed matching → paired aggregation",
+          "produces": [
+            "metrics/comparison.csv"
+          ]
+        },
+        {
+          "id": "extract-training",
+          "label": "TensorBoard Events → Training Metrics CSV",
+          "description": "認証済みevent bytesから学習曲線用scalarをoffline抽出する。",
+          "nodeIds": [
+            "tensorboard-events",
+            "training-metrics-csv"
+          ],
+          "backstage": "event inventory / SHA-256 → scalar normalization → deterministic CSV order",
+          "produces": [
+            "metrics/train_metrics.csv"
+          ]
+        },
+        {
+          "id": "render-evidence",
+          "label": "Persisted Records / Frames → Plots + GIFs + Markdown Report",
+          "description": "保存済みのstrict recordsとRGB framesだけから人が検証できる成果物を作る。",
+          "nodeIds": [
+            "persisted-records-frames",
+            "report-artifacts"
+          ],
+          "backstage": "verified metrics / traces / frame index → plots, overlay GIF, report links",
+          "produces": [
+            "plots/*.png、renders/*.gif、comparison_report.md"
+          ]
+        },
+        {
+          "id": "publish-bundle",
+          "label": "Staging Bundle → Validation + SHA-256 Manifest → Atomic Publication",
+          "description": "全成果物とcross-file provenanceを検証・hash拘束し、完成bundleだけを公開する。",
+          "nodeIds": [
+            "staging-bundle",
+            "bundle-validation-manifest",
+            "atomic-publication"
+          ],
+          "backstage": "private sibling staging → strict validation / evaluation_manifest.json → atomic no-replace rename",
+          "produces": [
+            "改ざん検知可能なimmutable evaluation bundle"
+          ]
+        }
+      ],
+      "nodeIds": [
+        "matched-test-episodes",
+        "comparison-csv",
+        "tensorboard-events",
+        "training-metrics-csv",
+        "persisted-records-frames",
+        "report-artifacts",
+        "staging-bundle",
+        "bundle-validation-manifest",
+        "atomic-publication"
+      ],
+      "edgeIds": [
+        "matched-test-episodes-to-comparison-csv",
+        "tensorboard-events-to-training-metrics-csv",
+        "persisted-records-frames-to-report-artifacts",
+        "staging-bundle-to-bundle-validation-manifest",
+        "bundle-validation-manifest-to-atomic-publication"
+      ],
+      "safety": [
+        "比較は同じscenario cellとtest seedのepisodeだけを対応付ける",
+        "TensorBoard eventとsource bundleを変更せずoffline処理する",
+        "manifest検証前のrecord/frameを可視化へ渡さない",
+        "既存destinationとpartial stagingを公開しない"
+      ],
+      "coverageGap": "No formal five-seed comparison bundle exists. Smoke outputs must remain labelled SMOKE - NOT A RESEARCH RESULT.",
+      "outputs": [
+        "No-replace evaluation bundle",
+        "SHA-256 manifest",
+        "CSV/JSONL/PNG/GIF/Markdown artifacts"
+      ]
+    }
+  ],
+  "phases": [
+    {
+      "id": "phase-1",
+      "label": "基盤",
+      "deliverables": [
+        "pyproject / config loader / interfaces",
+        "MetaDrive reset-step-close",
+        "SceneSnapshot",
+        "headless smoke test"
+      ],
+      "description": "pyproject / config loader / interfaces / MetaDrive reset-step-close / SceneSnapshot / headless smoke test"
+    },
+    {
+      "id": "phase-2",
+      "label": "決定論Agent",
+      "deliverables": [
+        "Nominal / Hazard / Rule / Critic",
+        "Decision Trace"
+      ],
+      "description": "Nominal / Hazard / Rule / Critic / Decision Trace"
+    },
+    {
+      "id": "phase-3",
+      "label": "制御とShield",
+      "deliverables": [
+        "lane keeping",
+        "speed PID",
+        "4 Action mapping",
+        "Safety Shield"
+      ],
+      "description": "lane keeping / speed PID / 4 Action mapping / Safety Shield"
+    },
+    {
+      "id": "phase-4",
+      "label": "RL環境",
+      "deliverables": [
+        "24D observation",
+        "Reward",
+        "Gymnasium checker",
+        "PPO training"
+      ],
+      "description": "24D observation / Reward / Gymnasium checker / PPO training"
+    },
+    {
+      "id": "phase-5",
+      "label": "シナリオ",
+      "deliverables": [
+        "Lead Brake",
+        "Cut-in",
+        "Occluded Crossing",
+        "Curriculum"
+      ],
+      "description": "Lead Brake / Cut-in / Occluded Crossing / Curriculum"
+    },
+    {
+      "id": "phase-6",
+      "label": "評価",
+      "deliverables": [
+        "baselines / ablations",
+        "metrics",
+        "plots",
+        "GIF overlay",
+        "comparison report"
+      ],
+      "description": "baselines / ablations / metrics / plots / GIF overlay / comparison report"
+    }
+  ],
+  "systemConstraints": [
+    "外部LLM API・VLM・自然言語によるAgent討論をMVPに含めない",
+    "Agent間通信は構造化データのみ",
+    "学習対象は速度判断を統合するCoordinatorのみ",
+    "エピソード途中でモデル重みを更新しない",
+    "Safety Shieldは学習モデルと独立した決定論モジュール",
+    "RGB画像を学習入力に使わない",
+    "単一自車、固定横方向制御、4段階速度判断に限定"
+  ],
+  "acceptanceCriteria": [
+    "Observation schema v1 remains finite float32 with shape (24,)",
+    "Action space remains KEEP / SLOW / PREPARE_STOP / STOP",
+    "Reward consumes privileged oracle state, not Agent Claims",
+    "Intentional ablation is distinct from runtime Agent failure",
+    "Safety Shield retains final authority in enabled tracks",
+    "Smoke artifacts are never represented as formal research results",
+    "Formal runs require fixed-validation checkpoint selection and independent test seeds"
+  ],
+  "sources": [
+    {
+      "path": "docs/multi_agent_driving_mvp_spec.md",
+      "kind": "top-level specification"
+    },
+    {
+      "path": "docs/superpowers/specs/2026-07-23-phase6-evaluation-design.md",
+      "kind": "Phase 6 approved design"
+    },
+    {
+      "path": "docs/superpowers/plans/2026-07-23-phase6-evaluation.md",
+      "kind": "Phase 6 implementation plan"
+    },
+    {
+      "path": "docs/phase6_implementation_log.md",
+      "kind": "verified implementation evidence"
+    },
+    {
+      "path": "src/mad_driving",
+      "kind": "implementation"
+    },
+    {
+      "path": "tests",
+      "kind": "verification"
+    }
+  ]
+}
